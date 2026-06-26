@@ -1,0 +1,63 @@
+# Copyright 2025 European Union
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "cop_ard_app"
+authors = [{ name = "B-Open" }]
+dynamic = ["version", "description"]
+readme = "README.md"
+license = { file = "LICENSE" }
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development",
+    "Typing :: Typed",
+    "Private :: Do Not Upload",
+]
+requires-python = ">=3.13, <3.14"
+
+# By default, the project template does not rely on any specific
+# version of the EOPF CPM. The source code examples are validated
+# against the latest release.
+# Users are encouraged to fix the EOPF CPM version to make sure to
+# have a stable build environment.
+dependencies = [
+    "cop-ard-core @ git+ssh://git@github.com/bopen/cop-ard-core.git",  # TODO pin
+    "dask",  # TODO pin
+]
+
+[project.optional-dependencies]
+dev = ["ipykernel","matplotlib"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+
+[tool.pytest.ini_options]
+markers = ["integration", "unit", "need_files"]
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+
+# Add the gitlab token in your `.netrc` file to allow `uv lock`
+# s1-ard-core
+[[tool.uv.index]]
+url = "https://gitlab.eopf.copernicus.eu/api/v4/projects/114/packages/pypi/simple"
