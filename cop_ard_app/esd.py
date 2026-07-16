@@ -1,6 +1,3 @@
-from cop_ard_app.ard_utils import wrap
-from cop_ard_app.computation import map, map_blocks
-from cop_ard_app.interf import compute_interf_norm
 import datetime
 import warnings
 from typing import cast
@@ -9,6 +6,10 @@ import numpy as np
 import scipy.optimize
 import xarray as xr
 from numba import njit
+
+from cop_ard_app.ard_utils import wrap
+from cop_ard_app.computation import map, map_blocks
+from cop_ard_app.interf import compute_interf_norm
 
 
 def to_dataset(X, acquisition_date, poly_degree, t0, r0, s_y, s_x):
@@ -136,7 +137,7 @@ def compute_azimuth_shifts(
             # interferogram multilooked and normalized #
             interf0 = compute_interf_norm(reference0.sel(acquisition_date=reference_date).squeeze(), burst0, multilook)
             interf1 = compute_interf_norm(reference1.sel(acquisition_date=reference_date).squeeze(), burst1, multilook)
-    
+
             # coherence computation #
             interf_prod = (interf1 * interf0.conj()).compute()
             coherence_ = abs(interf0)  # based only on one burst

@@ -11,19 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from cop_ard_core.simul import extract_simul_on_radar_chunk
-from cop_ard_app.utils import get_margin, compute_chunks
-from cop_ard_core.warp import sinc, sinc_warp
-from cop_ard_app.io import normpath, read, save_empty_dataset, get_storage_options, write
-from cop_ard_core.logger import timeit
-from cop_ard_app.computation import map, map_blocks
 from typing import Dict, cast
 
 import dask.array as da
 import numpy as np
 import xarray as xr
+from cop_ard_core.logger import timeit
+from cop_ard_core.simul import extract_simul_on_radar_chunk, get_geo_from_radar_bbox, get_radar_bbox
+from cop_ard_core.warp import sinc, sinc_warp
 from scipy.constants import speed_of_light
 
+from cop_ard_app.computation import map, map_blocks
+from cop_ard_app.io import get_storage_options, normpath, read, save_empty_dataset, write
+from cop_ard_app.utils import compute_chunks, get_margin
 
 DIMS = ["polarization", "y", "x"]
 LONG_DIMS = ["polarization", "past_reference_date", "y", "x"]
@@ -316,8 +316,17 @@ def map_geocoding(
         slant_range_time_spacing=annot["Grid"]["Row"]["SS"],
     )
     # Extract the subset of the simulation grid relevant to this CSLC.
+    azimuth_time = slc.measurements.azimuth_time
+    slant_range_time = slc.measurements.slant_range_time
+    bbox_radar = get_radar_bbox(azimuth_time, slant_range_time, margin)
+    bbox_geo = get_geo_from_radar_bbox(simulation_ml, bbox_radar)
+    if bbox_geo is None:
+        raise ValueError("No bbox overlap found")
     selection = extract_simul_on_radar_chunk(
-        simulation=simulation, simulation_ml, margin, simulation.acquisition_date.values[0]
+        simulation=simulation,
+        reference_date=simulation.acquisition_date.values[0],
+        bbox_radar=bbox_radar,
+        bbox_geo=bbox_geo,
     ).drop_vars(["axis", "dem_distance"])
     # NOTE: do we want this in rose-L?? this was needed to be aligned with shiroma. probably yes
     # Define the output coordinates at pixel centers.

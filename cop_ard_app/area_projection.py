@@ -1,19 +1,31 @@
-from cop_ard_core.kernels import update_dense_array
-from cop_ard_app.simulation import initialize_simulation
-from cop_ard_core.dem import get_resolution_in_meters
-from cop_ard_core.logger import timeit, logger
-from cop_ard_app.computation import map, map_blocks
-from cop_ard_core.area_projection import compute_shadow, compute_rtc_ap, compute_geocoded_mask, compute_rasterization
-from cop_ard_core.griddata import init_interpolate
-from scipy.constants import speed_of_light
-from cop_ard_app.computation import map_blocks
-from typing import Mapping, Any
-from cop_ard_app.utils import compute_chunks, get_margin, GeoEnvPlugin
-from cop_ard_app.io import read, normpath, get_storage_options, exists, delete, makedirs, touch, save_empty_dataset, glob, write
+from typing import Any, Mapping
+
 import botocore.exceptions
 import dask.array as da
 import numpy as np
 import xarray as xr
+from cop_ard_core.area_projection import compute_geocoded_mask, compute_rasterization, compute_rtc_ap, compute_shadow
+from cop_ard_core.dem import get_resolution_in_meters
+from cop_ard_core.griddata import init_interpolate
+from cop_ard_core.kernels import update_dense_array
+from cop_ard_core.logger import logger, timeit
+from scipy.constants import speed_of_light
+
+from cop_ard_app.computation import map, map_blocks
+from cop_ard_app.io import (
+    delete,
+    exists,
+    get_storage_options,
+    glob,
+    makedirs,
+    normpath,
+    read,
+    save_empty_dataset,
+    touch,
+    write,
+)
+from cop_ard_app.simulation import initialize_simulation
+from cop_ard_app.utils import GeoEnvPlugin, compute_chunks, get_margin
 
 
 def map_shadow_projection(
@@ -577,7 +589,7 @@ def map_rasterization_and_rtc_ap(
                 "skip_read": True,
                 "storage_options": get_storage_options(kwargs, "storage_options_dynamic"),
             },
-        }
+        },
     }
 
     map_blocks(
@@ -1124,10 +1136,6 @@ def blockwise_geocoded_mask(
     if exists(f, storage_options=so):
         # Read sparse matrix components (CSR format)
         ds = read(f, as_type="xr.Dataset", consolidated=False, storage_options=so)
-        data = ds.data.values
-        indices = ds.indices.values
-        indptr = ds.indptr.values
-        shape = ds.shape.values
         # Get the bounding box of the radar pixels this chunk depends on
         bbox_radar = ds.attrs["radar_bbox"]
         radar_data = read(
@@ -1139,13 +1147,13 @@ def blockwise_geocoded_mask(
             slant_range_time=slice(bbox_radar[2], bbox_radar[3] + 1),
         )
         geocoded_mask = compute_geocoded_mask(
-            csr_matrix=ds, 
+            csr_matrix=ds,
             layover=radar_data.layover,
             shadow=radar_data.shadow,
             xsize_global=xsize_global,
             bbox_radar=bbox_radar,
             output_shape=(dim_y, dim_x),
-            threshold=threshold
+            threshold=threshold,
         )
         geocoded_mask = xr.Dataset(data_vars={"mask": (["y", "x"], geocoded_mask)})
     else:
@@ -1244,4 +1252,3 @@ def blockwise_rasterization(
     geo_data = xr.Dataset(data_vars={"nlooks": nlooks})
 
     return geo_data, w_dt, layover_dt
-

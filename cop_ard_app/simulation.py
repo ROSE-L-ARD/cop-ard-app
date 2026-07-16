@@ -1,14 +1,22 @@
-from scipy.constants import speed_of_light
-from cop_ard_app.utils import GeoEnvPlugin, get_margin
-from cop_ard_core.logger import logger, timeit
-from cop_ard_app.dem import dem_to_radar
-from cop_ard_app.computation import map
-from cop_ard_core.simul import init_simulation, get_radar_bbox, get_geo_from_radar_bbox, extract_simul_on_radar_chunk, extract_simulation_ml
-from pyproj import CRS
-from cop_ard_app.io import write, normpath, get_storage_options, exists, delete, makedirs, touch, read
-from typing import Dict, Any, cast
+from typing import Any, Dict, cast
+
 import numpy as np
 import xarray as xr
+from cop_ard_core.logger import logger, timeit
+from cop_ard_core.simul import (
+    extract_simul_on_radar_chunk,
+    extract_simulation_ml,
+    get_geo_from_radar_bbox,
+    get_radar_bbox,
+    init_simulation,
+)
+from pyproj import CRS
+from scipy.constants import speed_of_light
+
+from cop_ard_app.computation import map
+from cop_ard_app.dem import dem_to_radar
+from cop_ard_app.io import delete, exists, get_storage_options, makedirs, normpath, read, touch, write
+from cop_ard_app.utils import GeoEnvPlugin, get_margin
 
 
 def update_elevation(
@@ -51,14 +59,16 @@ def update_elevation(
     # Re-chunk the simulation dataset to ensure consistency.
     simulation = simulation.chunk(chunks)
     # Write the updated elevation data ('h') back to the Zarr store.
-    simulation = cast(xr.Dataset, write(
+    simulation = cast(
+        xr.Dataset,
+        write(
             simulation.h.to_dataset(name="h").drop_vars(["spatial_ref"]),
             data_path=normpath(data_path),
             consolidated=False,
             region={"x": slice(None, None), "y": slice(None, None)},  # Write to the full spatial extent.
             mode="r+",  # Open in read/write mode to update.
             storage_options=get_storage_options(kwargs),
-        )
+        ),
     )
 
     if not isinstance(simulation, xr.Dataset):
@@ -110,7 +120,7 @@ def init_simulation_dataset(
     simulation = simulation.chunk({**xy_chunks, "acquisition_date": 1, "axis": -1})
 
     # Save the simulation to a Zarr store on disk.
-    simultaion = write(
+    simulation = write(
         simulation,
         data_path=normpath(data_path),
         storage_options=get_storage_options(kwargs),
@@ -571,4 +581,3 @@ def single_simulation_ml(
         ),
     }
     return (burst_id, simulation_ml)
-

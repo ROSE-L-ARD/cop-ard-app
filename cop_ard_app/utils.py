@@ -1,17 +1,17 @@
 import itertools
-from typing import Dict
-from scipy.constants import speed_of_light
-from cop_ard_core.dem import extract_vertical_crs
-from cop_ard_core.logger import logger
-from pyproj.transformer import TransformerGroup
-import rasterio
 import os
-from pyproj import datadir, CRS, Transformer
-import pyproj
-import pyproj.network
+from typing import Dict
+
 import dask.distributed
 import numpy as np
-import xarray as xr
+import pyproj
+import pyproj.network
+import rasterio
+from cop_ard_core.dem import extract_vertical_crs
+from cop_ard_core.logger import logger
+from pyproj import CRS, Transformer, datadir
+from pyproj.transformer import TransformerGroup
+from scipy.constants import speed_of_light
 
 
 class GeoEnvPlugin(dask.distributed.WorkerPlugin):
@@ -77,9 +77,9 @@ class GeoEnvPlugin(dask.distributed.WorkerPlugin):
 def get_margin(
     time_ca_polynomial_coefficients: np.ndarray,
     azimuth_time_spacing: float,
-    slant_range_time_spacing: float, 
-    border: int = 10
-    ):
+    slant_range_time_spacing: float,
+    border: int = 10,
+):
     step = {
         "azimuth_time": np.timedelta64(
             round((time_ca_polynomial_coefficients[1] * azimuth_time_spacing) * 1e9),
@@ -151,4 +151,3 @@ def compute_chunks(chunks: dict, overlap: dict = {"y": 1, "x": 1}) -> Dict:
     r = np.array(list(itertools.product(*[v for v in ch.values()])))
     # Restructure the result into the dictionary format required by `map_blocks`.
     return {k: r[:, en].tolist() for en, k in enumerate(chunks.keys())}
-

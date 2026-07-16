@@ -6,8 +6,6 @@
 # permission, please contact the copyright holders and delete this file.
 # This file must not be copied, modified, or distributed without explicit
 # written permission from the copyright holder.
-from cop_ard_app.detrend import estimate_global_surface
-from cop_ard_app.computation import map_blocks
 from typing import Literal, Sequence
 
 import numpy as np
@@ -15,6 +13,9 @@ import structlog
 import xarray as xr
 from scipy.constants import speed_of_light
 from xrspatial.convolution import convolution_2d as conv
+
+from cop_ard_app.computation import map_blocks
+from cop_ard_app.detrend import estimate_global_surface
 
 logger = structlog.get_logger(__name__)
 

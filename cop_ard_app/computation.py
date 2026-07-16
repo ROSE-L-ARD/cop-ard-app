@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from types import FunctionType
 import copy
 import inspect
 import itertools
 from contextlib import contextmanager
+from types import FunctionType
 from typing import Any, Callable, Dict, KeysView, List, Literal, Mapping, Sequence, Tuple, Union, ValuesView, cast
 
 import dask.distributed
@@ -24,9 +24,9 @@ import numpy as np
 import psutil
 import retry
 import xarray as xr
+from cop_ard_core.logger import logger
 
 from cop_ard_app.io import Path, isdir, read, write
-from cop_ard_core.logger import logger
 
 
 class DummyClient(object):

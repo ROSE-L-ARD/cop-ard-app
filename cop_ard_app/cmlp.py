@@ -1,5 +1,6 @@
 import numpy as np
 import xarray as xr
+from cop_ard_core.logger import logger, timeit
 
 import cop_ard_app.ard_utils
 from cop_ard_app.io import (
@@ -9,7 +10,6 @@ from cop_ard_app.io import (
     save_empty_dataset,
     write,
 )
-from cop_ard_core.logger import logger, timeit
 
 SHORT_DIMS = ["polarization", "azimuth_time", "slant_range_time"]
 DIMS = ["polarization", "acquisition_date", "azimuth_time", "slant_range_time"]
@@ -385,9 +385,7 @@ def _update_recursive_reference(
     broadcast_phasor_shape = (n_bands, coarse_az, 1, coarse_rg, 1)
 
     # 4. Apply phase rotation using underlying Dask/NumPy arrays
-    correction = (
-        slc.data.reshape(blocked_slc_shape) * phasor_interf.reshape(broadcast_phasor_shape).conj()
-    )    
+    correction = slc.data.reshape(blocked_slc_shape) * phasor_interf.reshape(broadcast_phasor_shape).conj()
     mask = np.isnan(correction)
     correction[mask] = 0
     # Apply fading memory filter

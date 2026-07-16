@@ -1,17 +1,18 @@
-from datetime import datetime
 import re
-from cop_ard_app.slc import overwrite_orbit_coefficients, update_slcs
-import dateutil
-from cop_ard_core.orbit import build_orbit_dataset, refit_orbit_coefficients
-from cop_ard_core.logger import logger, timeit
-from typing import Union, Any, cast
-from multiprocessing import Value
-from xml.etree.ElementTree import ElementTree, Element
 import xml.etree.ElementTree as ET
-from cop_ard_app.io import Path
-from cop_ard_app.computation import map
+from datetime import datetime
+from typing import Any, Union, cast
+from xml.etree.ElementTree import Element, ElementTree
+
+import dateutil
 import numpy as np
 import xarray as xr
+from cop_ard_core.logger import logger, timeit
+from cop_ard_core.orbit import build_orbit_dataset, refit_orbit_coefficients
+
+from cop_ard_app.computation import map
+from cop_ard_app.io import Path
+from cop_ard_app.slc import overwrite_orbit_coefficients, update_slcs
 
 
 def read_orbit_file(orbit_path: Path) -> ElementTree[Element[str]]:
@@ -199,9 +200,7 @@ def update_orbit(
     )
 
     # Prepare arguments for the `overwrite_orbit_coefficients` worker function.
-    args = [
-        (arg[0], arg[1], res) for arg, res in zip(args, refit_orbits)
-    ]
+    args = [(arg[0], arg[1], res) for arg, res in zip(args, refit_orbits)]
     refit_orbits = cast(
         list,
         map(
@@ -291,5 +290,3 @@ def import_ORBIT(
         )
     orbit_paths = [o.path for o in orbit_paths]
     return slcs, orbit_paths
-
-

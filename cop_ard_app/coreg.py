@@ -1,18 +1,21 @@
-from functools import reduce
 import copy
-from cop_ard_app.model import get_coefficients, beam_ids
-from cop_ard_app.slc import updateOrbits, updateETAD
-from cop_ard_core.griddata import init_interpolate
-from typing import cast
-from cop_ard_app.computation import map, map_blocks
-from scipy.constants import speed_of_light
-from cop_ard_app.utils import get_margin
-from cop_ard_core.warp import sinc, warp_dazdrg, coreg_qlt, warp_cslc, GRID, getLUT
-from cop_ard_app.io import save_empty_dataset, normpath, get_storage_options, read, write, path_to_dict, get_id_product
-from cop_ard_core.logger import logger, timeit
 import os
+from functools import reduce
+from typing import cast
+
 import numpy as np
 import xarray as xr
+from cop_ard_core.griddata import init_interpolate
+from cop_ard_core.logger import logger, timeit
+from cop_ard_core.warp import GRID, coreg_qlt, getLUT, sinc, warp_cslc, warp_dazdrg
+from scipy.constants import speed_of_light
+
+from cop_ard_app.computation import map, map_blocks
+from cop_ard_app.io import get_id_product, get_storage_options, normpath, path_to_dict, read, save_empty_dataset, write
+from cop_ard_app.model import beam_ids, get_coefficients
+from cop_ard_app.slc import updateETAD, updateOrbits
+from cop_ard_app.utils import get_margin
+
 
 def init_single_coreg_stack(
     slcs: xr.DataTree,
@@ -138,7 +141,7 @@ def initialize_LUT_coords(
     acquisition_date: xr.DataArray,
     azimuth_time: xr.DataArray,
     slant_range_time: xr.DataArray,
-    grid: tuple[int, int] = GRID
+    grid: tuple[int, int] = GRID,
 ) -> xr.Dataset:
     """
     Initialize a coarse coordinate grid for the Lookup Tables (LUTs).
@@ -165,11 +168,13 @@ def initialize_LUT_coords(
         np.ceil(slant_range_time.size / grid[1]).astype(int),
     )
     # Create the coarse grid by decimating the full-resolution coordinates.
-    LUT_coords = xr.Dataset(coords={
-        "acquisition_date": acquisition_date,
-        "azimuth_time": azimuth_time,
-        "slant_range_time": slant_range_time,
-    })
+    LUT_coords = xr.Dataset(
+        coords={
+            "acquisition_date": acquisition_date,
+            "azimuth_time": azimuth_time,
+            "slant_range_time": slant_range_time,
+        }
+    )
     LUT_coords = LUT_coords.isel(
         azimuth_time=slice(None, None, az_step),
         slant_range_time=slice(None, None, rg_step),
@@ -655,12 +660,16 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
     for acquisition_date in slc.coreg.measurements.acquisition_date:
         acquisition_date_annot = slc.orig[str(acquisition_date.values)].measurements.slc.attrs
         acquisition_date_annot = acquisition_date_annot[list(annot.keys())[0]]
-        acquisition_date_arp_coeffs[acquisition_date] = {e: get_coefficients(f"Position.ARPPoly.{e}.Coefs", acquisition_date_annot) for e in ["X", "Y", "Z"]}
+        acquisition_date_arp_coeffs[acquisition_date] = {
+            e: get_coefficients(f"Position.ARPPoly.{e}.Coefs", acquisition_date_annot) for e in ["X", "Y", "Z"]
+        }
         acquisition_date_t0[acquisition_date] = np.datetime64(annot["Timeline"]["CollectStart"], "ns")
         if any(coeff is None for coeff in acquisition_date_arp_coeffs[acquisition_date].values()):
             raise ValueError("Missing ARP polynomial coefficients in metadata.")
         # Determine the type of orbit data used for this acquisition.
-        if ("conditions" in slc.orig[str(acquisition_date.values)]) and ("orbit" in slc.orig[str(acquisition_date.values)].conditions):
+        if ("conditions" in slc.orig[str(acquisition_date.values)]) and (
+            "orbit" in slc.orig[str(acquisition_date.values)].conditions
+        ):
             orb_type = slc.orig[str(acquisition_date.values)].conditions.orbit.attrs["orbit_type"]
         else:
             orb_type = "AUX_ANNOTATED"
@@ -926,7 +935,9 @@ def blockwise_warp_cslc(
     return coreg
 
 
-def updateLut(slcs: xr.DataTree, daz_drg: xr.Dataset, path_to_coeff: str, out_name: str, grid: tuple[int, int] = GRID, **kwargs) -> xr.Dataset:
+def updateLut(
+    slcs: xr.DataTree, daz_drg: xr.Dataset, path_to_coeff: str, out_name: str, grid: tuple[int, int] = GRID, **kwargs
+) -> xr.Dataset:
     """
     Update or create a Lookup Table (LUT) for a specific parameter.
 
@@ -1030,4 +1041,3 @@ def updateLut(slcs: xr.DataTree, daz_drg: xr.Dataset, path_to_coeff: str, out_na
     # Convert the final DataArray to a Dataset.
     xLUT = xLUT.to_dataset(name=out_name)
     return xLUT
-

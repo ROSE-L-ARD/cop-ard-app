@@ -1,14 +1,16 @@
-from cop_ard_core.logger import timeit
-from cop_ard_app.computation import map, map_blocks
-from scipy.constants import speed_of_light
 from typing import Mapping, cast
-from cop_ard_core.dem import compute_shape_and_off
-from cop_ard_core.simul import get_radar_bbox, get_geo_from_radar_bbox, extract_simul_on_radar_chunk
-from cop_ard_app.utils import get_margin
-from cop_ard_core.warp import sinc, warp_gslc
-from cop_ard_app.io import normpath, read, get_storage_options, save_empty_dataset
+
 import numpy as np
 import xarray as xr
+from cop_ard_core.dem import compute_shape_and_off
+from cop_ard_core.logger import timeit
+from cop_ard_core.simul import extract_simul_on_radar_chunk, get_geo_from_radar_bbox, get_radar_bbox
+from cop_ard_core.warp import sinc, warp_gslc
+from scipy.constants import speed_of_light
+
+from cop_ard_app.computation import map, map_blocks
+from cop_ard_app.io import get_storage_options, normpath, read, save_empty_dataset
+from cop_ard_app.utils import get_margin
 
 
 def single_geocode_phase(
@@ -423,4 +425,3 @@ def stack_geocoding(
         else:
             gslcs = gslc
     return gslcs
-

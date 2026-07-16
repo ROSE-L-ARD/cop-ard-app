@@ -1,11 +1,9 @@
-from cop_ard_app.model import get_az_rg_times
 import numpy as np
 import scipy.fft
 import xarray as xr
 from scipy.constants import speed_of_light
 
-from cop_ard_app.io import path_to_dict
-from cop_ard_core.logger import logger
+from cop_ard_app.model import get_az_rg_times
 
 
 # @timeit

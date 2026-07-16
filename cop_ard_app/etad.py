@@ -1,10 +1,12 @@
-from cop_ard_app.computation import map
-from cop_ard_app.orbit import update_orbit
-from typing import Union, Any, cast
-from cop_ard_app.io import Path, write, get_storage_options, normpath, read
-from cop_ard_core.logger import timeit, logger
+from typing import Any, Union, cast
+
 import numpy as np
 import xarray as xr
+from cop_ard_core.logger import logger, timeit
+
+from cop_ard_app.computation import map
+from cop_ard_app.io import Path, get_storage_options, normpath, read, write
+from cop_ard_app.orbit import update_orbit
 
 
 @timeit
@@ -324,4 +326,3 @@ def import_etad_stack(
             slcs[f"orig/{ad}/conditions/ETAD"] = et
 
     return slcs, orbit_paths
-

@@ -1,15 +1,48 @@
-import sarpy.io.complex.sentinel
-from collections import defaultdict
-from typing import Sequence, Any, cast
-from cop_ard_core.logger import logger, timeit
-from cop_ard_app.computation import map, map_blocks
-import os
-from cop_ard_app.model import get_az_rg_meters, get_az_rg_times, get_coefficients, get_footprint, get_burst_id, get_burst_id_safe, map_index_to_group, extract_acquisition_dates, extract_orbits
 import json
-from cop_ard_core.slc import noise_removal, amplitude_calibration, image_deramp, apply_invalid_mask, intersect, get_relative_orbit_number, merge_dict
-from cop_ard_app.io import sarpy_open, path_to_dict, generate_empty_dataset, write, get_storage_options, read, is_s3_path, Path, init_zarr_groups, save_slc_static, read_slc_static, normpath
+import os
+from collections import defaultdict
+from typing import Any, Sequence, cast
+
 import numpy as np
+import sarpy.io.complex.sentinel
 import xarray as xr
+from cop_ard_core.logger import logger, timeit
+from cop_ard_core.slc import (
+    amplitude_calibration,
+    apply_invalid_mask,
+    get_relative_orbit_number,
+    image_deramp,
+    intersect,
+    merge_dict,
+    noise_removal,
+)
+
+from cop_ard_app.computation import map, map_blocks
+from cop_ard_app.io import (
+    Path,
+    generate_empty_dataset,
+    get_storage_options,
+    init_zarr_groups,
+    is_s3_path,
+    normpath,
+    path_to_dict,
+    read,
+    read_slc_static,
+    sarpy_open,
+    save_slc_static,
+    write,
+)
+from cop_ard_app.model import (
+    extract_acquisition_dates,
+    extract_orbits,
+    get_az_rg_meters,
+    get_az_rg_times,
+    get_burst_id,
+    get_burst_id_safe,
+    get_coefficients,
+    get_footprint,
+    map_index_to_group,
+)
 
 
 def import_slice(
@@ -203,7 +236,7 @@ def import_image(
             "save_options": {
                 "skip_read": True,
                 "consolidated": False,
-            }
+            },
         }
         # --- Process Data Slice by Slice ---
         if in_path is not None:
@@ -764,7 +797,7 @@ def overwrite_orbit_coefficients(
             data_path,
             mode="w",
             storage_options=get_storage_options(kwargs),
-        )
+        ),
     )
     return orbit
 
@@ -918,4 +951,3 @@ def updateETAD(slc: xr.DataTree) -> xr.Dataset | None:
         etads = None
 
     return etads
-
