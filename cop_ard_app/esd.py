@@ -219,7 +219,7 @@ def esd_single_burst(
     coherence_th: float = 0.7,
     enable_dask: bool = True,
     **kwargs,
-):
+) -> xr.Dataset:
     """
 
     Compute the residual shift in the azimuth direction applying the ESD procedure.
@@ -325,13 +325,16 @@ def estimate(
             args.append(a)
     args = list(zip(*args))
     # Residual azimuth shifts estimation for each bursts
-    esd = map(
-        esd_single_burst,
-        args=args,
-        kwargs={"reference_dates": reference_dates, "enable_dask": enable_dask},
-        combine=False,
-        enable_dask=enable_dask,
-        **kwargs,
+    esd = cast(
+        list[xr.Dataset],
+        map(
+            esd_single_burst,
+            args=args,
+            kwargs={"reference_dates": reference_dates, "enable_dask": enable_dask},
+            combine=False,
+            enable_dask=enable_dask,
+            **kwargs,
+        ),
     )
 
     # Structure re-formatting in order to solve the global problem

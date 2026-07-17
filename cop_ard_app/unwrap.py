@@ -52,7 +52,8 @@ def get_edges(
     e = np.vstack((e_, np.roll(e_[border.flatten(), :], -1, axis=1)))
 
     # return arcs without repetition, arcs with repetition, neighbours
-    return (unique(np.vstack(e)), e, neigh)
+    # FIXME this doesn't feel right
+    return (unique(np.vstack(e)), e, neigh)  # type: ignore
 
 
 def get_dual_graph_(
@@ -124,7 +125,7 @@ def integ_mcf_ortools(
 
         raise Exception
 
-    solution_flows = smcf.flows(all_arcs)
+    solution_flows = smcf.flows(all_arcs)  # type: ignore this is how it's meant to be used
 
     return (0, solution_flows)
 

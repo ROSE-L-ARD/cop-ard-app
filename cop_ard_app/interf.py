@@ -142,7 +142,7 @@ def extract_coreg_aoi_(coreg: xr.Dataset, bbox: tuple, dt_az: float, dt_rg: floa
 @timeit
 def extract_interf_single(
     burst_id: str,
-    annot: dict,
+    annot: str,
     coreg: xr.Dataset,
     bbox: tuple,
     multilook: dict,

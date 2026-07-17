@@ -1,4 +1,4 @@
-from typing import Any, Mapping
+from typing import Any, Hashable, Mapping
 
 import botocore.exceptions
 import dask.array as da

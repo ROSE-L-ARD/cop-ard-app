@@ -246,7 +246,8 @@ def get_chunks(
     num_chunks : int
         The total number of chunks.
     """
-    _chunks, _indices = {}, {}
+    _chunks: dict[str, Any] = {}
+    _indices: dict[str, Any] = {}
     if chunks is None:
         if chunksizes is None:
             k: Union[str, KeysView[str]]
@@ -291,7 +292,9 @@ def get_chunks(
             raise Exception("all chunks values must be lower than the size of the corresponding data dimension")
         _chunks = dict(chunks)
         _indices = {k: (0,) * len(v) for k, v in _chunks.items()}
-    return _chunks, _indices, len(list(_chunks.values())[0])
+    n_chunks = list(_chunks.values())[0]
+    n_chunks = len(n_chunks) if isinstance(n_chunks, tuple) else n_chunks
+    return _chunks, _indices, n_chunks
 
 
 def apply_overlap(
@@ -785,7 +788,7 @@ def try_to_store(
 
     """
     # Options to be used to save (i.e to be passed to pstools.io.write) xarray objects
-    save_options = {"consolidated": False, **kwargs.get("save_options", {})}
+    save_options: dict[str, Any] = {"consolidated": False, **kwargs.get("save_options", {})}
 
     def extract_store_info(
         j: int, config: Mapping[str, Any]
@@ -885,7 +888,7 @@ def try_to_store(
         logger.debug(f"Results to be saved: {results_l}", verbose=True, tags=["store"])
         results = typef(
             (
-                write(j, data_path=store_directory, **{**save_options, "skip_read": False})
+                write(j, data_path=store_directory, **{**save_options, "skip_read": False})  # type: ignore
                 if isinstance(j, (xr.Dataset, xr.DataArray, xr.DataTree))
                 and all(s > 0 for s in getattr(j, "sizes", {}).values())
                 else j

@@ -1,7 +1,7 @@
 import json
 import os
 from collections import defaultdict
-from typing import Any, Sequence, cast
+from typing import Any, Hashable, Sequence, cast
 
 import numpy as np
 import sarpy.io.complex.sentinel
@@ -123,7 +123,12 @@ def import_image(
     deramp: bool = False,
     apply_invalid_mask_flag: bool = False,
     do_import: bool = True,
-    chunks={"azimuth_time": 2048, "slant_range_time": 2048, "acquisition_date": 1, "polarization": 1},
+    chunks: dict[Hashable, int] = {
+        "azimuth_time": 2048,
+        "slant_range_time": 2048,
+        "acquisition_date": 1,
+        "polarization": 1,
+    },
     compute_on_host: bool = True,
     enable_dask: bool = True,
     **kwargs,

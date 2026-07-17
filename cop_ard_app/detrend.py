@@ -1,5 +1,5 @@
 from itertools import combinations_with_replacement
-from typing import Literal, Tuple
+from typing import Tuple
 
 import numpy as np
 import scipy.optimize
@@ -104,7 +104,7 @@ def estimate_global_surface(
     y: np.ndarray,
     regions: np.ndarray | None = None,
     degree: int = 0,
-    norm: Literal[1, 2] = 2,
+    norm: int = 2,
     method: str | None = None,
     sigma: float = 3.0,
     range: Tuple[float, float] = (-np.inf, np.inf),

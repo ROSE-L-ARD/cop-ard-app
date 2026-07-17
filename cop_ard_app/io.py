@@ -9,7 +9,7 @@ from datetime import datetime
 from hashlib import md5
 from json import dumps
 from tempfile import TemporaryDirectory
-from typing import Any, Hashable, Literal, Mapping, Union, cast, overload
+from typing import Any, Literal, Mapping, Union, cast, overload
 from unittest import mock
 
 import dask.array as da
@@ -358,9 +358,9 @@ def assign_attrs(_data: xr.Dataset | xr.DataTree, _data_attrs: dict) -> xr.Datas
 def check_write_arguments(
     data: Union[xr.Dataset, xr.DataArray, xr.DataTree],
     data_path: str,
-    mode: str = "w",
+    mode: Literal["w", "w-", "a", "a-", "r+", "r"] = "w",
     region: Mapping[str, slice] | None = None,
-) -> tuple[str, str, Union[xr.Dataset, xr.DataTree], str]:
+) -> tuple[Literal["w", "w-", "a", "a-", "r+", "r"], str, Union[xr.Dataset, xr.DataTree], str]:
     """
     Validate and prepare arguments for the main `write` function.
     """
@@ -537,15 +537,15 @@ def save_sparse_array(
 
 
 def generate_empty_dataset(
-    data_vars: list[str],
-    dims: dict[str, list[str]],
-    shape: dict[str, list[int]],
-    chunks: dict[str, int],
-    dtype: dict[str, str],
+    data_vars: list[Any],
+    dims: dict[Any, list[str]],
+    shape: dict[Any, list[int]],
+    chunks: dict[Any, int],
+    dtype: dict[Any, str],
     crs: Union[str, Any, None] = None,
-    coords: dict[str, Any] | None = None,
-    attrs: dict[str, Any] | None = None,
-    attrs_data_vars: dict[str, Any] | None = None,
+    coords: dict[Any, Any] | None = None,
+    attrs: dict[Any, Any] | None = None,
+    attrs_data_vars: dict[Any, Any] | None = None,
 ) -> xr.Dataset:
     """
     Create an empty in-memory xarray Dataset with a predefined structure backed by Dask.
@@ -579,16 +579,16 @@ def generate_empty_dataset(
 
 
 def save_empty_dataset(
-    data_vars: list[str],
-    dims: dict[str, list[str]],
-    shape: dict[str, list[int]],
-    chunks: dict[str, int],
-    dtype: dict[str, str],
+    data_vars: list[Any],
+    dims: dict[Any, list[str]],
+    shape: dict[Any, list[int]],
+    chunks: dict[Any, int],
+    dtype: dict[Any, str],
     data_path: str,
     crs: Union[str, Any, None] = None,
-    coords: dict[Hashable, Any] | None = None,
-    attrs: dict[str, Any] | None = None,
-    attrs_data_vars: dict[str, Any] | None = None,
+    coords: dict[Any, Any] | None = None,
+    attrs: dict[Any, Any] | None = None,
+    attrs_data_vars: dict[Any, Any] | None = None,
     skip_read: bool = False,
     compute: bool = False,
     **kwargs,
@@ -848,7 +848,7 @@ class Path:
                 self._temp_dir = TemporaryDirectory()
 
             if isinstance(self._temp_dir, TemporaryDirectory):
-                dest_dir = self._temp_dir.name
+                dest_dir = str(self._temp_dir.name)
             elif isinstance(self._temp_dir, str):
                 dest_dir = self._temp_dir
             else:
@@ -1129,7 +1129,7 @@ def _fop(
     dst: str,
     recursive: bool = False,
     only_if_different_fs: bool = False,
-    storage_options: dict = {},
+    storage_options: dict | None = {},
 ) -> str:
     """
     A private helper function for file operations (move or copy).
@@ -1191,7 +1191,7 @@ def copy(
     dst: str,
     recursive: bool = False,
     only_if_different_fs: bool = False,
-    storage_options: dict = {},
+    storage_options: dict | None = {},
 ) -> str:
     """Copy src to dst src and dst can be both local and remote (S3) data.
 
@@ -1501,7 +1501,7 @@ def write(
     data_path: str | Path,
     region: Mapping[str, slice] | None = None,
     consolidated: bool = True,
-    mode: str = "w",
+    mode: Literal["w", "w-", "a", "a-", "r+", "r"] = "w",
     compute: bool = True,
     skip_read: bool = False,
     storage_options: dict | None = None,
@@ -1528,23 +1528,20 @@ def write(
         _data = _data.drop_vars(set(_data.dims).intersection(set(_data.coords)))
 
     so = is_local(_file_path, storage_options)
-    zarr_kwargs = {
-        "store": _file_path,
-        "mode": mode,
-        "region": region,
-        "consolidated": consolidated,
-        "zarr_format": 3,
-        "storage_options": so,
-        "encoding": safe_encoding,
-    }
 
     # 5. WRITE
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*Consolidated metadata is currently not part.*")
-        if compute:
-            _data.to_zarr(**zarr_kwargs, compute=True)
-        else:
-            _data.to_zarr(**zarr_kwargs, compute=False)
+        _data.to_zarr(
+            store=_file_path,
+            mode=mode,
+            region=region,
+            consolidated=consolidated,
+            zarr_format=3,
+            storage_options=so,
+            encoding=safe_encoding,
+            compute=compute,
+        )
 
     if not skip_read:
         return read(_file_path, as_type=_data_type, storage_options=so)

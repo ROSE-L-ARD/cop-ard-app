@@ -343,7 +343,7 @@ def map_geocoding(
         chunks["y"] = selection.chunksizes["y"][0]
         chunks["x"] = selection.chunksizes["x"][0]
         shape = {k: [*data[k].shape[:-2], y.size, x.size] for k in data_vars}
-        dtype = {k: data[k].dtype.name for k in data_vars}
+        dtype = {k: str(data[k].dtype.name) for k in data_vars}
         coords = {k: v.values for k, v in data.coords.items() if k in COORDS}
         coords["y"] = y
         coords["x"] = x

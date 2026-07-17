@@ -1,6 +1,5 @@
 import copy
 import os
-from functools import reduce
 from typing import cast
 
 import numpy as np
@@ -653,6 +652,7 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
     coreg_arp_coeffs = {e: get_coefficients(f"Position.ARPPoly.{e}.Coefs", annot) for e in ["X", "Y", "Z"]}
     if any(coeff is None for coeff in coreg_arp_coeffs.values()):
         raise ValueError("Missing ARP polynomial coefficients in metadata.")
+    coreg_arp_coeffs = cast(dict[str, np.ndarray], coreg_arp_coeffs)
     t0 = np.datetime64(annot["Timeline"]["CollectStart"], "ns")
     acquisition_date_arp_coeffs = {}
     acquisition_date_t0 = {}
@@ -989,7 +989,9 @@ def updateLut(
         if "polarization" in xLUT.dims:
             for p, pol in enumerate(xLUT.polarization.values):
                 annot = slcs.orig[dd].measurements.slc.attrs[pol]
-                coeffs = np.array(reduce(dict.get, path_to_coeff.split("."), annot))
+                coeffs = get_coefficients(path_to_coeff, annot)
+                if coeffs is None:
+                    raise ValueError(f"Could not find coefficients for polarization {pol}")
                 # compute Doppler on the new reference system
                 xLUT[p, i, :, :], az_ref, rg_ref = getLUT(
                     slcs.coreg.measurements.sel(acquisition_date=dd),
@@ -1001,7 +1003,9 @@ def updateLut(
         else:
             annot = slcs.orig[dd].measurements.slc.attrs
             annot = annot[list(annot.keys())[0]]
-            coeffs = np.array(reduce(dict.get, path_to_coeff.split("."), annot))
+            coeffs = get_coefficients(path_to_coeff, annot)
+            if coeffs is None:
+                raise ValueError("Could not find coefficients for polarization")
             # compute Doppler on the new reference system
             xLUT[i, :, :], az_ref, rg_ref = getLUT(
                 slcs.coreg.measurements.sel(acquisition_date=dd),

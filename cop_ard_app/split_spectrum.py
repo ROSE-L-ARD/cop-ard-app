@@ -6,10 +6,11 @@ import xarray as xr
 from cop_ard_core.logger import logger
 
 from cop_ard_app.ard_utils import get_azimuth_time_raw, get_bounding_box, get_carrier_frequency, wrap
+from cop_ard_app.computation import map
 from cop_ard_app.detrend import fit, fit_2d_poly, get_model_matrix
 from cop_ard_app.esd import estimate
+from cop_ard_app.interf import get_mosaic_interf
 from cop_ard_app.io import Path, read, write
-from cop_ard_app.ported import get_mosaic_interf
 from cop_ard_app.unwrap import unwrap_phase
 
 
@@ -115,7 +116,9 @@ def scale_azimuth_time(azimuth_time_raw: xr.DataArray, azimuth_time: xr.DataArra
     return az_time
 
 
-def fit_ionosphere(phase_iono: xr.Dataset, H_iono: float, H_orb: float, degree: int = 1, norm: int = 1) -> xr.DataArray:
+def fit_ionosphere(
+    phase_iono: xr.DataArray, H_iono: float, H_orb: float, degree: int = 1, norm: int = 1
+) -> xr.DataArray:
 
     y_ = scale_azimuth_time(phase_iono.azimuth_time_raw, phase_iono.azimuth_time, H_orb, H_iono)
 
@@ -255,7 +258,7 @@ def split_spectrum_flow(
 
     # estimate ESD at full-band
     logger.debug("estimate ESD at full-band")
-    esd, y_poly = estimate(slcs, wdir_path, reference_date, poly_degree=2, enable_dask=True)
+    esd, y_poly = estimate(slcs, reference_date, poly_degree=2, enable_dask=True)
 
     # separate dispersive and non-dispersive components
     logger.debug("separate dispersive and non-dispersive components")
@@ -274,7 +277,7 @@ def split_spectrum_flow(
     phase_iono_path = wdir_path.append("phase_iono")
     logger.debug(f"save phase_iono to file {str(phase_iono_path)}")
     write(phase_iono, data_path=phase_iono_path, mode="w", skip_read=True)
-    phase_iono = read(data_path=phase_iono_path, as_type="xr.Dataset")
+    phase_iono = read(data_path=phase_iono_path, as_type="xr.DataArray")
 
     # fit surface at ionospheric height
     logger.debug("fit surface at ionospheric height")
