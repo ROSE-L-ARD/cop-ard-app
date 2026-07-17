@@ -1,5 +1,5 @@
-from typing import cast
 import json
+from typing import cast
 
 import numpy as np
 import xarray as xr
@@ -187,13 +187,13 @@ def extract_interf_multi(slcs: xr.DataTree, reference_date: str, enable_dask: bo
 
     results = cast(
         list[tuple[str, xr.Dataset]],
-            map(
+        map(
             extract_interf_single,
             args=args,
             kwargs={"reference_date": reference_date, **kwargs},
             enable_dask=enable_dask,
             combine=False,
-        )
+        ),
     )
 
     interf = xr.DataTree()

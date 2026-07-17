@@ -764,7 +764,7 @@ class Path:
         """The directory part of the path."""
         return self._directory
 
-    def append(self, suffix):
+    def append(self, suffix) -> "Path":
         """
         Append a suffix to the path.
 
@@ -780,7 +780,7 @@ class Path:
         """
         return Path(os.path.join(self._path, suffix), temp_dir=self._temp_dir, storage_options=self._storage_options)
 
-    def as_gdal(self):
+    def as_gdal(self) -> str:
         """
         Return the path formatted for use with GDAL's virtual file systems.
 
@@ -799,7 +799,7 @@ class Path:
         # Check if it's an S3 path and format accordingly.
         return f"/vsis3/{self._path[5:]}" if is_s3_path(self._path) else self._path
 
-    def replace_dir(self, dir):
+    def replace_dir(self, dir) -> "Path":
         """
         Create a new path with the same filename but in a new directory.
 
@@ -862,7 +862,7 @@ class Path:
         logger.info(f"Completed local copy at {copy_path._path}")
         return copy_path
 
-    def copy(self, dst, recursive=False, only_if_different_fs=False):
+    def copy(self, dst, recursive=False, only_if_different_fs=False) -> "Path":
         """
         Copy the file or directory to a destination.
 
@@ -898,7 +898,7 @@ class Path:
             temp_dir=self._temp_dir,
         )
 
-    def move(self, dst, recursive=False, only_if_different_fs=False):
+    def move(self, dst, recursive=False, only_if_different_fs=False) -> "Path":
         """
         Move the file or directory to a destination.
 

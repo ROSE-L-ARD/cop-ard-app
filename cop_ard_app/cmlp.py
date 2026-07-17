@@ -13,9 +13,11 @@ DIMS = ["polarization", "acquisition_date", "azimuth_time", "slant_range_time"]
 LONG_DIMS = ["polarization", "past_reference_date", "azimuth_time", "slant_range_time"]
 
 
-def _format_dataset(ds, slices, dims):
+def _slice_and_drop_coordinates(
+    ds: xr.DataArray, slices: dict[str, slice[int, int, int]], dimension_coordinates_to_keep: list[str]
+) -> xr.DataArray:
     """Helper to apply slices and drop unwanted coordinates."""
-    coords_to_drop = [k for k in ds.coords if k not in dims]
+    coords_to_drop = [k for k in ds.coords if k not in dimension_coordinates_to_keep]
     return ds.isel(slices).drop_vars(coords_to_drop)
 
 
@@ -120,8 +122,8 @@ def single_cmlp(
         try:
             ds = read(
                 last_reference_path.path, as_type="xr.Dataset", storage_options=last_reference_path.storage_options
-            ).cstack
-            last_reference = _format_dataset(ds, slices, DIMS)
+            )["cstack"]
+            last_reference = _slice_and_drop_coordinates(ds, slices, dimension_coordinates_to_keep=DIMS)
             starting_date = last_reference.attrs["starting_date"]
         except Exception as e:
             raise ValueError(f"Failed to load current reference at {last_reference_path.path}: {e}")
@@ -131,14 +133,14 @@ def single_cmlp(
         try:
             # Use a list comprehension for cleaner data loading
             datasets = [
-                read(f.path, as_type="xr.Dataset", storage_options=f.storage_options).cstack
+                read(f.path, as_type="xr.Dataset", storage_options=f.storage_options)["cstack"]
                 for f in stable_reference_path.glob("*")
             ]
 
             if datasets:
                 concat_ds = xr.concat(datasets, dim="acquisition_date")
-                stable_reference = _format_dataset(concat_ds, slices, DIMS)
-                past_reference_dates = stable_reference.acquisition_date.values
+                stable_reference = _slice_and_drop_coordinates(concat_ds, slices, dimension_coordinates_to_keep=DIMS)
+                past_reference_dates = stable_reference["acquisition_date"].values
             else:
                 raise ValueError(f"No stable reference files found in {stable_reference_path.path}")
         except Exception as e:
@@ -275,7 +277,7 @@ def _calculate_stable_dates(
     acquisition_dates: np.ndarray,
     revisit_cycle: np.timedelta64,
     stable_reference_step: int,
-    stable_reference: xr.DataArray | None = None,
+    stable_reference: xr.DataArray | xr.Dataset | None = None,
     starting_date: str | None = None,
 ) -> np.ndarray:
     """
