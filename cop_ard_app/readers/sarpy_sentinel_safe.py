@@ -1,3 +1,4 @@
+# type: ignore  # placeholder
 # MIT License
 
 # Copyright (c) 2018-2021 National Geospatial-Intelligence Agency
