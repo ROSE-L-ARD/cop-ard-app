@@ -11,19 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Dict, cast
+from typing import cast
 
-import dask.array as da
 import numpy as np
 import xarray as xr
+from cop_ard_core.dem import compute_shape_and_off
+from cop_ard_core.griddata import interp_dataset
 from cop_ard_core.logger import timeit
 from cop_ard_core.simul import extract_simul_on_radar_chunk, get_geo_from_radar_bbox, get_radar_bbox
 from cop_ard_core.warp import sinc, sinc_warp
-from scipy.constants import speed_of_light
 
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.io import get_storage_options, normpath, read, save_empty_dataset, write
-from cop_ard_app.utils import compute_chunks, get_margin
 
 DIMS = ["polarization", "y", "x"]
 LONG_DIMS = ["polarization", "past_reference_date", "y", "x"]
@@ -31,17 +30,14 @@ COORDS = ["polarization", "past_reference_date", "acquisition_date"]
 
 
 @timeit
-def stack_geocoding(
+def stack_gmlp(
     cmlp_tree: xr.DataTree,
     simulation_tree: xr.Dataset,
     simulation_ml_tree: dict,
-    working_directory_static: str,
+    spacing: dict,
     working_directory_tmp: str,
-    multilook: dict,
-    gamma_flattening: bool = False,
-    do_reramp: bool = True,
-    client_options: Dict[str, str] = {"type": "LOCAL"},
-    multiburst: bool = True,
+    enable_dask: bool = True,
+    chunks: dict = {"acquisition_date": 1, "past_reference_date": 1, "polarization": 1, "y": 2048, "x": 2048},
     **kwargs,
 ):
     """
@@ -85,30 +81,14 @@ def stack_geocoding(
     xr.DataTree
         A new DataTree containing the geocoded SLC (GSLC) data for each burst.
     """
+    multiburst = "bursts" in cmlp_tree
     args = []
     # --- Prepare Arguments for Parallel Mapping ---
-    # In multiburst mode, iterate through each burst in the DataTree.
-    if multiburst:
-        for k in cmlp_tree.bursts:
-            # Package all necessary data and parameters for one burst into a tuple.
-            r = (
-                k,  # burst_id
-                cmlp_tree.bursts[k].cmlp,
-                simulation_tree.bursts[k].to_dataset(),
-                simulation_ml_tree["bursts"][k],
-                multiburst,
-            )
-            args.append(r)
-    else:
-        # For single-scene data, create a single argument tuple.
-        r = (
-            "data",  # scene_id
-            cmlp_tree.cmlp,
-            simulation_tree.to_dataset(),
-            simulation_ml_tree,
-            multiburst,
-        )
-        args.append(r)
+    for k, v in (cmlp_tree.bursts if multiburst else {"data": cmlp_tree}).items():
+        s = (simulation_tree.bursts[k] if multiburst else simulation_tree).to_dataset()
+        s_ml = simulation_ml_tree["bursts"][k] if multiburst else simulation_ml_tree
+        a = (k, v.cmlp, s, s_ml)
+        args.append(a)
     # Transpose the list of tuples for the map function.
     args = list(zip(*args))
 
@@ -117,45 +97,41 @@ def stack_geocoding(
     results = cast(
         list,
         map(
-            single_geocoding,
+            single_gmlp,
             args,
             kwargs=dict(
-                working_directory_static=working_directory_static,
+                multiburst=multiburst,
                 working_directory_tmp=working_directory_tmp,
-                gamma_flattening=gamma_flattening,
-                do_reramp=do_reramp,
+                spacing=spacing,
+                chunks=chunks,
+                enable_dask=enable_dask,
                 **kwargs,
             ),
-            client_options=client_options,
+            enable_dask=enable_dask,
             combine=False,
         ),
     )
 
     # --- Assemble Results ---
-    gslcs = xr.DataTree()
+    gmlp_tree = xr.DataTree()
     # Reconstruct the DataTree from the list of results returned by the workers.
-    for k, gslc in results:
+    for k, gmlp in results:
         if multiburst:
-            gslcs[f"bursts/{k}"] = gslc
+            gmlp_tree[f"bursts/{k}"] = gmlp
         else:
-            gslcs = xr.DataTree(gslc)
-    return gslcs
+            gmlp_tree = gmlp
+    return gmlp_tree
 
 
-def single_geocoding(
+def single_gmlp(
     burst_id: str,
-    cmlp_path: str,
-    acquisition_dates: list[str],
-    slc: xr.DataArray,
+    cmlp: xr.DataTree,
     simulation: xr.Dataset,
     simulation_ml: dict,
     multiburst: bool,
-    multilook: dict,
-    working_directory_static: str,
+    spacing: dict,
     working_directory_tmp: str,
-    gamma_flattening: bool,
-    do_reramp: bool,
-    client_options: dict = {},
+    chunks: dict,
     enable_dask: bool = True,
     **kwargs,
 ):
@@ -201,9 +177,6 @@ def single_geocoding(
     """
     # Define the output paths for this burst.
     path = f"bursts/{burst_id}" if multiburst else "data"
-    coreg_path = normpath(f"{working_directory_tmp}/{path}/coreg")
-
-    data_path_static = normpath(f"{working_directory_static}/{path}")
     data_path_tmp = normpath(f"{working_directory_tmp}/{path}")
 
     # --- Prepare Interpolation Kernel ---
@@ -226,20 +199,14 @@ def single_geocoding(
 
     # --- Run Core Geocoding ---
     # This call orchestrates the block-wise warping from slant range to ground range.
-    dt = map_geocoding(
-        cmlp_path,
-        acquisition_dates,
+    dt = map_geocoding_cmlp(
+        cmlp,
         simulation,
         simulation_ml,
-        slc,
-        multilook,
-        data_path_static,
         data_path_tmp,
-        coreg_path,
         kernel,
-        gamma_flattening,
-        do_reramp,
-        client_options,
+        spacing,
+        chunks,
         enable_dask,
         **kwargs,
     )
@@ -249,21 +216,29 @@ def single_geocoding(
     return (burst_id, dt)
 
 
-def map_geocoding(
-    cmlp_path: str,
-    acquisition_dates: list[str],
+def get_radar_spacing(azimuth_time: xr.DataArray, slant_range_time: xr.DataArray):
+
+    az_diffs = np.diff(azimuth_time)
+    sr_diffs = np.diff(slant_range_time)
+
+    unique_az, counts_az = np.unique(az_diffs, return_counts=True)
+    unique_sr, counts_sr = np.unique(sr_diffs, return_counts=True)
+
+    step = {"azimuth_time": unique_az[np.argmax(counts_az)], "slant_range_time": unique_sr[np.argmax(counts_sr)]}
+
+    return step
+
+
+def map_geocoding_cmlp(
+    cmlp: xr.DataTree,
     simulation: xr.Dataset,
     simulation_ml: dict,
-    slc: xr.DataArray,
-    multilook: dict,
-    data_path_static: str,
     data_path_tmp: str,
-    coreg_path: str,
     kernel: dict,
-    gamma_flattening: bool,
-    do_reramp: bool = True,
-    client_options: dict = {"type": "LOCAL"},
+    spacing: dict,
+    chunks: dict,
     enable_dask: bool = True,
+    border: int = 10,
     **kwargs,
 ) -> xr.DataTree:
     """
@@ -307,98 +282,85 @@ def map_geocoding(
     """
 
     # --- Prepare Simulation Subset ---
-    annot = slc.attrs
-    annot = annot[list(annot.keys())[0]]
     # Calculate grid spacing for margin calculation.
-    margin = get_margin(
-        time_ca_polynomial_coefficients=annot["RMA"]["INCA"]["TimeCAPoly"]["Coefs"],
-        azimuth_time_spacing=annot["Grid"]["Col"]["SS"],
-        slant_range_time_spacing=annot["Grid"]["Row"]["SS"],
-    )
-    # Extract the subset of the simulation grid relevant to this CSLC.
-    azimuth_time = slc.measurements.azimuth_time
-    slant_range_time = slc.measurements.slant_range_time
+    product = next(iter(cmlp.values()))
+    azimuth_time = product.azimuth_time
+    slant_range_time = product.slant_range_time
+
+    radar_spacing = get_radar_spacing(azimuth_time, slant_range_time)
+    margin = {e: radar_spacing[e] * border for e in ["azimuth_time", "slant_range_time"]}
     bbox_radar = get_radar_bbox(azimuth_time, slant_range_time, margin)
     bbox_geo = get_geo_from_radar_bbox(simulation_ml, bbox_radar)
     if bbox_geo is None:
-        raise ValueError("No bbox overlap found")
-    selection = extract_simul_on_radar_chunk(
-        simulation=simulation,
-        reference_date=simulation.acquisition_date.values[0],
-        bbox_radar=bbox_radar,
-        bbox_geo=bbox_geo,
-    ).drop_vars(["axis", "dem_distance"])
-    # NOTE: do we want this in rose-L?? this was needed to be aligned with shiroma. probably yes
+        raise ValueError("Could not determine geographic bounding box from radar bounding box.")
+    selection = (
+        (
+            extract_simul_on_radar_chunk(
+                simulation,
+                simulation.acquisition_date.values[0],
+                bbox_radar,
+                bbox_geo,
+            )
+        )
+        .squeeze()
+        .drop_vars(["axis", "dem_distance", "acquisition_date", "h"])
+    )
     # Define the output coordinates at pixel centers.
-    x, y = selection.x.values, selection.y.values
-    x, y = (x[0:-1] + x[1:]) / 2, (y[0:-1] + y[1:]) / 2
+    shape, off = compute_shape_and_off(selection, spacing)
+    # Create the coordinate arrays for the output grid.
+    x, y = [np.linspace(off[i], off[i] + (shape[i] - 1) * spacing[i], shape[i]) for i in ["x", "y"]]
 
     # --- Initialize Output GSLC Dataset ---
     # Create the empty Zarr store for the Geocoded SLC.
-    for date in acquisition_dates:
-        data = read(normpath(f"{cmlp_path}/{date}"), as_type="xr.Dataset", consolidate_metadata=False)
+    n_elements = len(cmlp.keys())
+    for counter, (date, data) in enumerate(cmlp.items()):
+        data = data.ds
         data_vars = list(data.data_vars)
         dims = {k: DIMS if "past_reference_date" not in data[k].dims else LONG_DIMS for k in data_vars}
-        chunks = {k: v[0] for k, v in data.chunksizes.items() if k in LONG_DIMS}
-        chunks["y"] = selection.chunksizes["y"][0]
-        chunks["x"] = selection.chunksizes["x"][0]
         shape = {k: [*data[k].shape[:-2], y.size, x.size] for k in data_vars}
-        dtype = {k: str(data[k].dtype.name) for k in data_vars}
+        dtype = {k: data[k].dtype.name for k in data_vars}
         coords = {k: v.values for k, v in data.coords.items() if k in COORDS}
         coords["y"] = y
         coords["x"] = x
-        save_empty_dataset(
+        ch = {k: chunks[k] for k in data.chunksizes.keys() if k in LONG_DIMS}
+        ch["y"] = chunks["y"]
+        ch["x"] = chunks["x"]
+        image = save_empty_dataset(
             data_vars=data_vars,
             dims=dims,
             shape=shape,
-            chunks=chunks,
+            chunks=ch,
             dtype=dtype,
             coords=coords,
             crs=selection.rio.crs.to_string(),
-            data_path=normpath(f"{data_path_tmp}/GMLP/{date}"),
+            data_path=normpath(f"{data_path_tmp}/gmlp/{date}"),
             storage_options=get_storage_options(kwargs, key="storage_options_dynamic"),
+            skip_read=False if counter == (n_elements - 1) else True,
         )
 
-    shape_ = (len(acquisition_dates), y.size, x.size)
-    chunks = {"acquisition_date": 1, "y": selection.chunksizes["y"][0], "x": selection.chunksizes["x"][0]}
-    empty_dataset = xr.DataArray(
-        da.empty(shape_), dims=["acquisition_date", "y", "x"], coords={"acquisition_date": acquisition_dates}
-    ).chunk(chunks)
-    chunks = compute_chunks(dict(empty_dataset.chunksizes))
+    image = image.phase.isel({k: 0 for k in image.phase.dims if k not in ["y", "x"]})
+
     # --- Map the Geocoding Worker Function ---
-    # This call applies the `warp_gslc` function to each block of the simulation grid.
+    # This call applies the `warp_cmlp` function to each block of the simulation grid.
     map_blocks(
         warp_cmlp,
-        empty_dataset,
-        args=(
-            cmlp_path,
-            slc,
-            selection,
-            kernel,
-            multilook,
-            data_path_static,
-            data_path_tmp,
-            do_reramp,
-            gamma_flattening,
-        ),
+        image,
+        args=(selection, cmlp, kernel, data_path_tmp),
         kwargs=kwargs,
-        chunks=chunks,
-        client_options=client_options,
         combine=False,
         enable_dask=enable_dask,
     )
     dt = xr.DataTree()
-    for date in acquisition_dates:
+    for date in cmlp.keys():
         data = read(
-            normpath(f"{data_path_tmp}/GMLP/{date}"),
-            consolidate_metadata=False,
+            normpath(f"{data_path_tmp}/gmlp/{date}"),
             storage_options=get_storage_options(kwargs, key="storage_options_dynamic"),
         )
         dt[date] = data
     return dt
 
 
-def extract_rg_az(slc: xr.DataArray, simulation: xr.Dataset, multilook: dict) -> tuple[np.ndarray, np.ndarray]:
+def extract_rg_az(reference: xr.DataArray | xr.Dataset, data: xr.Dataset) -> tuple[np.ndarray, np.ndarray]:
     """
     Extract range and azimuth coordinates from a simulation dataset in the SLC's pixel reference system.
 
@@ -420,15 +382,12 @@ def extract_rg_az(slc: xr.DataArray, simulation: xr.Dataset, multilook: dict) ->
         - The azimuth coordinates in relative pixels (`az`).
     """
     # Extract metadata from the SLC attributes.
-    annot = slc.attrs
-    annot = annot[list(annot)[0]]
-    # Calculate the time interval per pixel in azimuth and range.
-    dtaz = annot["RMA"]["INCA"]["TimeCAPoly"]["Coefs"][1] * annot["Grid"]["Col"]["SS"] * 1e9 * multilook["azimuth_time"]
-    dtrg = 2 * annot["Grid"]["Row"]["SS"] / speed_of_light * multilook["slant_range_time"]
-
+    step = get_radar_spacing(reference.azimuth_time, reference.slant_range_time)
+    dtaz = step["azimuth_time"].astype(float)
+    dtrg = step["slant_range_time"]
     # Transform the simulation's absolute time coordinates into the SLC's relative pixel coordinates.
-    rg = ((simulation.slant_range_time - slc.slant_range_time.min()) / dtrg).values
-    az = ((simulation.azimuth_time - slc.azimuth_time.min()).astype(float) / dtaz).values
+    rg = ((data.slant_range_time - reference.slant_range_time.min()) / dtrg).values
+    az = ((data.azimuth_time - reference.azimuth_time.min()).astype(float) / dtaz).values
     # --- Type Checking ---
     if not isinstance(rg, np.ndarray):
         raise Exception(f"Expected np.ndarray, got {type(rg)}")
@@ -439,17 +398,12 @@ def extract_rg_az(slc: xr.DataArray, simulation: xr.Dataset, multilook: dict) ->
 
 @timeit
 def warp_cmlp(
-    empty_dataset: xr.DataArray,
-    cmlp_path: str,
-    slc: xr.DataArray,
+    image: xr.DataArray,
     simulation: xr.Dataset,
+    cmlp: xr.DataTree,
     kernel: dict,
-    multilook: dict,
-    data_path_static: str,
     data_path_tmp: str,
-    do_reramp: bool,
-    gamma_flattening: bool,
-    eps: float = 1e-3,
+    margin: int = 5,
     chunk: dict = {},
     **kwargs,
 ) -> None:
@@ -492,95 +446,118 @@ def warp_cmlp(
     None
     """
     # --- Initialization and Data Loading ---
-    acquisition_date = empty_dataset.acquisition_date.values[0]
-    simul = simulation.isel({k: v for k, v in chunk.items() if k in ["y", "x"]}).squeeze()
-    cmlp = read(
-        f"{cmlp_path}/{acquisition_date}",
-        consolidate_metadata=False,
-        storage_options=get_storage_options(kwargs, key="storage_options_dynamic"),
-    )
-    # Use the first acquisition's simulation as the reference grid.
-    # Define paths to the different components of the coregistered data.
-    # Define the output region for the current chunk.
-    region = {
-        "y": slice(chunk["y"].start, chunk["y"].stop - 1),
-        "x": slice(chunk["x"].start, chunk["x"].stop - 1),
-    }
-    shape, margin = (simul.y.size - 1, simul.x.size - 1), kernel["kernel_shape"] // 2 + 1
-    # --- Coordinate Transformation ---
-    # Convert the ground-projected simulation coordinates into the radar's pixel coordinate system.
-    rg, az = extract_rg_az(slc, simul, multilook=multilook)
+    shape = image.shape
+    method = kwargs.get("method", "linear")
+    acquisition_dates = list(cmlp.keys())
+    product = cmlp[acquisition_dates[0]].ds
+
+    spacing_in = np.abs(simulation.rio.resolution(recalc=True))
+    spacing_out = image.rio.resolution(recalc=True)
+
+    xmin = image.x.min().values - margin * spacing_in[0]
+    xmax = image.x.max().values + margin * spacing_in[0]
+    ymin = image.y.min().values - margin * spacing_in[1]
+    ymax = image.y.max().values + margin * spacing_in[1]
+
+    xslice = slice(xmin, xmax) if spacing_out[0] > 0 else slice(xmax, xmin)
+    yslice = slice(ymin, ymax) if spacing_out[1] > 0 else slice(ymax, ymin)
+
+    simulation = simulation.sel(x=xslice, y=yslice)
+    rg, az = extract_rg_az(product, simulation)
     # Average coordinates to find the center of each pixel.
-    rg, az = (rg[1:, :] + rg[:-1, :]) / 2, (az[1:, :] + az[:-1, :]) / 2
-    rg, az = ((rg[:, 1:] + rg[:, :-1]) / 2).ravel(), ((az[:, 1:] + az[:, :-1]) / 2).ravel()
+    simulation["azimuth_time"].data = az
+    simulation["slant_range_time"].data = rg
+    x_grid, y_grid = np.meshgrid(image.x, image.y)
+
+    # Call the generic dataset interpolation function.
+    simul_out = interp_dataset(
+        data=simulation, xi=(y_grid, x_grid), common_dims=("y", "x"), method=method, fill_value=0.0
+    )
+
+    rg_interp = simul_out.slant_range_time.values.ravel()
+    az_interp = simul_out.azimuth_time.values.ravel()
+
     # Find the indices of points that can be safely interpolated (i.e., not too close to the edge).
+    kernel_margin = kernel["kernel_shape"] // 2 + 1
     (ind,) = np.where(
-        (rg >= margin[1])
-        & (az >= margin[0])
-        & (rg < (cmlp.slant_range_time.size - margin[1]))
-        & (az < (cmlp.azimuth_time.size - margin[0]))
-    )
-    # --- Initialize Output Arrays ---
-    ds = xr.Dataset()
-    for name, var in cmlp.data_vars.items():
-        sh = list(var.shape)
-        sh[-2], sh[-1] = shape[0], shape[1]
-        dims = list(var.dims)
-        dims[-2], dims[-1] = "y", "x"
-        ds[name] = xr.DataArray(np.zeros(sh, dtype=var.dtype), dims=dims)
-    # --- Main Geocoding Loop ---
-    if ind.size > 0:
-        # Define the subset of radar coordinates needed for interpolation.
-        x, y = rg[ind], az[ind]
-        # Calculate the bounding box to read from the coregistered data.
-        xmin, xmax = np.round(x.min() - margin[1]).astype(int), np.round(x.max() + margin[1]).astype(int)
-        ymin, ymax = np.round(y.min() - margin[0]).astype(int), np.round(y.max() + margin[0]).astype(int)
-        # Translate coordinates to be relative to the bounding box origin.
-        x, y = x - xmin, y - ymin
-        # --- Prepare Data for Interpolation ---
-        # Select the required portion of the input data.
-        cmlp = cmlp.isel(slant_range_time=slice(xmin, xmax), azimuth_time=slice(ymin, ymax))
-        # --- Loop over each acquisition date ---
-        for name in cmlp.data_vars.keys():
-            # 1. Evaluate string conditions ONCE outside the loop for speed
-            is_phase = name == "phase"
-            is_coh = "coh" in name
-
-            target = ds[name].data
-            source = cmlp[name].compute().data
-
-            # 2. Create memory-mapped VIEWS
-            spatial_size = target.shape[-2] * target.shape[-1]
-            # target_view is now (N_leading, Y * X)
-            target_view = target.reshape(-1, spatial_size)
-            # source_view is (N_leading, Y, X)
-            source_view = source.reshape(-1, source.shape[-2], source.shape[-1])
-            # 3. Loop and insert
-            for i in range(target_view.shape[0]):
-                inp = source_view[i]
-
-                # 2. Apply the appropriate warping logic
-                if is_phase:
-                    # Wrap phase to complex phasor to avoid interpolation artifacts
-                    complex_phasor = np.exp(1j * inp)
-                    out = np.angle(sinc_warp(complex_phasor, x, y, kernel))
-                else:
-                    # Standard warp for amplitude/coherence/other
-                    out = sinc_warp(inp, x, y, kernel)
-
-                    if is_coh:
-                        # np.clip instantly bounds the array between 0 and 1,
-                        out = np.clip(out, 0.0, 1.0)
-                # 3. Write back into the target view
-                target_view[i, ind] = out
-    # --- Finalize and Write Output ---
-    # Write the resulting GMLP chunk to the temporary Zarr store.
-    write(
-        ds,
-        normpath(f"{data_path_tmp}/GMLP/{acquisition_date}"),
-        region=region,
-        consolidated=False,
-        storage_options=get_storage_options(kwargs, key="storage_options_dynamic"),
+        (rg_interp >= kernel_margin[1])
+        & (az_interp >= kernel_margin[0])
+        & (rg_interp < (product.slant_range_time.size - kernel_margin[1]))
+        & (az_interp < (product.azimuth_time.size - kernel_margin[0]))
     )
 
-    return
+    for date in acquisition_dates:
+        ds = xr.Dataset()
+        radar_data = cmlp[date].to_dataset()
+        for name, var in radar_data.data_vars.items():
+            var_shape = list(var.shape)
+            var_shape[-2], var_shape[-1] = shape[0], shape[1]
+            var_dims = list(var.dims)
+            var_dims[-2], var_dims[-1] = "y", "x"
+            ds[name] = xr.DataArray(np.zeros(var_shape, dtype=var.dtype), dims=var_dims)
+
+        if ind.size > 0:
+            # Define the subset of radar coordinates needed for interpolation.
+            x, y = rg_interp[ind], az_interp[ind]
+
+            # Calculate the bounding box to read from the coregistered data.
+            xmin, xmax = (
+                np.round(x.min() - kernel_margin[1]).astype(int),
+                np.round(x.max() + kernel_margin[1]).astype(int),
+            )
+            ymin, ymax = (
+                np.round(y.min() - kernel_margin[0]).astype(int),
+                np.round(y.max() + kernel_margin[0]).astype(int),
+            )
+
+            # Translate coordinates to be relative to the bounding box origin.
+            x, y = x - xmin, y - ymin
+            # --- Prepare Data for Interpolation ---
+            # Select the required portion of the input data.
+            radar_data = radar_data.isel(slant_range_time=slice(xmin, xmax), azimuth_time=slice(ymin, ymax))
+            # --- Loop over each acquisition date ---
+            for name in radar_data.data_vars.keys():
+                name = str(name)
+                # 1. Evaluate string conditions ONCE outside the loop for speed
+                is_phase = name == "phase"
+                is_coh = "coh" in name
+
+                target = ds[name].data
+                source = radar_data[name].compute().data
+
+                # 2. Create memory-mapped VIEWS
+                spatial_size = target.shape[-2] * target.shape[-1]
+                # target_view is now (N_leading, Y * X)
+                target_view = target.reshape(-1, spatial_size)
+                # source_view is (N_leading, Y, X)
+                source_view = source.reshape(-1, source.shape[-2], source.shape[-1])
+                # 3. Loop and insert
+                for i in range(target_view.shape[0]):
+                    inp = source_view[i]
+
+                    # 2. Apply the appropriate warping logic
+                    if is_phase:
+                        # Wrap phase to complex phasor to avoid interpolation artifacts
+                        complex_phasor = np.exp(1j * inp)
+                        out = np.angle(sinc_warp(complex_phasor, x, y, kernel))
+                    else:
+                        # Standard warp for amplitude/coherence/other
+                        out = sinc_warp(inp, x, y, kernel)
+
+                        if is_coh:
+                            # np.clip instantly bounds the array between 0 and 1,
+                            out = np.clip(out, 0.0, 1.0)
+                    # 3. Write back into the target view
+                    target_view[i, ind] = out
+
+        # --- Finalize and Write Output ---
+        # Write the resulting GMLP chunk to the temporary Zarr store.
+        write(
+            ds,
+            normpath(f"{data_path_tmp}/gmlp/{date}"),
+            region=chunk,
+            consolidated=False,
+            storage_options=get_storage_options(kwargs, key="storage_options_dynamic"),
+        )
+
+        return
