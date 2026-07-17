@@ -3,7 +3,8 @@ import scipy.fft
 import xarray as xr
 from scipy.constants import speed_of_light
 
-from cop_ard_app.model import get_az_rg_times
+from cop_ard_app.model import get_az_rg_times, get_coefficients
+from cop_ard_core.utils import get_phramp_diff
 
 
 # @timeit
@@ -145,10 +146,6 @@ def get_carrier_frequency(slcs: xr.DataTree, path: str) -> float:
     return np.mean(f0)
 
 
-def get_coeff_demod(annot: dict):
-    return (2 * np.pi) * np.polynomial.polynomial.polyint(annot["Grid"]["Col"]["DeltaKCOAPoly"]["Coefs"], axis=1)
-
-
 def get_poly(poly, poly_type: str, dd: str):
     poly.attrs["offset"][0] = np.datetime64(poly.attrs[dd]["offset"][0], "ns")
     poly.attrs[dd]["offset"][1] = np.array(poly.attrs[dd]["offset"][1])
@@ -158,77 +155,8 @@ def get_poly(poly, poly_type: str, dd: str):
     return poly
 
 
-def get_coordinates(y, x, alpha, beta):
-    """
-    Calculates coordinates for polynomial evaluation based on offsets and scaling.
-    """
-    return (((e - alpha[i]).astype("float64") / beta[i].astype("float64")).values for i, e in enumerate([y, x]))
-
-
 # @timeit
-def get_daz_corr(azimuth_time, slant_range_time, y_poly, offset, scale_fact):
-    c1, c2 = get_coordinates(azimuth_time, slant_range_time, offset, scale_fact)
-    return np.polynomial.polynomial.polygrid2d(c1, c2, y_poly)
-
-
-# @timeit
-def get_phramp_diff_(
-    azimuth_time: xr.DataArray,
-    slant_range_time: xr.DataArray,
-    drg: xr.DataArray,
-    daz: xr.DataArray,
-    annot: dict,
-    y_poly: xr.DataArray,
-    multilook: dict,
-):
-
-    # @timeit
-    def poly_combine(rg, az_off, az_ori, coeff_demod):
-        return np.polynomial.polynomial.polyval2d(rg, az_off, coeff_demod) - np.polynomial.polynomial.polyval2d(
-            rg, az_ori, coeff_demod
-        )
-
-    # extract demodulation coefficients
-    coeff_demod = get_coeff_demod(annot)
-
-    # compute spacing and start times
-    dtaz = annot["RMA"]["INCA"]["TimeCAPoly"]["Coefs"][1] * annot["Grid"]["Col"]["SS"] * 1e9
-    scale_daz = 1 / (annot["RMA"]["INCA"]["TimeCAPoly"]["Coefs"][1] * 1e9)
-
-    # compute azimuth correction
-    daz_corr = get_daz_corr(azimuth_time, slant_range_time, y_poly.values, y_poly.offset, y_poly.scale_fact)
-
-    # Corrected slant range and azimuth positions
-    daz_corr = daz + np.round(daz_corr * dtaz).astype("timedelta64[ns]")
-
-    # centre scene coordinates
-    az_time, rg_time = get_az_rg_times(annot)
-
-    rg_mid = rg_time[annot["ImageData"]["SCPPixel"]["Row"]]
-    az_mid = az_time[annot["ImageData"]["SCPPixel"]["Col"]]
-
-    # compute the position in the secondary image corresponding to the reference one with and without corrections in meters wrt the scene centre
-    az_off = ((azimuth_time + daz_corr - az_mid).astype(float) * scale_daz).values
-    az_ori = ((azimuth_time + daz - az_mid).astype(float) * scale_daz).values
-
-    # range in meters wrt the burst center
-    rg = ((slant_range_time + drg - rg_mid).T * (speed_of_light / 2)).values
-
-    # recontruct polynomial function
-    ph_ramp_diff_da = xr.DataArray(
-        poly_combine(rg, az_off, az_ori, coeff_demod),
-        dims=["azimuth_time", "slant_range_time"],
-        coords={
-            "slant_range_time": slant_range_time,
-            "azimuth_time": azimuth_time,
-        },
-    )
-
-    return ph_ramp_diff_da
-
-
-# @timeit
-def get_phramp_diff(
+def get_stack_phramp_diff(
     interf: xr.Dataset, drg_full: xr.DataArray, daz_full: xr.DataArray, annot: dict, y_poly: xr.Dataset, multilook: dict
 ):
     ph_ramp_diff_list = []
@@ -236,14 +164,33 @@ def get_phramp_diff(
     for k, dd in enumerate(interf.acquisition_date.values):
         #  call core function
         y_poly[dd].attrs["type"] = y_poly.type
-        res = get_phramp_diff_(
-            interf.azimuth_time,
-            interf.slant_range_time,
-            drg_full.sel(acquisition_date=dd).coarsen(multilook, boundary="trim").mean(),  # type: ignore mean is injected dynamically
-            daz_full.sel(acquisition_date=dd).coarsen(multilook, boundary="trim").mean(),  # type: ignore mean is injected dynamically
-            annot[dd],
-            y_poly[dd],
-            multilook,
+
+        acquisition_date_annot = annot[dd]
+        # centre scene coordinates
+        az_time, rg_time = get_az_rg_times(acquisition_date_annot)
+
+        rg_mid = rg_time[acquisition_date_annot["ImageData"]["SCPPixel"]["Row"]]
+        az_mid = az_time[acquisition_date_annot["ImageData"]["SCPPixel"]["Col"]]
+
+        timeca_polynomial_coeffs = get_coefficients("RMA.INCA.TimeCAPoly.Coefs", acquisition_date_annot)
+        if timeca_polynomial_coeffs is None:
+            raise ValueError(f"Missing TimeCAPoly coefficients for acquisition date {dd} in annotation.")
+        dkcoa_polynomial_coeffs = get_coefficients("Grid.Col.DeltaKCOAPoly.Coefs", acquisition_date_annot)
+        if dkcoa_polynomial_coeffs is None:
+            raise ValueError(f"Missing DeltaKCOA polynomial coefficients for acquisition date {dd} in annotation.")
+        azimuth_grid_spacing = acquisition_date_annot["Grid"]["Col"]["SS"]
+
+        res = get_phramp_diff(
+            azimuth_time=interf.azimuth_time,
+            slant_range_time=interf.slant_range_time,
+            daz=daz_full.sel(acquisition_date=dd).coarsen(multilook, boundary="trim").mean(),  # type: ignore mean is injected dynamically
+            drg=drg_full.sel(acquisition_date=dd).coarsen(multilook, boundary="trim").mean(),  # type: ignore mean is injected dynamically
+            timeca_polynomial_coeffs=timeca_polynomial_coeffs,
+            dkcoa_polynomial_coeffs=dkcoa_polynomial_coeffs,
+            azimuth_grid_spacing=azimuth_grid_spacing,
+            scp_pixel_azimuth_time=az_mid,
+            scp_pixel_slant_range_time=rg_mid,
+            y_poly=y_poly[dd],
         )
         ph_ramp_diff_list.append(res)
 
