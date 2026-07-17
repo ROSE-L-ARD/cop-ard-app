@@ -1,3 +1,4 @@
+from typing import cast
 import json
 
 import numpy as np
@@ -111,40 +112,6 @@ def extract_coreg_aoi(coreg: xr.Dataset, a_min: float, r_min: float, multilook: 
     return coreg_sel
 
 
-def extract_coreg_aoi_(coreg: xr.Dataset, bbox: tuple, dt_az: float, dt_rg: float, multilook: dict):
-    a_min, a_max, r_min, r_max = bbox
-
-    dt_az_ml = dt_az * multilook["azimuth_time"]
-    dt_rg_ml = dt_rg * multilook["slant_range_time"]
-
-    # extract sub-band
-    cslc = coreg.cstack
-
-    # extract chunksizes
-    chunk_burst = {k: v[0] for k, v in cslc.chunksizes.items() if k in ["azimuth_time", "slant_range_time"]}
-
-    # select area according to the output multilook grid
-    # logger.debug("Select area ...")
-    x_min = np.ceil((cslc.slant_range_time.min().values - r_min) / dt_rg_ml) * dt_rg_ml + r_min
-    x_min = np.round((x_min - cslc.slant_range_time.min().values) / dt_rg).astype(int)
-    x_max = np.floor((cslc.slant_range_time.max().values - r_min) / dt_rg_ml) * dt_rg_ml + r_min
-    x_max = np.round((x_max - cslc.slant_range_time.min().values) / dt_rg).astype(int)
-
-    y_min = (np.ceil((cslc.azimuth_time.min().values - a_min).astype(float) / dt_az_ml) * dt_az_ml).astype(
-        "timedelta64[ns]"
-    ) + a_min
-    y_min = np.round((y_min - cslc.azimuth_time.min().values).astype(float) / dt_az).astype(int)
-    y_max = (np.floor((cslc.azimuth_time.max().values - a_min).astype(float) / dt_az_ml) * dt_az_ml).astype(
-        "timedelta64[ns]"
-    ) + a_min
-    y_max = np.round((y_max - cslc.azimuth_time.min().values).astype(float) / dt_az).astype(int)
-
-    # select the cslc according to the reference grid
-    coreg_sel = coreg.isel(slant_range_time=slice(x_min, x_max), azimuth_time=slice(y_min, y_max)).chunk(chunk_burst)
-
-    return (coreg_sel, y_min, y_max, x_min, x_max)
-
-
 @timeit
 def extract_interf_single(
     burst_id: str,
@@ -218,18 +185,16 @@ def extract_interf_multi(slcs: xr.DataTree, reference_date: str, enable_dask: bo
     ]
     args = list(zip(*args))
 
-    results = map(
-        extract_interf_single,
-        args=args,
-        kwargs={"reference_date": reference_date, **kwargs},
-        enable_dask=enable_dask,
-        combine=False,
+    results = cast(
+        list[tuple[str, xr.Dataset]],
+            map(
+            extract_interf_single,
+            args=args,
+            kwargs={"reference_date": reference_date, **kwargs},
+            enable_dask=enable_dask,
+            combine=False,
+        )
     )
-
-    return results
-
-
-def mosaic_interf(results: tuple) -> xr.Dataset:
 
     interf = xr.DataTree()
     for id, (burst_id, ds) in enumerate(results):
@@ -238,7 +203,12 @@ def mosaic_interf(results: tuple) -> xr.Dataset:
         )
         interf[f"bursts/{burst_id}"] = ds
 
-    mosaic = (
+    return interf
+
+
+def mosaic_interf(interf: xr.DataTree) -> xr.Dataset:
+
+    mosaic: xr.Dataset = (
         interf.bursts[list(interf.bursts.children)[0]]
         .to_dataset()
         .isel(azimuth_time=slice(3, -3), slant_range_time=slice(3, -8))
@@ -262,9 +232,9 @@ def mosaic_interf(results: tuple) -> xr.Dataset:
 def get_mosaic_interf(slcs: xr.DataTree, reference_date: str, **kwargs) -> xr.Dataset:
 
     # compute interferograms in correspondence of each burst
-    results = extract_interf_multi(slcs, reference_date, **kwargs)
+    interf = extract_interf_multi(slcs, reference_date, **kwargs)
 
     # mosaic all interferograms
-    mosaic = mosaic_interf(results)
+    mosaic = mosaic_interf(interf)
 
     return mosaic
