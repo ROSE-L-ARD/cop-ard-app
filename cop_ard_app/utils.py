@@ -421,8 +421,8 @@ def griddata_interp(data: xr.Dataset, out_coords):
     )
 
 
-def get_interf(a, b, ml_factor):
-    return (a * b.conj()).coarsen(ml_factor, boundary="trim").mean()
+def get_interf(a: xr.DataArray, b: xr.DataArray, ml_factor: dict[str, int]):
+    return (a * b.conj()).coarsen(ml_factor, boundary="trim").mean()  # type: ignore mean is injected dynamically
 
 
 # def get_normalized_interf(a, b, ml_factor, rel_thresh=None, abs_thresh=1e-6):
@@ -441,7 +441,11 @@ def get_interf(a, b, ml_factor):
 #     return coh.where(valid_mask, 0j).fillna(0j)
 
 
-def get_normalized_interf(a, b, ml_factor):
+def get_normalized_interf(
+    a: xr.DataArray,
+    b: xr.DataArray,
+    ml_factor: dict[str, int],
+) -> xr.DataArray:
     return (get_interf(a, b, ml_factor) / np.sqrt(get_interf(a, a, ml_factor) * get_interf(b, b, ml_factor))).fillna(0j)
 
 

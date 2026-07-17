@@ -4,6 +4,8 @@ from typing import cast
 
 import numpy as np
 import scipy.optimize
+import scipy.sparse
+import scipy.sparse.linalg
 import xarray as xr
 from numba import njit
 
@@ -19,17 +21,16 @@ def to_dataset(X, acquisition_date, poly_degree, t0, r0, s_y, s_x):
         return m
 
     axis = np.arange(poly_degree + 1)
-    da = [
-        xr.DataArray(
-            name=str(dd),
+    data_vars = {
+        str(dd): xr.DataArray(
             data=to_polygrid2d(X[i, :]),
             dims=["i", "j"],
             coords={"i": axis, "j": axis},
             attrs={"deg": poly_degree, "offset": (t0, r0), "scale_fact": (s_y, s_x)},
         )
         for i, dd in enumerate(acquisition_date.values)
-    ]
-    return xr.Dataset({e.name: e for e in da})
+    }
+    return xr.Dataset(data_vars)
 
 
 def find_global_shift(
@@ -45,9 +46,6 @@ def find_global_shift(
     residual shift between each image of the stack and a reference date
 
     """
-    import scipy.sparse
-    import scipy.sparse.linalg
-
     # number of vars and eqs #
     n_eq = esd.acquisition_date.size
     n_vars = n_eq * (poly_degree + 1)
