@@ -4,36 +4,35 @@ from typing import cast
 import numpy as np
 import xarray as xr
 from cop_ard_core.logger import logger
+from cop_ard_core.unwrap import unwrap_phase
 
 from cop_ard_app.computation import map
 from cop_ard_app.detrend import fit, fit_2d_poly, get_model_matrix
 from cop_ard_app.esd import estimate
 from cop_ard_app.interf import get_mosaic_interf
 from cop_ard_app.io import Path, read, write
-from cop_ard_app.unwrap import unwrap_phase
-from cop_ard_app.utils import get_azimuth_time_raw, get_bounding_box, get_carrier_frequency, wrap
+from cop_ard_app.model import get_carrier_frequency
+from cop_ard_app.utils import get_azimuth_time_raw, get_bounding_box, wrap
 
 
-def joint_unwrap(mosaic_l: xr.Dataset, mosaic_h: xr.Dataset, cohe_th: float = 0.3):
-
-    cohe_th = 0.3
-
-    # TO BE MANAGED MULTIPLE POLARIZATIONS AND ACQUISITION DATES
-    mosaic_h_sel = mosaic_h.isel(polarization=0, acquisition_date=1)
-    mosaic_l_sel = mosaic_l.isel(polarization=0, acquisition_date=1)
+def joint_unwrap(
+    mosaic_l_coherence: xr.DataArray,
+    mosaic_h_coherence: xr.DataArray,
+    mosaic_l_phase: xr.DataArray,
+    mosaic_h_phase: xr.DataArray,
+    cohe_th: float = 0.3,
+):
 
     # extract the average coherence between the two sub-bands
-    cohe_mask = xr.apply_ufunc(np.sqrt, (mosaic_h_sel.cohe) * (mosaic_l_sel.cohe), dask="parallelized")
+    cohe_mask = xr.ufuncs.sqrt(mosaic_h_coherence * mosaic_l_coherence)
 
     # compute the average phase between the two sub-bands
-    ph_mean = xr.apply_ufunc(
-        np.angle, np.exp(1j * (mosaic_h_sel.phase) + np.exp(1j * mosaic_l_sel.phase)), dask="parallelized"
-    )
+    ph_mean = xr.ufuncs.angle(np.exp(1j * (mosaic_h_phase) + np.exp(1j * mosaic_l_phase)))
     ph_mean_unw = unwrap_phase(ph_mean, cohe_mask, threshold=cohe_th)
 
     # unwrap sub-band residues and add back the average phase
-    ph_h_unw = unwrap_phase(wrap(mosaic_h_sel.phase - ph_mean_unw), cohe_mask, threshold=cohe_th) + ph_mean_unw
-    ph_l_unw = unwrap_phase(wrap(mosaic_l_sel.phase - ph_mean_unw), cohe_mask, threshold=cohe_th) + ph_mean_unw
+    ph_h_unw = unwrap_phase(wrap(mosaic_h_phase - ph_mean_unw), cohe_mask, threshold=cohe_th) + ph_mean_unw
+    ph_l_unw = unwrap_phase(wrap(mosaic_l_phase - ph_mean_unw), cohe_mask, threshold=cohe_th) + ph_mean_unw
 
     return ph_l_unw, ph_h_unw
 
@@ -89,7 +88,14 @@ def separate_dispersive_spectrum_components(
     mosaic_h = cast(xr.Dataset, write(mosaic_h, data_path=mosaic_h_path, mode="w"))
 
     # joint interferogram phase unwrapping
-    phase_unw_l, phase_unw_h = joint_unwrap(mosaic_l, mosaic_h, cohe_th=cohe_th)
+
+    # TODO MANAGE MULTIPLE POLARIZATIONS AND ACQUISITION DATES
+    mosaic_h_sel = mosaic_h.isel(polarization=0, acquisition_date=1)
+    mosaic_l_sel = mosaic_l.isel(polarization=0, acquisition_date=1)
+
+    phase_unw_l, phase_unw_h = joint_unwrap(
+        mosaic_l_sel.cohe, mosaic_h_sel.cohe, mosaic_l_sel.phase, mosaic_h_sel.phase, cohe_th=cohe_th
+    )
     phase_tot_l = phase_unw_l + mosaic_l.phase_ramp if "phase_ramp" in mosaic_l.data_vars else phase_unw_l
     phase_tot_h = phase_unw_h + mosaic_h.phase_ramp if "phase_ramp" in mosaic_h.data_vars else phase_unw_h
 
