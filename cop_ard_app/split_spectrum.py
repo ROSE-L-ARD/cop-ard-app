@@ -53,7 +53,7 @@ def split_spectrum_core(
     return phase_iono, phase_nd
 
 
-def split_spectrum(
+def split_dispersive_spectrum_components(
     slcs: xr.DataTree,
     reference_date: str,
     frequency_offset: float,
@@ -239,7 +239,7 @@ def remove_iono_surface(
     return updated_slcs
 
 
-def split_spectrum_flow(
+def split_spectrum(
     slcs: xr.DataTree,
     reference_date: str,
     multilook: dict,
@@ -262,7 +262,7 @@ def split_spectrum_flow(
 
     # separate dispersive and non-dispersive components
     logger.debug("separate dispersive and non-dispersive components")
-    phase_iono, phase_nd = split_spectrum(
+    phase_iono, phase_nd = split_dispersive_spectrum_components(
         slcs,
         reference_date,
         frequency_offset=frequency_offset,
