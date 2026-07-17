@@ -269,34 +269,6 @@ def get_azimuth_time_raw(burst: xr.DataArray, multilook: dict | None = None) -> 
     )
 
 
-def get_carrier_frequency(slcs: xr.DataTree, path: str) -> float:
-    """
-    Compute the mean carrier frequency of the bursts.
-
-    This function iterates over all bursts in a stack of SLCs and extracts the carrier frequency attribute.
-
-    Parameters
-    ----------
-    slcs : xr.DataTree
-        A DataTree containing multiple SAR bursts, each with `azimuth_time` and `slant_range_time` coordinates.
-
-    Returns
-    -------
-    float
-        Average carrier frequency.
-    """
-    f0 = []
-
-    for burst in slcs.values():
-        _, annot = next(iter(burst[path].attrs.items()))
-        f0.append((annot["RadarCollection"]["TxFrequency"]["Max"] + annot["RadarCollection"]["TxFrequency"]["Min"]) / 2)
-
-    if len(f0) <= 0:
-        raise ValueError("Null slc in input")
-
-    return np.mean(f0)
-
-
 def get_poly(poly, poly_type: str, dd: str):
     poly.attrs["offset"][0] = np.datetime64(poly.attrs[dd]["offset"][0], "ns")
     poly.attrs[dd]["offset"][1] = np.array(poly.attrs[dd]["offset"][1])
