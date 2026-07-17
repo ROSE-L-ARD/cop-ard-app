@@ -2,7 +2,7 @@ import numpy as np
 import xarray as xr
 from cop_ard_core.logger import logger, timeit
 
-import cop_ard_app.ard_utils
+import cop_ard_app.utils
 from cop_ard_app.io import (
     get_storage_options,
     normpath,
@@ -338,7 +338,7 @@ def _compute_and_save_interferogram(
         The computed normalized interferogram (complex).
     """
     # 1. Compute Normalized Interferogram
-    normalized_interf = cop_ard_app.ard_utils.get_normalized_interf(target_slc, reference_slc, multilook).values
+    normalized_interf = cop_ard_app.utils.get_normalized_interf(target_slc, reference_slc, multilook).values
 
     # 2. Extract Statistics
     data = {}
@@ -551,9 +551,7 @@ def _correct_drift(
         stable_ref_slice = stable_cstack.sel(acquisition_date=stable_date)
 
         # Calculate interference between history and current
-        normalized_vals = cop_ard_app.ard_utils.get_normalized_interf(
-            current_reference, stable_ref_slice, multilook
-        ).values
+        normalized_vals = cop_ard_app.utils.get_normalized_interf(current_reference, stable_ref_slice, multilook).values
         coherence = np.abs(normalized_vals)
         is_empty = np.isnan(drift_interf)
         # Check if we are fully filled

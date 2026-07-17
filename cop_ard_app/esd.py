@@ -7,9 +7,9 @@ import scipy.optimize
 import xarray as xr
 from numba import njit
 
-from cop_ard_app.ard_utils import wrap
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.interf import compute_interf_norm
+from cop_ard_app.utils import wrap
 
 
 def to_dataset(X, acquisition_date, poly_degree, t0, r0, s_y, s_x):

@@ -4,8 +4,14 @@ import numpy as np
 import xarray as xr
 from cop_ard_core.logger import timeit
 
-from cop_ard_app.ard_utils import extract_subband, get_azimuth_time_raw, get_phramp_diff, time_to_pixel, wrap
 from cop_ard_app.computation import map
+from cop_ard_app.utils import (
+    extract_subband,
+    get_azimuth_time_raw,
+    get_stack_phramp_diff,
+    time_to_pixel,
+    wrap,
+)
 
 
 # @timeit
@@ -182,7 +188,7 @@ def extract_interf_single(
     if y_poly is not None:
         # logger.debug("save phase_ramp")
         # compute multilooked phase corrections
-        ph_ramp_diff_ml = get_phramp_diff(
+        ph_ramp_diff_ml = get_stack_phramp_diff(
             interf.drop_vars(interf.data_vars), coreg_sel.drg, coreg_sel.daz, annot, y_poly, multilook
         )
         ph_ramp_diff_ml["slant_range_time"] = interf["slant_range_time"]

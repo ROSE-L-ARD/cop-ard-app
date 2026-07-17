@@ -8,7 +8,7 @@ import scipy.spatial
 import xarray as xr
 from cop_ard_core.logger import logger, timeit
 
-from cop_ard_app.ard_utils import wrap
+from cop_ard_app.utils import wrap
 
 MAXJUMP = 1_000
 MAXCOST = 1_000
