@@ -11,11 +11,11 @@ from typing import Literal, Sequence
 import numpy as np
 import structlog
 import xarray as xr
+from cop_ard_core.detrend import estimate_global_surface
 from scipy.constants import speed_of_light
 from xrspatial.convolution import convolution_2d as conv
 
 from cop_ard_app.computation import map_blocks
-from cop_ard_app.detrend import estimate_global_surface
 
 logger = structlog.get_logger(__name__)
 

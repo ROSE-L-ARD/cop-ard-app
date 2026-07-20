@@ -3,11 +3,11 @@ from typing import cast
 
 import numpy as np
 import xarray as xr
+from cop_ard_core.detrend import fit, fit_2d_poly, get_model_matrix
 from cop_ard_core.logger import logger
 from cop_ard_core.unwrap import unwrap_phase
 
 from cop_ard_app.computation import map
-from cop_ard_app.detrend import fit, fit_2d_poly, get_model_matrix
 from cop_ard_app.esd import estimate
 from cop_ard_app.interf import get_mosaic_interf
 from cop_ard_app.io import Path, read, write
