@@ -2,6 +2,7 @@ from typing import cast
 
 import numpy as np
 import xarray as xr
+from cop_ard_core.cmlp import update_recursive_reference
 from cop_ard_core.logger import timeit
 
 import cop_ard_app.utils
@@ -174,19 +175,17 @@ def single_cmlp(
         )
 
         # Step 2: Update the Reference State
-        current_reference = _update_recursive_reference(
+        current_reference = update_recursive_reference(
             slc=slc,
             current_reference=current_reference,
             normalized_interf=normalized_interf,
             memory_param=memory_param,
-            chunks=chunks,
-        )
+        ).compute().chunk(chunks)
 
         if date in stable_reference_dates:
             stable_reference = _update_stable_reference(
                 current_reference=current_reference,
                 date=date,
-                stable_reference_dates=stable_reference_dates,
                 data_path=data_path,
                 pad=pad,
                 chunks=chunks,
@@ -204,10 +203,9 @@ def single_cmlp(
                 current_reference=current_reference,
                 multilook=multilook,
                 coherence_threshold=coherence_threshold,
-                chunks=chunks,
                 shape=normalized_interf.shape,
                 output_path=f"{data_path}/cmlp/{date}",
-            )
+            ).compute().chunk(chunks)
     current_reference = current_reference.assign_coords({"acquisition_date": date})
     current_reference = write(
         current_reference, f"{data_path}/current_reference", storage_options=get_storage_options(kwargs)
@@ -449,9 +447,9 @@ def _compute_and_save_interferogram(
 
     # 2. Extract Statistics
     data = {}
-    data[name] = (SHORT_DIMS, np.abs(normalized_interf))
+    data[name] = (SHORT_DIMS, abs(normalized_interf))
     if compute_phase:
-        data["phase"] = (SHORT_DIMS, np.angle(normalized_interf))
+        data["phase"] = (SHORT_DIMS, xr.ufuncs.angle(normalized_interf))
     ds = xr.Dataset(data)
 
     # 3. Write to Disk
@@ -464,41 +462,6 @@ def _compute_and_save_interferogram(
     )
 
     return normalized_interf
-
-
-def _update_recursive_reference(
-    slc: xr.DataArray,
-    current_reference: xr.DataArray,
-    normalized_interf: xr.DataArray,
-    memory_param: float,
-    chunks: dict,
-) -> xr.DataArray:
-    """
-    Updates the recursive reference using the current SLC and the
-    upsampled phasor from the normalized interferogram.
-    """
-    # 1. Extract unit phasor
-    normalized_interf = normalized_interf.data
-    magnitude = np.abs(normalized_interf)
-    safe_magnitude = np.where(magnitude > 0, magnitude, 1.0)
-    phasor_interf = normalized_interf / safe_magnitude
-
-    # 2. Explicitly unpack dimensions for readability
-    _, coarse_az, coarse_rg = phasor_interf.shape
-    n_bands, full_az, full_rg = slc.shape
-
-    # 3. Define 5D shapes for block-wise broadcasting
-    blocked_slc_shape = (n_bands, coarse_az, full_az // coarse_az, coarse_rg, full_rg // coarse_rg)
-    broadcast_phasor_shape = (n_bands, coarse_az, 1, coarse_rg, 1)
-
-    # 4. Apply phase rotation using underlying Dask/NumPy arrays
-    correction = slc.data.reshape(blocked_slc_shape) * phasor_interf.reshape(broadcast_phasor_shape).conj()
-    mask = np.isnan(correction)
-    correction[mask] = 0
-    # Apply fading memory filter
-    new_reference = (memory_param * current_reference) + correction.reshape(slc.shape)
-
-    return new_reference.compute().chunk(chunks)
 
 
 def get_current_reference(
@@ -547,7 +510,6 @@ def get_current_reference(
 def _update_stable_reference(
     current_reference: xr.DataArray,
     date: np.datetime64,
-    stable_reference_dates: np.ndarray,
     data_path: str,
     pad: dict,
     chunks: dict,
@@ -564,8 +526,6 @@ def _update_stable_reference(
         The current running reference to be saved.
     date : np.datetime64
         The current acquisition date (must be present in stable_reference_dates).
-    stable_reference_dates : np.ndarray
-        Array of all pre-calculated stable reference dates.
     data_path : str
         Base path for data storage.
     pad : dict
@@ -617,7 +577,6 @@ def _correct_drift(
     current_reference: xr.DataArray,
     multilook: dict,
     coherence_threshold: float,
-    chunks: dict,
     shape: tuple,
     output_path: str,
 ) -> xr.DataArray:
@@ -703,8 +662,6 @@ def _correct_drift(
             dims=current_reference.dims,
             coords=current_reference.coords,
         )
-        .compute()
-        .chunk(chunks)
     )
     corrected_reference.attrs = current_reference.attrs
     return corrected_reference
