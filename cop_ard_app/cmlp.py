@@ -175,12 +175,16 @@ def single_cmlp(
         )
 
         # Step 2: Update the Reference State
-        current_reference = update_recursive_reference(
-            slc=slc,
-            current_reference=current_reference,
-            normalized_interf=normalized_interf,
-            memory_param=memory_param,
-        ).compute().chunk(chunks)
+        current_reference = (
+            update_recursive_reference(
+                slc=slc,
+                current_reference=current_reference,
+                normalized_interf=normalized_interf,
+                memory_param=memory_param,
+            )
+            .compute()
+            .chunk(chunks)
+        )
 
         if date in stable_reference_dates:
             stable_reference = _update_stable_reference(
@@ -198,14 +202,18 @@ def single_cmlp(
                 acquisition_date=slice(-max_past_stable_history, None)
             )
 
-            current_reference = _correct_drift(
-                stable_reference=stable_reference,
-                current_reference=current_reference,
-                multilook=multilook,
-                coherence_threshold=coherence_threshold,
-                shape=normalized_interf.shape,
-                output_path=f"{data_path}/cmlp/{date}",
-            ).compute().chunk(chunks)
+            current_reference = (
+                _correct_drift(
+                    stable_reference=stable_reference,
+                    current_reference=current_reference,
+                    multilook=multilook,
+                    coherence_threshold=coherence_threshold,
+                    shape=normalized_interf.shape,
+                    output_path=f"{data_path}/cmlp/{date}",
+                )
+                .compute()
+                .chunk(chunks)
+            )
     current_reference = current_reference.assign_coords({"acquisition_date": date})
     current_reference = write(
         current_reference, f"{data_path}/current_reference", storage_options=get_storage_options(kwargs)
@@ -656,12 +664,10 @@ def _correct_drift(
     corrected_reference = (current_reference.data.reshape(shape) * drift_phasor.reshape(shape_ph).conj()).reshape(
         current_reference.shape
     )
-    corrected_reference = (
-        xr.DataArray(
-            corrected_reference,
-            dims=current_reference.dims,
-            coords=current_reference.coords,
-        )
+    corrected_reference = xr.DataArray(
+        corrected_reference,
+        dims=current_reference.dims,
+        coords=current_reference.coords,
     )
     corrected_reference.attrs = current_reference.attrs
     return corrected_reference
