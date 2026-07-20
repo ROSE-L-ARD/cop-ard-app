@@ -4,9 +4,7 @@ from typing import cast
 import numpy as np
 import xarray as xr
 from cop_ard_core.logger import logger
-from cop_ard_core.split_spectrum import fit_ionosphere, reconstruct_iono_surface
-from cop_ard_core.unwrap import unwrap_phase
-from cop_ard_core.utils import wrap
+from cop_ard_core.split_spectrum import fit_ionosphere, joint_unwrap, reconstruct_iono_surface, split_spectrum_core
 
 from cop_ard_app.computation import map
 from cop_ard_app.esd import estimate
@@ -14,43 +12,6 @@ from cop_ard_app.interf import get_mosaic_interf
 from cop_ard_app.io import Path, read, write
 from cop_ard_app.model import get_carrier_frequency
 from cop_ard_app.utils import get_azimuth_time_raw, get_bounding_box
-
-
-def joint_unwrap(
-    mosaic_l_coherence: xr.DataArray,
-    mosaic_h_coherence: xr.DataArray,
-    mosaic_l_phase: xr.DataArray,
-    mosaic_h_phase: xr.DataArray,
-    cohe_th: float = 0.3,
-):
-
-    # extract the average coherence between the two sub-bands
-    cohe_mask = xr.ufuncs.sqrt(mosaic_h_coherence * mosaic_l_coherence)
-
-    # compute the average phase between the two sub-bands
-    ph_mean = xr.ufuncs.angle(np.exp(1j * (mosaic_h_phase) + np.exp(1j * mosaic_l_phase)))
-    ph_mean_unw = unwrap_phase(ph_mean, cohe_mask, threshold=cohe_th)
-
-    # unwrap sub-band residues and add back the average phase
-    ph_h_unw = unwrap_phase(wrap(mosaic_h_phase - ph_mean_unw), cohe_mask, threshold=cohe_th) + ph_mean_unw
-    ph_l_unw = unwrap_phase(wrap(mosaic_l_phase - ph_mean_unw), cohe_mask, threshold=cohe_th) + ph_mean_unw
-
-    return ph_l_unw, ph_h_unw
-
-
-def split_spectrum_core(
-    phase_unw_l: xr.DataArray, phase_unw_h: xr.DataArray, f0: float, f_l_tot: float, f_h_tot: float
-) -> tuple[xr.DataArray, xr.DataArray]:
-
-    # dispersive component
-    phase_iono = (
-        (phase_unw_l * (f_h_tot / f0) - phase_unw_h * (f_l_tot / f0)) * (f_l_tot * f_h_tot) / (f_h_tot**2 - f_l_tot**2)
-    )
-
-    # non-dispersive component
-    phase_nd = (phase_unw_h * (f_h_tot / f0) - phase_unw_l * (f_l_tot / f0)) * f0 / (2 * (f_h_tot - f_l_tot))
-
-    return phase_iono, phase_nd
 
 
 def separate_dispersive_spectrum_components(
