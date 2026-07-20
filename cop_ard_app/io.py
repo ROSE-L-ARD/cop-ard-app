@@ -885,7 +885,7 @@ class Path:
             A new `Path` object representing the final destination path.
         """
         # If the destination is a directory, construct the full destination path.
-        _dst = self.replace_dir(dst) if isdir(dst) or dst.endswith("/") else dst
+        _dst = self.replace_dir(dst)._path if isdir(dst) or dst.endswith("/") else dst
         # Call the underlying copy function and return the result as a new Path object.
         return Path(
             copy(
@@ -898,7 +898,7 @@ class Path:
             temp_dir=self._temp_dir,
         )
 
-    def move(self, dst, recursive=False, only_if_different_fs=False) -> "Path":
+    def move(self, dst: str, recursive=False, only_if_different_fs=False) -> "Path":
         """
         Move the file or directory to a destination.
 
@@ -920,7 +920,7 @@ class Path:
             A new `Path` object representing the final destination path.
         """
         # If the destination is a directory, construct the full destination path.
-        _dst = self.replace_dir(dst) if isdir(dst) or dst.endswith("/") else dst
+        _dst = self.replace_dir(dst)._path if isdir(dst) or dst.endswith("/") else dst
         # Call the underlying move function and return the result as a new Path object.
         return Path(
             move(
@@ -1382,7 +1382,7 @@ def get_id_product(stac, burst_id: str | None = None, tile_name: str | None = No
 
 @overload
 def read(
-    data_path: str,
+    data_path: str | Path,
     group: str | None = None,
     as_type: Literal["xr.DataArray"] = ...,
     consolidated: bool = True,
@@ -1394,7 +1394,7 @@ def read(
 
 @overload
 def read(
-    data_path: str,
+    data_path: str | Path,
     group: str | None = None,
     as_type: Literal["xr.Dataset"] = ...,
     consolidated: bool = True,
@@ -1406,7 +1406,7 @@ def read(
 
 @overload
 def read(
-    data_path: str,
+    data_path: str | Path,
     group: str | None = None,
     as_type: None = None,
     consolidated: bool = True,
@@ -1418,7 +1418,7 @@ def read(
 
 @overload
 def read(
-    data_path: str,
+    data_path: str | Path,
     group: str | None = None,
     as_type: str | None = None,
     consolidated: bool = True,
