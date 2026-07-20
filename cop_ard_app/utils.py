@@ -323,11 +323,6 @@ def get_stack_phramp_diff(
     )
 
 
-def wrap(v: np.ndarray, w: float = 2 * np.pi):
-    w_ = w / 2.0
-    return ((v + w_) % w) - w_
-
-
 def sparse_multilook(data: xr.Dataset, cohe_th: float, multilook: dict):
     coords = list(multilook.keys())
     if not np.all([e in data.dims for e in coords]):

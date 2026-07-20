@@ -7,11 +7,11 @@ import scipy.optimize
 import scipy.sparse
 import scipy.sparse.linalg
 import xarray as xr
+from cop_ard_core.utils import wrap
 from numba import njit
 
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.interf import compute_interf_norm
-from cop_ard_app.utils import wrap
 
 
 def to_dataset(X, acquisition_date, poly_degree, t0, r0, s_y, s_x):
