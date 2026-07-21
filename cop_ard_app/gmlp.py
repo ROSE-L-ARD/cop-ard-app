@@ -11,18 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import cast
+from typing import Generator, cast
 
 import numpy as np
 import xarray as xr
 from cop_ard_core.dem import compute_shape_and_off
+from cop_ard_core.gmlp import get_radar_spacing, warp_cmlp
 from cop_ard_core.griddata import interp_dataset
 from cop_ard_core.logger import timeit
 from cop_ard_core.simul import extract_simul_on_radar_chunk, get_geo_from_radar_bbox, get_radar_bbox
-from cop_ard_core.warp import sinc, sinc_warp
+from cop_ard_core.warp import extract_rg_az, sinc
 
 from cop_ard_app.computation import map, map_blocks
-from cop_ard_app.io import get_storage_options, normpath, read, save_empty_dataset, write
+from cop_ard_app.io import get_storage_options, normpath, read, save_empty_dataset
 
 DIMS = ["polarization", "y", "x"]
 LONG_DIMS = ["polarization", "past_reference_date", "y", "x"]
@@ -216,19 +217,6 @@ def single_gmlp(
     return (burst_id, dt)
 
 
-def get_radar_spacing(azimuth_time: xr.DataArray, slant_range_time: xr.DataArray):
-
-    az_diffs = np.diff(azimuth_time)
-    sr_diffs = np.diff(slant_range_time)
-
-    unique_az, counts_az = np.unique(az_diffs, return_counts=True)
-    unique_sr, counts_sr = np.unique(sr_diffs, return_counts=True)
-
-    step = {"azimuth_time": unique_az[np.argmax(counts_az)], "slant_range_time": unique_sr[np.argmax(counts_sr)]}
-
-    return step
-
-
 def map_geocoding_cmlp(
     cmlp: xr.DataTree,
     simulation: xr.Dataset,
@@ -339,19 +327,38 @@ def map_geocoding_cmlp(
         )
 
     image = image.phase.isel({k: 0 for k in image.phase.dims if k not in ["y", "x"]})
+    dtaz, dtrg = get_radar_spacing(image.azimuth_time, image.slant_range_time)
+    acquisition_dates = list(cmlp.keys())
+    product = cmlp[acquisition_dates[0]].ds
 
     # --- Map the Geocoding Worker Function ---
     # This call applies the `warp_cmlp` function to each block of the simulation grid.
+    save_options = {
+        i: {
+            "data_path": normpath(f"{data_path_tmp}/gmlp/{date}"),
+            "save_options": {
+                "consolidated": False,
+                "storage_options": get_storage_options(kwargs, key="storage_options_dynamic"),
+            },
+        }
+        for i, date in enumerate(acquisition_dates)
+    }
+
     map_blocks(
-        warp_cmlp,
+        blockwise_warp_cmlp,
         image,
-        args=(selection, cmlp, kernel, data_path_tmp),
-        kwargs=kwargs,
+        args=(selection, product, cmlp, acquisition_dates, kernel, data_path_tmp),
+        kwargs=kwargs
+        | {
+            "dtaz": dtaz,
+            "dtrg": dtrg,
+        },
         combine=False,
         enable_dask=enable_dask,
+        store_mapping=save_options,
     )
     dt = xr.DataTree()
-    for date in cmlp.keys():
+    for date in acquisition_dates:
         data = read(
             normpath(f"{data_path_tmp}/gmlp/{date}"),
             storage_options=get_storage_options(kwargs, key="storage_options_dynamic"),
@@ -360,53 +367,19 @@ def map_geocoding_cmlp(
     return dt
 
 
-def extract_rg_az(reference: xr.DataArray | xr.Dataset, data: xr.Dataset) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Extract range and azimuth coordinates from a simulation dataset in the SLC's pixel reference system.
-
-    Parameters
-    ----------
-    slc : xr.DataArray
-        The input SLC DataArray, used for its metadata and
-        as the reference for the pixel coordinate system origin
-        (minimum azimuth and range times).
-    simulation : xr.Dataset
-        The simulation dataset containing `slant_range_time` and
-        `azimuth_time` coordinates to be converted.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        A tuple containing two numpy arrays:
-        - The range coordinates in relative pixels (`rg`).
-        - The azimuth coordinates in relative pixels (`az`).
-    """
-    # Extract metadata from the SLC attributes.
-    step = get_radar_spacing(reference.azimuth_time, reference.slant_range_time)
-    dtaz = step["azimuth_time"].astype(float)
-    dtrg = step["slant_range_time"]
-    # Transform the simulation's absolute time coordinates into the SLC's relative pixel coordinates.
-    rg = ((data.slant_range_time - reference.slant_range_time.min()) / dtrg).values
-    az = ((data.azimuth_time - reference.azimuth_time.min()).astype(float) / dtaz).values
-    # --- Type Checking ---
-    if not isinstance(rg, np.ndarray):
-        raise Exception(f"Expected np.ndarray, got {type(rg)}")
-    if not isinstance(az, np.ndarray):
-        raise Exception(f"Expected np.ndarray, got {type(az)}")
-    return rg, az
-
-
-@timeit
-def warp_cmlp(
+def blockwise_warp_cmlp(
     image: xr.DataArray,
     simulation: xr.Dataset,
+    product: xr.Dataset,
     cmlp: xr.DataTree,
+    acquisition_dates: xr.DataArray,
     kernel: dict,
-    data_path_tmp: str,
+    dtaz: float,
+    dtrg: float,
     margin: int = 5,
-    chunk: dict = {},
+    method: str = "linear",
     **kwargs,
-) -> None:
+) -> Generator[xr.Dataset, None, None]:
     """
     Warp coregistered SLC data to a ground-projected grid (Geocoded SLC).
 
@@ -447,9 +420,6 @@ def warp_cmlp(
     """
     # --- Initialization and Data Loading ---
     shape = image.shape
-    method = kwargs.get("method", "linear")
-    acquisition_dates = list(cmlp.keys())
-    product = cmlp[acquisition_dates[0]].ds
 
     spacing_in = np.abs(simulation.rio.resolution(recalc=True))
     spacing_out = image.rio.resolution(recalc=True)
@@ -463,7 +433,7 @@ def warp_cmlp(
     yslice = slice(ymin, ymax) if spacing_out[1] > 0 else slice(ymax, ymin)
 
     simulation = simulation.sel(x=xslice, y=yslice)
-    rg, az = extract_rg_az(product, simulation)
+    rg, az = extract_rg_az(product, simulation, dtaz=dtaz, dtrg=dtrg)
     # Average coordinates to find the center of each pixel.
     simulation["azimuth_time"].data = az
     simulation["slant_range_time"].data = rg
@@ -521,43 +491,14 @@ def warp_cmlp(
                 # 1. Evaluate string conditions ONCE outside the loop for speed
                 is_phase = name == "phase"
                 is_coh = "coh" in name
-
-                target = ds[name].data
-                source = radar_data[name].compute().data
-
-                # 2. Create memory-mapped VIEWS
-                spatial_size = target.shape[-2] * target.shape[-1]
-                # target_view is now (N_leading, Y * X)
-                target_view = target.reshape(-1, spatial_size)
-                # source_view is (N_leading, Y, X)
-                source_view = source.reshape(-1, source.shape[-2], source.shape[-1])
-                # 3. Loop and insert
-                for i in range(target_view.shape[0]):
-                    inp = source_view[i]
-
-                    # 2. Apply the appropriate warping logic
-                    if is_phase:
-                        # Wrap phase to complex phasor to avoid interpolation artifacts
-                        complex_phasor = np.exp(1j * inp)
-                        out = np.angle(sinc_warp(complex_phasor, x, y, kernel))
-                    else:
-                        # Standard warp for amplitude/coherence/other
-                        out = sinc_warp(inp, x, y, kernel)
-
-                        if is_coh:
-                            # np.clip instantly bounds the array between 0 and 1,
-                            out = np.clip(out, 0.0, 1.0)
-                    # 3. Write back into the target view
-                    target_view[i, ind] = out
-
-        # --- Finalize and Write Output ---
-        # Write the resulting GMLP chunk to the temporary Zarr store.
-        write(
-            ds,
-            normpath(f"{data_path_tmp}/gmlp/{date}"),
-            region=chunk,
-            consolidated=False,
-            storage_options=get_storage_options(kwargs, key="storage_options_dynamic"),
-        )
-
-        return
+                warp_cmlp(
+                    source=radar_data[name],
+                    target=ds[name],
+                    target_indexes=ind,
+                    x=x,
+                    y=y,
+                    kernel=kernel,
+                    is_phase=is_phase,
+                    is_coherence=is_coh,
+                )
+        yield ds
