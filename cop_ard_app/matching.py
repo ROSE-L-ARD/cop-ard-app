@@ -18,6 +18,7 @@ from cop_ard_app.computation import map_blocks
 
 logger = structlog.get_logger(__name__)
 
+
 def chunks_optimization(
     stack: xr.DataArray,
     patches: xr.DataArray | xr.Dataset,
