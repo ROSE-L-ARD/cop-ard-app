@@ -4,22 +4,15 @@ import numpy as np
 import xarray as xr
 from cop_ard_core.cmlp import update_recursive_reference
 from cop_ard_core.logger import timeit
+from cop_ard_core.utils import get_normalized_interf
 
-import cop_ard_app.utils
 from cop_ard_app.computation import map
 from cop_ard_app.io import Path, get_storage_options, normpath, read, save_empty_dataset, write
+from cop_ard_app.utils import slice_and_drop_coordinates
 
 SHORT_DIMS = ["polarization", "azimuth_time", "slant_range_time"]
 DIMS = ["polarization", "acquisition_date", "azimuth_time", "slant_range_time"]
 LONG_DIMS = ["polarization", "past_reference_date", "azimuth_time", "slant_range_time"]
-
-
-def _slice_and_drop_coordinates(
-    ds: xr.DataArray, slices: dict[str, slice[int, int, int]], dimension_coordinates_to_keep: list[str]
-) -> xr.DataArray:
-    """Helper to apply slices and drop unwanted coordinates."""
-    coords_to_drop = [k for k in ds.coords if k not in dimension_coordinates_to_keep]
-    return ds.isel(slices).drop_vars(coords_to_drop)
 
 
 @timeit
@@ -124,7 +117,7 @@ def single_cmlp(
             ds = read(
                 last_reference_path.path, as_type="xr.Dataset", storage_options=last_reference_path.storage_options
             )["cstack"]
-            last_reference = _slice_and_drop_coordinates(ds, slices, dimension_coordinates_to_keep=DIMS)
+            last_reference = slice_and_drop_coordinates(ds, slices, dimension_coordinates_to_keep=DIMS)
             starting_date = last_reference.attrs["starting_date"]
         except Exception as e:
             raise ValueError(f"Failed to load current reference at {last_reference_path.path}: {e}")
@@ -140,7 +133,7 @@ def single_cmlp(
 
             if datasets:
                 concat_ds = xr.concat(datasets, dim="acquisition_date")
-                stable_reference = _slice_and_drop_coordinates(concat_ds, slices, dimension_coordinates_to_keep=DIMS)
+                stable_reference = slice_and_drop_coordinates(concat_ds, slices, dimension_coordinates_to_keep=DIMS)
                 past_reference_dates = stable_reference["acquisition_date"].values
             else:
                 raise ValueError(f"No stable reference files found in {stable_reference_path.path}")
@@ -451,7 +444,7 @@ def _compute_and_save_interferogram(
         The computed normalized interferogram (complex).
     """
     # 1. Compute Normalized Interferogram
-    normalized_interf = cop_ard_app.utils.get_normalized_interf(target_slc, reference_slc, multilook)
+    normalized_interf = get_normalized_interf(target_slc, reference_slc, multilook)
 
     # 2. Extract Statistics
     data = {}
@@ -623,7 +616,7 @@ def _correct_drift(
         stable_ref_slice = stable_reference.sel(acquisition_date=stable_date)
 
         # Calculate interference between history and current
-        normalized_vals = cop_ard_app.utils.get_normalized_interf(current_reference, stable_ref_slice, multilook).values
+        normalized_vals = get_normalized_interf(current_reference, stable_ref_slice, multilook).values
         coherence = np.abs(normalized_vals)
         is_empty = np.isnan(drift_interf)
         # Check if we are fully filled
