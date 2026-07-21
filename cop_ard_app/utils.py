@@ -384,84 +384,9 @@ def sparse_multilook_core(data: xr.Dataset, cohe_th: float, multilook: dict):
     return data_ml
 
 
-def griddata_interp(data: xr.Dataset, out_coords):
-    from scipy.interpolate import griddata
-
-    # set temporary linear coords
-    azimuth_time = data.azimuth_time.values
-    slant_range_time = data.slant_range_time.values
-    az0 = azimuth_time[0]
-    rg0 = slant_range_time[0]
-    dtaz = (azimuth_time[-1] - azimuth_time[0]).astype(float) / (azimuth_time.size - 1)
-    dtrg = (slant_range_time[-1] - slant_range_time[0]) / (slant_range_time.size - 1)
-    y_ = (azimuth_time - az0).astype(float) / dtaz
-    x_ = (slant_range_time - rg0) / dtrg
-    points = np.vstack([x_, y_]).T
-
-    data_copy = data.copy(deep=True)
-    data_copy = data_copy.assign_coords({"y_": ("azimuth_time", y_), "x_": ("slant_range_time", x_)})
-    data_copy = data_copy.swap_dims({"azimuth_time": "y_", "slant_range_time": "x_"})
-
-    gridx, gridy = out_coords["slant_range_time"], out_coords["azimuth_time"]
-    gridx = (gridx - rg0) / dtrg
-    gridy = (gridy - az0).astype(float) / dtaz
-    gridxx, gridyy = np.meshgrid(gridx, gridy)
-    out_points = np.vstack((gridxx.ravel(), gridyy.ravel())).T
-
-    res = griddata(points, data.phase.values, out_points, method="cubic")
-
-    return xr.Dataset(
-        data_vars={"phase": (["azimuth_time", "slant_range_time"], res.reshape(gridxx.shape))},
-        coords=out_coords,
-    )
-
-
-def get_interf(a: xr.DataArray, b: xr.DataArray, ml_factor: dict[str, int]):
-    return (a * b.conj()).coarsen(ml_factor, boundary="trim").mean()  # type: ignore mean is injected dynamically
-
-
-# def get_normalized_interf(a, b, ml_factor, rel_thresh=None, abs_thresh=1e-6):
-#     cross = get_interf(a, b, ml_factor)
-#     p_a = get_interf(a, a, ml_factor)
-#     p_b = get_interf(b, b, ml_factor)
-
-#     coh = cross / np.sqrt(p_a * p_b)
-
-#     valid_mask = (p_a > abs_thresh) & (p_b > abs_thresh)
-
-#     if rel_thresh is not None:
-#         is_actively_updated = p_a > (rel_thresh * p_b)
-#         valid_mask = valid_mask & is_actively_updated
-
-#     return coh.where(valid_mask, 0j).fillna(0j)
-
-
-def get_normalized_interf(
-    a: xr.DataArray,
-    b: xr.DataArray,
-    ml_factor: dict[str, int],
+def slice_and_drop_coordinates(
+    ds: xr.DataArray, slices: dict[str, slice[int, int, int]], dimension_coordinates_to_keep: list[str]
 ) -> xr.DataArray:
-    return (get_interf(a, b, ml_factor) / np.sqrt(get_interf(a, a, ml_factor) * get_interf(b, b, ml_factor))).fillna(0j)
-
-
-def time_to_pixel(stack: xr.Dataset, y0: float | None = None, x0: float | None = None) -> xr.Dataset:
-    """
-
-    Convert from times to pixel dimensions of the input stack
-
-    """
-
-    if y0 is None:
-        y0 = stack.azimuth_time[0].values
-    if x0 is None:
-        x0 = stack.slant_range_time[0].values
-
-    # spacing computation #
-    y_spacing, x_spacing = [(stack[e][1] - stack[e][0]).values for e in ["azimuth_time", "slant_range_time"]]
-
-    # times to pixel coordinates #
-    x = np.round((stack.slant_range_time - x0) / x_spacing).values.astype("int32")
-    y = np.round((stack.azimuth_time - y0) / y_spacing).values.astype("int32")
-
-    stack = stack.assign_coords({"y": (["azimuth_time"], y), "x": (["slant_range_time"], x)})
-    return stack.swap_dims(azimuth_time="y", slant_range_time="x")
+    """Helper to apply slices and drop unwanted coordinates."""
+    coords_to_drop = [k for k in ds.coords if k not in dimension_coordinates_to_keep]
+    return ds.isel(slices).drop_vars(coords_to_drop)
