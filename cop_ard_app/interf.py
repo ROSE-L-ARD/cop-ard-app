@@ -4,14 +4,13 @@ from typing import cast
 import numpy as np
 import xarray as xr
 from cop_ard_core.logger import timeit
-from cop_ard_core.utils import wrap
+from cop_ard_core.utils import compute_interf_norm, time_to_pixel, wrap
 
 from cop_ard_app.computation import map
 from cop_ard_app.utils import (
     extract_subband,
     get_azimuth_time_raw,
     get_stack_phramp_diff,
-    time_to_pixel,
 )
 
 
@@ -34,42 +33,6 @@ def update_interf_coordinates(interf: xr.Dataset, multilook: dict) -> xr.Dataset
 
 
 # @timeit
-def compute_interf(
-    reference: xr.DataArray,
-    secondary: xr.DataArray,
-    multilook: dict,
-) -> xr.DataArray:
-    # complex multiplication and average #
-    return (reference.conj() * secondary).coarsen(multilook, boundary="trim").mean()  # type: ignore  mean is injected dynamically
-
-
-# @timeit
-def get_power(slc: xr.DataArray, multilook: dict):
-    # compute the image power and average
-    return (slc * slc.conj()).real.coarsen(multilook, boundary="trim").mean()  # type: ignore mean is injected dynamically
-
-
-# @timeit
-def compute_interf_norm(
-    reference: xr.DataArray,
-    secondary: xr.DataArray,
-    multilook: dict,
-) -> xr.DataArray:
-    # compute interferogram #
-    num = compute_interf(reference, secondary, multilook)
-
-    # compute power of the images
-    pow_ref = get_power(reference, multilook)
-    pow_sec = get_power(secondary, multilook)
-
-    # compute the normalization factor
-    den = np.sqrt(pow_ref * pow_sec)
-
-    # fill invalid values with 0 (null-coherence)
-    return (num / den).fillna(0j)
-
-
-# @timeit
 def get_interf_single_burst(cslc: xr.DataArray, reference_date: str, multilook: dict) -> xr.Dataset:
     """
     Compute the interferometric phase and coherence with respect to a reference date
@@ -83,10 +46,10 @@ def get_interf_single_burst(cslc: xr.DataArray, reference_date: str, multilook: 
     interf_ds = xr.Dataset()
 
     # extract phase
-    interf_ds["phase"] = xr.apply_ufunc(np.angle, interf_norm, dask="parallelized", output_dtypes=(float,))
+    interf_ds["phase"] = xr.ufuncs.angle(interf_norm)
 
     # extract coherence
-    interf_ds["cohe"] = xr.apply_ufunc(np.abs, interf_norm, dask="parallelized", output_dtypes=(float,))
+    interf_ds["cohe"] = xr.ufuncs.abs(interf_norm)
 
     return interf_ds
 
@@ -98,7 +61,7 @@ def extract_coreg_aoi(coreg: xr.Dataset, a_min: float, r_min: float, multilook: 
     chunk_burst = {k: v[0] for k, v in coreg.chunksizes.items() if k in ["azimuth_time", "slant_range_time"]}
 
     # add pixel coordinates wrt the AOI
-    coreg_sel = time_to_pixel(coreg.copy(), a_min, r_min)
+    coreg_sel = cast(xr.Dataset, time_to_pixel(coreg, a_min, r_min))
 
     x_min = np.ceil(coreg_sel.x.min() / multilook["slant_range_time"]).astype(int) * multilook["slant_range_time"]
     x_max = np.floor(coreg_sel.x.max() / multilook["slant_range_time"]).astype(int) * multilook["slant_range_time"]
