@@ -2,7 +2,7 @@ from typing import cast
 
 import numpy as np
 import xarray as xr
-from cop_ard_core.cmlp import update_recursive_reference
+from cop_ard_core.cmlp import calculate_stable_dates, get_current_reference, update_drift, update_recursive_reference
 from cop_ard_core.logger import timeit
 from cop_ard_core.utils import get_normalized_interf
 
@@ -140,7 +140,7 @@ def single_cmlp(
         except Exception as e:
             raise ValueError(f"Failed to load stable references from {stable_reference_path.path}: {e}")
     # 3. Calculate Date Milestones
-    stable_reference_dates = _calculate_stable_dates(
+    stable_reference_dates = calculate_stable_dates(
         acquisition_dates, revisit_cycle, stable_reference_step, stable_reference, starting_date
     )
     # 4. Initialize Output Stores
@@ -156,6 +156,7 @@ def single_cmlp(
 
     # 5. Get Starting State
     current_reference, start_date = get_current_reference(cstack_sel, last_reference, stable_reference)
+    current_reference = current_reference.drop_vars({k for k in current_reference.coords.keys() if k not in SHORT_DIMS})
     for date_idx, date in enumerate(cstack_sel.acquisition_date.values):
         slc = cstack_sel.sel(acquisition_date=date).fillna(0j)
         normalized_interf = _compute_and_save_interferogram(
@@ -270,50 +271,6 @@ def _prepare_cstack(cstack: xr.DataArray, multilook: dict) -> tuple[xr.DataArray
     pad = {k: (0, cstack[k].size - cstack_sel[k].size) for k in multilook.keys()}
 
     return cstack_sel, slices, pad, chunks
-
-
-def _calculate_stable_dates(
-    acquisition_dates: np.ndarray,
-    revisit_cycle: np.timedelta64,
-    stable_reference_step: int,
-    stable_reference: xr.DataArray | xr.Dataset | None = None,
-    starting_date: str | None = None,
-) -> np.ndarray:
-    """
-    Determines the dates that serve as stable reference milestones.
-
-    Parameters
-    ----------
-    acquisition_dates : np.ndarray
-        Array of all acquisition dates.
-    revisit_cycle : np.timedelta64
-        Time delta representing one revisit cycle.
-    stable_reference_step : int
-        Number of cycles between stable references.
-
-    Returns
-    -------
-    stable_reference_dates : np.ndarray
-        Subset of dates selected as stable references.
-    start_date : np.datetime64
-        The very first date in the stack (used for offset calculations).
-    """
-    dates_ns = acquisition_dates.astype("datetime64[ns]")
-    start_date = np.min(dates_ns) if starting_date is None else np.datetime64(starting_date, "ns")
-    if stable_reference is not None:
-        start_date = np.min(stable_reference.acquisition_date.values.astype("datetime64[ns]"))
-    # Vectorized calculation of elapsed cycles
-    elapsed_cycles = (dates_ns - start_date) / revisit_cycle.astype("timedelta64[ns]")
-    # We use the iterative approach to match original logic exactly
-    stable_refs = [] if stable_reference is None else list(stable_reference.acquisition_date.values)
-    threshold = stable_reference_step
-
-    for i, cycle in enumerate(elapsed_cycles):
-        if cycle > threshold:
-            stable_refs.append(acquisition_dates[i])
-            threshold += stable_reference_step
-
-    return np.array(stable_refs)
 
 
 def _initialize_cmlp_zarr_stores(
@@ -465,49 +422,6 @@ def _compute_and_save_interferogram(
     return normalized_interf
 
 
-def get_current_reference(
-    cstack: xr.DataArray,
-    last_reference: xr.DataArray | None,
-    stable_reference: xr.DataArray | None,
-):
-    date = np.min(cstack.acquisition_date.values.astype("datetime64"))
-    date_l = np.datetime64(str(last_reference.acquisition_date.values)) if last_reference is not None else None
-    date_s = (
-        np.max(stable_reference.acquisition_date.values.astype("datetime64")) if stable_reference is not None else None
-    )
-    current_reference = cstack.sel(acquisition_date=date.astype(str))
-
-    if (date_l is not None) and (date_s is not None):
-        if date_l >= date_s:
-            if date_l <= date and isinstance(last_reference, xr.DataArray):
-                current_reference = last_reference
-            else:
-                raise Exception(f"Last current reference {date_l} is more recent than cstack {date}")
-        else:
-            if date_s < date and isinstance(stable_reference, xr.DataArray):
-                current_reference = stable_reference.sel(acquisition_date=date_s.astype(str))
-            else:
-                raise Exception(f"Last stable reference {date_s} is more recent than cstack {date}")
-    else:
-        if date_l is not None and isinstance(last_reference, xr.DataArray):
-            if date_l < date:
-                current_reference = last_reference
-            else:
-                raise Exception(f"Last current reference {date_l} is more recent than cstack {date}")
-        if date_s is not None and isinstance(stable_reference, xr.DataArray):
-            if date_s < date:
-                current_reference = stable_reference.sel(acquisition_date=date_s.astype(str))
-            else:
-                raise Exception(f"Last stable reference {date_s} is more recent than cstack {date}")
-
-    dates = current_reference.acquisition_date.values
-    current_reference = current_reference.drop_vars({k for k in current_reference.coords.keys() if k not in SHORT_DIMS})
-
-    if last_reference is None:
-        current_reference.attrs["starting_date"] = str(date)
-    return current_reference, dates
-
-
 def _update_stable_reference(
     current_reference: xr.DataArray,
     date: np.datetime64,
@@ -614,19 +528,13 @@ def _correct_drift(
     # 2. Iteratively fill drift_interf with coherent pixels from history
     for iteration, stable_date in enumerate(stable_reference.acquisition_date.values):
         stable_ref_slice = stable_reference.sel(acquisition_date=stable_date)
-
-        # Calculate interference between history and current
-        normalized_vals = get_normalized_interf(current_reference, stable_ref_slice, multilook).values
-        coherence = np.abs(normalized_vals)
-        is_empty = np.isnan(drift_interf)
-        # Check if we are fully filled
-        if is_empty.any():
-            # Create Masks
-            is_coherent = coherence >= coherence_threshold
-            mask = is_coherent * is_empty
-            # Fill holes
-            drift_interf[mask] = normalized_vals[mask]
-
+        coherence = update_drift(
+            drift_interf=drift_interf,
+            reference=current_reference,
+            stable_reference=stable_ref_slice,
+            multilook=multilook,
+            coherence_threshold=coherence_threshold,
+        )
         long_term_coh[:, iteration, ...] = coherence
 
     data = {}
