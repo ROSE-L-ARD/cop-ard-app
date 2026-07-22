@@ -378,6 +378,7 @@ def blockwise_warp_cmlp(
     dtrg: float,
     margin: int = 5,
     method: str = "linear",
+    chunk: dict = {},
     **kwargs,
 ) -> Generator[xr.Dataset, None, None]:
     """
@@ -456,6 +457,21 @@ def blockwise_warp_cmlp(
         & (az_interp < (product.azimuth_time.size - kernel_margin[0]))
     )
 
+    # Define the subset of radar coordinates needed for interpolation.
+    x, y = rg_interp[ind], az_interp[ind]
+
+    # Calculate the bounding box to read from the coregistered data.
+    xmin, xmax = (
+        np.round(x.min() - kernel_margin[1]).astype(int),
+        np.round(x.max() + kernel_margin[1]).astype(int),
+    )
+    ymin, ymax = (
+        np.round(y.min() - kernel_margin[0]).astype(int),
+        np.round(y.max() + kernel_margin[0]).astype(int),
+    )
+
+    # Translate coordinates to be relative to the bounding box origin.
+    x, y = x - xmin, y - ymin
     for date in acquisition_dates:
         ds = xr.Dataset()
         radar_data = cmlp[date].to_dataset()
@@ -466,25 +482,10 @@ def blockwise_warp_cmlp(
             var_dims[-2], var_dims[-1] = "y", "x"
             ds[name] = xr.DataArray(np.zeros(var_shape, dtype=var.dtype), dims=var_dims)
 
+        # Select the required portion of the input data.
+        radar_data = radar_data.isel(slant_range_time=slice(xmin, xmax), azimuth_time=slice(ymin, ymax))
         if ind.size > 0:
-            # Define the subset of radar coordinates needed for interpolation.
-            x, y = rg_interp[ind], az_interp[ind]
-
-            # Calculate the bounding box to read from the coregistered data.
-            xmin, xmax = (
-                np.round(x.min() - kernel_margin[1]).astype(int),
-                np.round(x.max() + kernel_margin[1]).astype(int),
-            )
-            ymin, ymax = (
-                np.round(y.min() - kernel_margin[0]).astype(int),
-                np.round(y.max() + kernel_margin[0]).astype(int),
-            )
-
-            # Translate coordinates to be relative to the bounding box origin.
-            x, y = x - xmin, y - ymin
             # --- Prepare Data for Interpolation ---
-            # Select the required portion of the input data.
-            radar_data = radar_data.isel(slant_range_time=slice(xmin, xmax), azimuth_time=slice(ymin, ymax))
             # --- Loop over each acquisition date ---
             for name in radar_data.data_vars.keys():
                 name = str(name)
