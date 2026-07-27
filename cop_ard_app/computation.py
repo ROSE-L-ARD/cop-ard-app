@@ -26,7 +26,7 @@ import retry
 import xarray as xr
 from cop_ard_core.logger import logger
 
-from cop_ard_app.io import Path, isdir, read, write
+from cop_ard_app.io import Path, get_storage_options, isdir, read, write
 
 
 class DummyClient(object):
@@ -901,7 +901,7 @@ def try_to_store(
 
 @retry.retry(tries=5, delay=1, jitter=5, logger=logger)
 def map_blocks(
-    func: FunctionType[..., Any],
+    func: FunctionType,
     obj: Union[Sequence[xr.DataArray | xr.Dataset], xr.Dataset, xr.DataArray],
     obj_ov: Sequence[xr.DataArray] = [],
     combine: bool = True,
@@ -1102,7 +1102,7 @@ def map_blocks(
 
 
 def map(
-    func: FunctionType[..., Any],
+    func: FunctionType,
     args: Union[Sequence[List | Tuple], Tuple, List] = (),
     enable_dask: bool = True,
     combine: bool = False,
@@ -1510,3 +1510,25 @@ def get_worker_host(client: dask.distributed.client.Client | None = None) -> str
         # As a fallback, get all hosts from the cluster and pick the first one.
         host = list(get_host_ips(client))[0]
     return host
+
+
+def init_zarr_groups(out_path, groups, multiburst, **kwargs):
+    """
+    Initialize the necessary Zarr groups on disk before writing data.
+    """
+    import os
+
+    # Create and save an empty dataset in each group path to initialize it.
+    def write_dt(dt_group):
+        dt = xr.DataTree.from_dict({kk: xr.Dataset() for kk in ["measurements"]})
+        write(
+            dt,
+            os.path.join(out_path, dt_group),
+            mode="w",
+            storage_options=get_storage_options(kwargs),
+        )
+
+    map(
+        write_dt,
+        args=list(groups),
+    )

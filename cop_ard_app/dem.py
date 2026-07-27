@@ -10,99 +10,17 @@ from cop_ard_core.dem import (
     interp_dem,
 )
 from cop_ard_core.logger import logger, timeit
-from cop_ard_core.simul import SPATIAL_DIMS_, compute_simulation
 from pyproj import CRS
 
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.io import exists, get_storage_options, normpath, open_copdem30m, read, save_empty_dataset, write
-from cop_ard_app.simulation import init_simulation_dataset, update_elevation
 from cop_ard_app.utils import GeoEnvPlugin
-
-
-def dem_to_radar(
-    dem: xr.DataArray,
-    orbits: xr.DataArray,
-    working_dir: str,
-    chunks: dict = {"x": 1024, "y": 1024, "acquisition_date": 1},
-    skip_read: bool = True,
-    enable_dask: bool = True,
-    **kwargs,
-) -> xr.Dataset | None:
-    """
-    Compute the radar geometry (slant range, azimuth time) for each pixel of a DEM.
-
-    This function orchestrates the DEM-to-radar-coordinate transformation. It first
-    initializes the output data structure, populates it with elevation data, and then
-    maps the `compute_simulation` function over blocks of the DEM to perform the
-    geometric calculations in parallel.
-
-    Parameters
-    ----------
-    dem : xr.DataArray
-        The input DEM as an xarray.DataArray.
-    orbits : xr.DataArray
-        The satellite orbit data as an xarray.DataArray.
-    working_dir : str
-        A path to a directory for storing intermediate and final results.
-    chunks : dict
-        A dictionary defining the chunk sizes for Dask processing.
-    skip_read : bool
-        If True, the function will not read and return the final dataset,
-        useful for workflows that only need to ensure the data is written.
-    enable_dask : bool
-        If True, use Dask for parallel computation.
-
-    Returns
-    -------
-    xr.Dataset or None
-        The final simulation dataset read from disk if `skip_read` is False, otherwise None.
-    """
-    if (set(chunks.keys()) == set((*SPATIAL_DIMS_, "acquisition_date"))) is False:
-        raise Exception("Chunks must contains x, y and acquisition_date keys")
-    # Define the path for the simulation output.
-    data_path = f"{working_dir}/simulation"
-    acquisition_dates = orbits.acquisition_date.values
-    xy_chunks = {k: v for k, v in chunks.items() if k in SPATIAL_DIMS_}
-    x = dem.x.values
-    y = dem.y.values
-    # --- Step 1: Initialize Output Storage ---
-    simulation = init_simulation_dataset(acquisition_dates, dem.rio.crs, x, y, xy_chunks, data_path, **kwargs)
-
-    if not isinstance(simulation, xr.Dataset):
-        raise Exception(f"Expected xr.Dataset, got {type(simulation)}")
-
-    resampled_dem = dem.to_dataset(name="z")
-    # --- Step 2: Populate with Elevation Data ---
-    simulation = update_elevation(simulation, resampled_dem, xy_chunks, data_path, **kwargs)
-    # --- Step 3: Compute Simulation in Parallel ---
-    # Map the core computation function over blocks of the simulation and DEM datasets.
-    save_options = {
-        "data_path": normpath(data_path),
-        "save_options": {
-            "consolidated": False,
-            "storage_options": get_storage_options(kwargs),
-        },
-    }
-    map_blocks(
-        compute_simulation,
-        (simulation, resampled_dem.z),
-        args=(orbits,),
-        combine=False,
-        enable_dask=enable_dask,
-        store_mapping={0: save_options},
-    )
-    # Optionally, read and return the final result.
-    return (
-        read(normpath(data_path), as_type="xr.Dataset", storage_options=get_storage_options(kwargs))
-        if not skip_read
-        else None
-    )
 
 
 @timeit
 def dem_reproject(
     dem: xr.DataArray,
-    spacing: Dict[str, Any],
+    spacing: dict[str, Any],
     outproj: str | int,
     data_path: str,
     chunks: dict = {"x": 2048, "y": 2048},

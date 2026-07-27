@@ -24,7 +24,6 @@ import zarr
 import zarr.storage
 from cop_ard_core.logger import logger
 
-from cop_ard_app.computation import map
 
 
 class SentinelSarpyObj(object):
@@ -114,27 +113,6 @@ def sarpy_open(in_path: str | xr.DataTree, allowed_partial_open: bool = False, s
             else:
                 raise
     return ds
-
-
-def init_zarr_groups(out_path, groups, multiburst, **kwargs):
-    """
-    Initialize the necessary Zarr groups on disk before writing data.
-    """
-
-    # Create and save an empty dataset in each group path to initialize it.
-    def write_dt(dt_group):
-        dt = xr.DataTree.from_dict({kk: xr.Dataset() for kk in ["measurements"]})
-        write(
-            dt,
-            os.path.join(out_path, dt_group),
-            mode="w",
-            storage_options=get_storage_options(kwargs),
-        )
-
-    map(
-        write_dt,
-        args=list(groups),
-    )
 
 
 def read_slc_static(burst_id: str, acquisition_dates: list[str], working_directory: str, **kwargs):

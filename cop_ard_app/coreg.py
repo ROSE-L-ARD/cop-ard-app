@@ -10,8 +10,8 @@ from cop_ard_core.warp import GRID, coreg_qlt, getLUT, sinc, warp_cslc, warp_daz
 from scipy.constants import speed_of_light
 
 from cop_ard_app.computation import map, map_blocks
-from cop_ard_app.io import get_id_product, get_storage_options, normpath, path_to_dict, read, save_empty_dataset, write
-from cop_ard_app.model import beam_ids, get_coefficients
+from cop_ard_app.io import get_storage_options, normpath, path_to_dict, read, save_empty_dataset, write
+from cop_ard_app.model import get_coefficients
 from cop_ard_app.slc import updateETAD, updateOrbits
 from cop_ard_app.utils import get_margin
 
@@ -710,98 +710,6 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
                 )
             )
     return quality
-
-
-def update_cslc_container(bursts: xr.DataTree):
-    attrs = copy.deepcopy(next(iter(bursts.children.values())).attrs)
-    stac = attrs["stac_discovery"]
-    processing_history = attrs["processing_history"]
-    stac["properties"].pop("sat:anx_datetime", None)
-    stac["properties"].pop("sar:pixel_spacing_azimuth", None)
-    stac["properties"].pop("sar:pixel_spacing_range", None)
-    stac["properties"].pop("view:incidence_angle", None)
-    stac.pop("id", None)
-    start = np.datetime64(stac["properties"]["start_datetime"])
-    end = np.datetime64(stac["properties"]["end_datetime"])
-    bbox = stac["bbox"]
-    coords = stac["geometry"]["coordinates"][0][:-1]
-    assets = {}
-    for k, v in bursts.items():
-        stac_product = v.attrs["stac_discovery"]
-        s = np.datetime64(stac_product["properties"]["start_datetime"])
-        e = np.datetime64(stac_product["properties"]["end_datetime"])
-        b = stac_product["bbox"]
-        c = stac_product["geometry"]["coordinates"][0][:-1]
-        bbox = [min(b[0], bbox[0]), min(b[1], bbox[1]), max(b[2], bbox[2]), max(b[3], bbox[3])]
-        start = np.minimum(s, start)
-        end = np.maximum(e, end)
-        for i in range(4):
-            i1, i2 = i // 2, i % 2
-            lon_f = min if i1 == 0 else max
-            lat_f = min if i2 == 0 else max
-            coords[i] = [lon_f(coords[i][0], c[i][0]), lat_f(coords[i][1], c[i][1])]
-        assets[k] = {"href": f"./{k}", "type": "application/vnd+zarr"}
-    coords.append(coords[0])
-
-    datetime = start + round((end.astype(int) - start.astype(int)) / 2)
-    start = str(start) + "Z"
-    end = str(end) + "Z"
-    datetime = str(datetime) + "Z"
-    stac["properties"]["datetime"] = datetime
-    stac["properties"]["start_datetime"] = start
-    stac["properties"]["end_datetime"] = end
-    stac["bbox"] = bbox
-    stac["geometry"]["coordinates"] = [coords]
-    stac["properties"]["sar:beam_ids"] = beam_ids[stac["properties"]["sar:instrument_mode"]]
-    stac["assets"] = assets
-    id = get_id_product(stac)
-    stac["id"] = id
-    processing_history["Sentinel-1 ARD CSLC Product"][0]["outputs"] = id
-
-    return stac, processing_history
-
-
-def clean_cslc(slc: xr.DataTree):
-    # --- Restructure the DataTree ---
-    # Rename 'cstack' to 'cslc' and drop unnecessary coordinates.
-    cslc = xr.DataTree()
-
-    measurements = (
-        slc.coreg.measurements.to_dataset().rename({"cstack": "cslc"}).drop_vars(["slant_range_m", "azimuth_m"])
-    ).drop_attrs()
-    quality = slc.coreg.quality.to_dataset().rename({"RCS": "rcs", "crg_accuracy": "coregistration_accuracy"})
-    orbit = slc.coreg.conditions.orbit.to_dataset()
-    phase_demod = slc.coreg.conditions.phase_demod.to_dataset()
-    # Ensure ETAD group exists, even if empty.
-    if "ETAD" not in slc.coreg.conditions:
-        etad = xr.Dataset(
-            data_vars={
-                "azcorr": (["slant_range_time", "azimuth_time"], [[np.nan]]),
-                "rgcorr": (["slant_range_time", "azimuth_time"], [[np.nan]]),
-            },
-            coords={
-                "slant_range_time": [0.0],
-                "azimuth_time": [np.datetime64("0", "ns")],
-            },
-        )
-    else:
-        etad = slc.coreg.conditions.ETAD.to_dataset()
-
-    if measurements.acquisition_date.size == 1:
-        measurements = measurements.squeeze("acquisition_date")
-        quality = quality.squeeze("acquisition_date")
-        orbit = orbit.drop_vars(["orbit_files", "reference_time", "type"]).squeeze("acquisition_date")
-        phase_demod = phase_demod.squeeze("acquisition_date")
-        if "etad_file" in etad:
-            etad = etad.drop_vars(["etad_file"]).squeeze("acquisition_date")
-
-    cslc["measurements"] = measurements
-    cslc["quality"] = quality
-    cslc["conditions/orbit"] = orbit
-    cslc["conditions/phase_demodulation"] = phase_demod
-    cslc["conditions/ETAD"] = etad
-
-    return cslc
 
 
 def update_LUT(daz_drg: xr.Dataset, LUT_coords: xr.Dataset):

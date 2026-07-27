@@ -17,12 +17,11 @@ from cop_ard_core.slc import (
     noise_removal,
 )
 
-from cop_ard_app.computation import map, map_blocks
+from cop_ard_app.computation import init_zarr_groups, map, map_blocks
 from cop_ard_app.io import (
     Path,
     generate_empty_dataset,
     get_storage_options,
-    init_zarr_groups,
     is_s3_path,
     normpath,
     path_to_dict,

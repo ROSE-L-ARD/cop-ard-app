@@ -15,7 +15,7 @@ from cop_ard_app.io import Path
 from cop_ard_app.slc import overwrite_orbit_coefficients, update_slcs
 
 
-def read_orbit_file(orbit_path: Path) -> ElementTree[Element[str]]:
+def read_orbit_file(orbit_path: Path) -> ElementTree:
     local_orbit_path = orbit_path.ensure_local()
     return ET.parse(local_orbit_path.path)
 

@@ -385,7 +385,7 @@ def sparse_multilook_core(data: xr.Dataset, cohe_th: float, multilook: dict):
 
 
 def slice_and_drop_coordinates(
-    ds: xr.DataArray, slices: dict[str, slice[int, int, int]], dimension_coordinates_to_keep: list[str]
+    ds: xr.DataArray, slices: dict[str, slice], dimension_coordinates_to_keep: list[str]
 ) -> xr.DataArray:
     """Helper to apply slices and drop unwanted coordinates."""
     coords_to_drop = [k for k in ds.coords if k not in dimension_coordinates_to_keep]
