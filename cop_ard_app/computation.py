@@ -742,11 +742,31 @@ def check_inputs(obj, obj_ov, args):
     return _objs, _objs_ov, _args
 
 
+def setup(results: list | tuple | Any) -> tuple[int, Callable, list[Any]]:
+    """
+
+    Return the number of elements of results the typef function and results as a list
+
+    """
+
+    typef: list | tuple | Callable
+    if isinstance(results, list):
+        results_l = results
+        typef = list
+    elif isinstance(results, tuple):
+        results_l = list(results)
+        typef = tuple
+    else:
+        results_l, typef = [results], lambda x: list(x)[0]
+    return len(results_l), typef, results_l
+
+
 def try_to_store(
     results: list[Any],
     chunk: Mapping[str, slice],
     store_mapping: Mapping[int, dict[str, Any]] = {},
     store_directory: str | Path | None = None,
+    force_compute: bool | None = None,
     region_callback: Mapping[int, Callable[[Mapping[str, slice], dict[str, Any]], Mapping[str, slice] | None]] = {},
     **kwargs,
 ) -> Any:
@@ -760,6 +780,8 @@ def try_to_store(
         It is the chunk of data that has been passed to the executed function to compute the results
     store_directory: pstools.path.Path or None
         It is the directory where results will be saved if store_mapping is not provided. If None is provided, results will not be saved
+    force_compute: bool | None
+        If True, the results will be computed even if they are already available
     store_mapping: dict
         It describes where and how each element of results should be saved. It must have the following structure:
             store_mapping = {
@@ -816,30 +838,13 @@ def try_to_store(
             {**config.get("save_options", save_options), "skip_read": config.get("skip_read", True)},
         )
 
-    def setup(results: list | tuple | Any) -> tuple[int, Callable, list[Any]]:
-        """
-
-        Return the number of elements of results the typef function and results as a list
-
-        """
-
-        typef: list | tuple | Callable
-        if isinstance(results, list):
-            results_l = results
-            typef = list
-        elif isinstance(results, tuple):
-            results_l = list(results)
-            typef = tuple
-        else:
-            results_l, typef = [results], lambda x: list(x)[0]
-        return len(results_l), typef, results_l
+    n_results, typef, results_l = setup(results)
 
     if store_mapping:
         # If store_mapping exists it will be used and cache_directory if provided will be ignored
         logger.debug(f"Try to save results ({chunk}) using as configurations ({store_mapping})", tags=["store"])
 
         # Indices provided must be lower than the number of elements returned by executed function
-        n_results, typef, results_l = setup(results)
         if max(list(store_mapping.keys())) >= n_results:
             raise RuntimeError(
                 f"Invalid `store_mapping`: maximum index ({max(list(store_mapping.keys()))}) "
@@ -883,7 +888,6 @@ def try_to_store(
             f"Try to save results into cache directory ({store_directory}) using the following options: {save_options}",
             tags=["store"],
         )
-        _, typef, results_l = setup(results)
 
         logger.debug(f"Results to be saved: {results_l}", verbose=True, tags=["store"])
         results = typef(
@@ -895,6 +899,17 @@ def try_to_store(
             )
             for j in results_l
         )
+    elif force_compute:
+        results = typef(
+            [
+                (
+                    e.compute()
+                    if isinstance(e, (xr.Dataset, xr.DataArray, xr.DataTree))
+                    else e
+                )
+                for e in results_l
+            ]
+        )
 
     return results
 
@@ -902,10 +917,11 @@ def try_to_store(
 @retry.retry(tries=5, delay=1, jitter=5, logger=logger)
 def map_blocks(
     func: FunctionType,
-    obj: Union[Sequence[xr.DataArray | xr.Dataset], xr.Dataset, xr.DataArray],
+    obj: Sequence[xr.DataArray | xr.Dataset] | xr.Dataset | xr.DataArray,
     obj_ov: Sequence[xr.DataArray] = [],
     combine: bool = True,
     enable_dask: bool = True,
+    force_compute: bool = False,
     chunks: dict | None = None,
     chunksizes: dict[str, Any] | None = None,
     overlap_sizes: Mapping[str, Any] = {},
@@ -951,6 +967,8 @@ def map_blocks(
     enable_dask : bool, default True
         If `True`, execute tasks in parallel on a Dask cluster.
         If `False`, tasks are executed sequentially in a loop.
+    force_compute : bool
+        If `True`, forces computation of the results.
     chunks : dict, optional
         A dictionary defining explicit chunk boundaries for each
         dimension. Mutually exclusive with `chunksizes`.
@@ -1033,12 +1051,14 @@ def map_blocks(
                 objs = [obj.isel(index) for (obj, index) in zip(objs, indices)]
             config = {"scheduler": scheduler} if scheduler is not None else {}
             with dask.config.set(config):
-                res = func(*objs, *args, **kwargs_)
+                result = func(*objs, *args, **kwargs_)
+
                 return try_to_store(
-                    res,
+                    result,
                     indices[0],
-                    store_mapping,
-                    store_directory,
+                    store_mapping=store_mapping,
+                    store_directory=store_directory,
+                    force_compute=force_compute,
                     region_callback=region_callback,
                     **{k: v for k, v in kwargs_.items() if k != "chunk"},
                 )
@@ -1106,6 +1126,7 @@ def map(
     args: Union[Sequence[List | Tuple], Tuple, List] = (),
     enable_dask: bool = True,
     combine: bool = False,
+    force_compute: bool = False,
     scheduler: str | None = "synchronous",
     client_options: dict = {},
     map_equally: bool = False,
@@ -1139,6 +1160,8 @@ def map(
     combine : bool
         If `True`, the function will attempt to combine the list of
         results into a single xarray object.
+    force_compute : bool
+        If `True`, forces computation of the results.
     scheduler : str
         The Dask scheduler to use (e.g., 'threads', 'processes').
     client_options : dict
@@ -1188,7 +1211,7 @@ def map(
         config = {"scheduler": scheduler} if scheduler is not None else {}
         with dask.config.set(config):
             result = func(*args, **kwargs)
-            return try_to_store(result, {}, save_options=save_options, store_directory=store_directory)
+            return try_to_store(result, {}, save_options=save_options, store_directory=store_directory, force_compute=force_compute)
 
     # Use a context manager to retrieve/create a client (Dask or Dummy)
     # and handle its lifecycle, along with other configuration flags.
