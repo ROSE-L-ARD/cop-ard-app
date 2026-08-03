@@ -1,6 +1,5 @@
 import itertools
 import os
-from typing import Dict
 
 import dask.distributed
 import numpy as np
@@ -10,8 +9,8 @@ import rasterio
 import scipy.fft
 import xarray as xr
 from cop_ard_core.dem import extract_vertical_crs
-from cop_ard_core.logger import logger
-from cop_ard_core.utils import get_phramp_diff
+from cop_ard_core.logger import logger, timeit
+from cop_ard_core.utils import get_best_pol, get_phramp_diff
 from pyproj import CRS, Transformer, datadir
 from pyproj.transformer import TransformerGroup
 from scipy.constants import speed_of_light
@@ -97,7 +96,7 @@ def get_margin(
     return margin
 
 
-def compute_chunks(chunks: dict, overlap: dict = {"y": 1, "x": 1}) -> Dict:
+def compute_chunks(chunks: dict, overlap: dict = {"y": 1, "x": 1}) -> dict:
     """
     Compute overlapping chunk boundaries for use with `map_blocks`.
 
@@ -145,8 +144,8 @@ def compute_chunks(chunks: dict, overlap: dict = {"y": 1, "x": 1}) -> Dict:
             # Calculate [start, end + overlap] for all chunks except the last one.
             ch[k] = [[en * s, en * s + e + delta] for en, (s, e) in enumerate(zip(li[0:-2], li[1:-1]))]
             # Handle the last chunk separately: [previous_end - overlap, previous_end + last_chunk_size].
-            if chunks[k][-1] != 1:  # Avoid issues if the last chunk has size 1
-                ch[k].append([ch[k][-1][1] - delta, ch[k][-1][1] - delta + chunks[k][-1]])
+            if v[-1] != 1:  # Avoid issues if the last chunk has size 1
+                ch[k].append([ch[k][-1][1] - delta, ch[k][-1][1] - delta + v[-1]])
         else:
             # If no overlap or only one chunk, calculate simple [start, end] boundaries.
             ch[k] = [[en * s, en * s + e] for en, (s, e) in enumerate(zip(li[:-1], li[1:]))]
@@ -232,41 +231,50 @@ def get_bounding_box(slcs: xr.DataTree, path: str) -> list:
     ]
 
 
-def get_azimuth_time_raw(burst: xr.DataArray, multilook: dict | None = None) -> xr.DataArray:
+def get_spacing(slcs: xr.DataTree, path: str) -> list:
+    """
+    Compute the spacing of a burst stack in azimuth time and slant range time.
 
-    # retrieve image annotation
-    # the polarization is equivalent
-    _, annot = next(iter(burst.attrs.items()))
+    This function iterates over all bursts in a stack of SLCs and extracts the minimum and maximum
+    values of `azimuth_time` and `slant_range_time` across all bursts and derive the corresponding spacing.
 
-    if multilook is not None:
-        az_slice = slice(multilook["azimuth_time"] // 2, None, multilook["azimuth_time"])
-        rg_slice = slice(multilook["slant_range_time"] // 2, None, multilook["slant_range_time"])
-    else:
-        az_slice = slice(None, None, None)
-        rg_slice = slice(None, None, None)
+    Parameters
+    ----------
+    slcs : xr.DataTree
+        A DataTree containing multiple SAR bursts, each with `azimuth_time` and `slant_range_time` coordinates.
 
-    burst_ = burst.isel(azimuth_time=az_slice, slant_range_time=rg_slice)
+    Returns
+    -------
+    list
+        A list of two elements: `[dt_az, dt_rg]`, representing the spacing in azimuth time and slant range time.
+    """
+    azimuth_time, slant_range_time = [], []
 
-    # retrieve axis and coefficients
-    slant_range_m = burst_.slant_range_m.values
-    azimuth_m = burst_.azimuth_m.values
-    coeffs = annot["Grid"]["TimeCOAPoly"]["Coefs"]
+    for burst in slcs.values():
+        if burst[path].azimuth_time.size > 0:
+            azimuth_time += [
+                (
+                    burst[path].azimuth_time.max().values
+                    - burst[path].azimuth_time.min().values
+                ).astype(float)
+                / (burst[path].azimuth_time.size - 1)
+            ]
+        if burst[path].slant_range_time.size > 0:
+            slant_range_time += [
+                (
+                    burst[path].slant_range_time.max().values
+                    - burst[path].slant_range_time.min().values
+                )
+                / (burst[path].slant_range_time.size - 1)
+            ]
 
-    # compute the relative azimuth time
-    timeCOA = np.polynomial.polynomial.polygrid2d(slant_range_m, azimuth_m, coeffs).T
+    if len(azimuth_time) <= 0 or len(slant_range_time) <= 0:
+        raise ValueError("Null slc in input")
 
-    # convert to timedelta in nanoseconds
-    timeCOA = (timeCOA * 1e9).astype("timedelta64[ns]")
-
-    # compute absolute time
-    timeCOA = timeCOA + np.datetime64(annot["Timeline"]["CollectStart"][:-1])
-
-    # return as dataarray
-    return xr.DataArray(
-        timeCOA,
-        dims=["azimuth_time", "slant_range_time"],
-        coords={"azimuth_time": burst_.azimuth_time.values, "slant_range_time": burst_.slant_range_time.values},
-    )
+    return [
+        np.mean(azimuth_time),
+        np.mean(slant_range_time),
+    ]
 
 
 def get_poly(poly, poly_type: str, dd: str):
@@ -278,15 +286,22 @@ def get_poly(poly, poly_type: str, dd: str):
     return poly
 
 
-# @timeit
+@timeit
 def get_stack_phramp_diff(
-    interf: xr.Dataset, drg_full: xr.DataArray, daz_full: xr.DataArray, annot: dict, y_poly: xr.Dataset, multilook: dict
+    acquisition_date: xr.DataArray,
+    azimuth_time: xr.DataArray,
+    slant_range_time: xr.DataArray,
+    drg_full: xr.DataArray,
+    daz_full: xr.DataArray,
+    annot: dict,
+    y_poly: xr.Dataset,
+    multilook: dict,
 ):
     ph_ramp_diff_list = []
 
-    for k, dd in enumerate(interf.acquisition_date.values):
+    for k, dd in enumerate(acquisition_date.values):
         #  call core function
-        y_poly[dd].attrs["type"] = y_poly.type
+        # y_poly[dd].attrs["type"] = y_poly.type
 
         acquisition_date_annot = annot[dd]
         # centre scene coordinates
@@ -295,17 +310,25 @@ def get_stack_phramp_diff(
         rg_mid = rg_time[acquisition_date_annot["ImageData"]["SCPPixel"]["Row"]]
         az_mid = az_time[acquisition_date_annot["ImageData"]["SCPPixel"]["Col"]]
 
-        timeca_polynomial_coeffs = get_coefficients("RMA.INCA.TimeCAPoly.Coefs", acquisition_date_annot)
+        timeca_polynomial_coeffs = get_coefficients(
+            "RMA.INCA.TimeCAPoly.Coefs", acquisition_date_annot
+        )
         if timeca_polynomial_coeffs is None:
-            raise ValueError(f"Missing TimeCAPoly coefficients for acquisition date {dd} in annotation.")
-        dkcoa_polynomial_coeffs = get_coefficients("Grid.Col.DeltaKCOAPoly.Coefs", acquisition_date_annot)
+            raise ValueError(
+                f"Missing TimeCAPoly coefficients for acquisition date {dd} in annotation."
+            )
+        dkcoa_polynomial_coeffs = get_coefficients(
+            "Grid.Col.DeltaKCOAPoly.Coefs", acquisition_date_annot
+        )
         if dkcoa_polynomial_coeffs is None:
-            raise ValueError(f"Missing DeltaKCOA polynomial coefficients for acquisition date {dd} in annotation.")
+            raise ValueError(
+                f"Missing DeltaKCOA polynomial coefficients for acquisition date {dd} in annotation."
+            )
         azimuth_grid_spacing = acquisition_date_annot["Grid"]["Col"]["SS"]
 
         res = get_phramp_diff(
-            azimuth_time=interf.azimuth_time,
-            slant_range_time=interf.slant_range_time,
+            azimuth_time=azimuth_time,
+            slant_range_time=slant_range_time,
             daz=daz_full.sel(acquisition_date=dd).coarsen(multilook, boundary="trim").mean(),  # type: ignore mean is injected dynamically
             drg=drg_full.sel(acquisition_date=dd).coarsen(multilook, boundary="trim").mean(),  # type: ignore mean is injected dynamically
             timeca_polynomial_coeffs=timeca_polynomial_coeffs,
@@ -319,7 +342,7 @@ def get_stack_phramp_diff(
 
     # return the concatenated dataarray
     return xr.concat(ph_ramp_diff_list, dim="acquisition_date").assign_coords(
-        {"acquisition_date": interf.acquisition_date}
+        {"acquisition_date": acquisition_date}
     )
 
 
