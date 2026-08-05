@@ -1,4 +1,3 @@
-import copy
 import os
 from typing import cast
 
@@ -659,7 +658,7 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
     acquisition_date_orbit_type = {}
     for acquisition_date in slc.coreg.measurements.acquisition_date:
         acquisition_date_annot = slc.orig[str(acquisition_date.values)].measurements.slc.attrs
-        acquisition_date_annot = acquisition_date_annot[list(annot.keys())[0]]
+        acquisition_date_annot = acquisition_date_annot[list(acquisition_date_annot.keys())[0]]
         acquisition_date_arp_coeffs[acquisition_date] = {
             e: get_coefficients(f"Position.ARPPoly.{e}.Coefs", acquisition_date_annot) for e in ["X", "Y", "Z"]
         }
@@ -875,7 +874,6 @@ def updateLut(
         An xarray.Dataset containing the newly computed LUT.
     """
     # Extract metadata from the coregistered stack.
-    annot = slcs.coreg.measurements.cstack.attrs
     pols = slcs.coreg.measurements.polarization.values
     # --- Initialize Output LUT DataArray ---
     # Handle cases with and without a polarization dimension.
@@ -924,11 +922,12 @@ def updateLut(
             )
     # --- Set Coordinates and Attributes ---
     # Extract reference point and scaling factors for the coregistered grid.
+    annot_ref = slcs.coreg.measurements.cstack.attrs[pols[0]]
     try:
         rg0 = slcs.coreg.measurements.isel(
-            slant_range_time=annot["ImageData"]["SCPPixel"]["Row"]
+            slant_range_time=annot_ref["ImageData"]["SCPPixel"]["Row"]
         ).slant_range_time.values
-        az0 = slcs.coreg.measurements.isel(azimuth_time=annot["ImageData"]["SCPPixel"]["Col"]).azimuth_time.values
+        az0 = slcs.coreg.measurements.isel(azimuth_time=annot_ref["ImageData"]["SCPPixel"]["Col"]).azimuth_time.values
     except Exception as e:
         logger.warning(f"type is: {e.__class__.__name__}, fix for tests")
         rg0 = slcs.coreg.measurements.slant_range_time[0].values
@@ -936,7 +935,7 @@ def updateLut(
     # Range scaling (meters).
     drg = speed_of_light / 2
     # Azimuth scaling (seconds).
-    daz = 1.0 / (1e9 * annot["RMA"]["INCA"]["TimeCAPoly"]["Coefs"][1])
+    daz = 1.0 / (1e9 * annot_ref["RMA"]["INCA"]["TimeCAPoly"]["Coefs"][1])
 
     # Assign the correct coordinates to the LUT DataArray.
     xLUT = xLUT.assign_coords({"slant_range_time": rg_ref.values, "azimuth_time": az_ref.values})
