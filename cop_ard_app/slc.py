@@ -2,7 +2,7 @@ import json
 import os
 from collections import defaultdict
 from typing import Any, Hashable, Sequence, cast
-
+import cop_ard_app.readers  # register sarpy readers
 import numpy as np
 import sarpy.io.complex.sentinel
 import xarray as xr
@@ -251,7 +251,6 @@ def import_image(
             args = []
             obj = [image.slc]
             # Define the chunking strategy for `map_blocks`.
-            print(in_path)
             if in_path is not None:
                 chunksizes = {k: v for k, v in chunks.items() if k in image.dims}
                 chunksizes["slant_range_time"] = slant_range_time.size
