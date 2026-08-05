@@ -390,3 +390,41 @@ def slice_and_drop_coordinates(
     """Helper to apply slices and drop unwanted coordinates."""
     coords_to_drop = [k for k in ds.coords if k not in dimension_coordinates_to_keep]
     return ds.isel(slices).drop_vars(coords_to_drop)
+
+
+def get_bbox(slcs, reference_date: str | None = None):
+    """
+    Get the bounding box of the SAR data.
+
+    Parameters
+    ----------
+    slcs : xr.DataTree
+        DataTree of SAR data.
+    reference_date : str, optional
+        Reference date for selecting specific data.
+
+    Returns
+    -------
+    list
+        Bounding box [min_lon, min_lat, max_lon, max_lat].
+    """
+    lat, lon = [], []
+
+    # Iterate through all scenes.
+    for slc in (slcs.bursts if "bursts" in slcs else {"data": slcs}).values():
+        # Optionally filter by a reference date.
+        for date in slc.orig if reference_date is None else [reference_date]:
+            # Extract corner coordinates from the metadata.
+            annot = slc.orig[date].measurements.slc.attrs
+            annot = annot[list(annot.keys())[0]]
+            for v in annot["GeoData"]["ImageCorners"]:
+                lat.append(v["Lat"])
+                lon.append(v["Lon"])
+
+    # Calculate the min/max latitude and longitude, rounding to one decimal place.
+    return [
+        np.floor(np.min(lon) * 10) / 10,
+        np.floor(np.min(lat) * 10) / 10,
+        np.ceil(np.max(lon) * 10) / 10,
+        np.ceil(np.max(lat) * 10) / 10,
+    ]
