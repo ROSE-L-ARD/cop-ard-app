@@ -80,7 +80,6 @@ def extract_coreg_aoi(coreg: xr.Dataset, a_min: float, r_min: float, multilook: 
 
     return coreg_sel
 
-
 @timeit
 def extract_interf_single(
     burst_id: str,
@@ -151,7 +150,7 @@ def extract_interf_single(
 
     return (burst_id, interf)
 
-
+@timeit
 def extract_interf_multi(
     reference_slcs: xr.DataTree,
     secondary_slcs: xr.DataTree,
@@ -216,8 +215,8 @@ def extract_interf_multi(
 
     return interf
 
-
-def mosaic_interf(interf: xr.DataTree) -> xr.Dataset:
+@timeit
+def mosaic_interf(interf: xr.DataTree, force_compute: bool = True) -> xr.Dataset:
 
     # TODO: margins for mosaic do be adapted to the multilook and the valid points
     mosaic: xr.Dataset = (
@@ -233,14 +232,14 @@ def mosaic_interf(interf: xr.DataTree) -> xr.Dataset:
         layer_sel = layer_sel.swap_dims({"azimuth_time": "y", "slant_range_time": "x"})
         layer_sel = layer_sel.reset_coords([e for e in layer_sel.coords if e not in layer_sel.dims]).compute()
 
-        mosaic = mosaic.combine_first(layer_sel).compute()
+        mosaic = mosaic.combine_first(layer_sel)
 
     mosaic = mosaic.swap_dims({"y": "azimuth_time", "x": "slant_range_time"})
     mosaic = mosaic.reset_coords([e for e in mosaic.coords if e not in mosaic.dims])
 
-    return mosaic
+    return mosaic.compute() if force_compute else mosaic
 
-
+@timeit
 def get_mosaic_interf(
     reference_slcs: xr.DataTree,
     secondary_slcs: xr.DataTree,
@@ -259,6 +258,6 @@ def get_mosaic_interf(
     )
 
     # mosaic all interferograms
-    mosaic = mosaic_interf(interf)
+    mosaic = mosaic_interf(interf, force_compute=force_compute)
 
     return mosaic
