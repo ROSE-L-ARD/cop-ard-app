@@ -88,8 +88,10 @@ def stack_gmlp(
     for k, v in (cmlp_tree.bursts if multiburst else {"data": cmlp_tree}).items():
         s = (simulation_tree.bursts[k] if multiburst else simulation_tree).to_dataset()
         s_ml = simulation_ml_tree["bursts"][k] if multiburst else simulation_ml_tree
-        a = (k, v.cmlp, s, s_ml)
-        args.append(a)
+        for date,cmlp in v.cmlp.items():
+            a = (k, date,cmlp, s, s_ml)
+            args.append(a)
+        
     # Transpose the list of tuples for the map function.
     args = list(zip(*args))
 
@@ -116,16 +118,17 @@ def stack_gmlp(
     # --- Assemble Results ---
     gmlp_tree = xr.DataTree()
     # Reconstruct the DataTree from the list of results returned by the workers.
-    for k, gmlp in results:
+    for (burst_id,date,gmlp) in results:
         if multiburst:
-            gmlp_tree[f"bursts/{k}"] = gmlp
+            gmlp_tree[f"bursts/{burst_id}/{date}"] = gmlp
         else:
-            gmlp_tree = gmlp
+            gmlp_tree[date] = gmlp
     return gmlp_tree
 
 
 def single_gmlp(
     burst_id: str,
+    date: str,
     cmlp: xr.DataTree,
     simulation: xr.Dataset,
     simulation_ml: dict,
@@ -200,7 +203,9 @@ def single_gmlp(
 
     # --- Run Core Geocoding ---
     # This call orchestrates the block-wise warping from slant range to ground range.
-    dt = map_geocoding_cmlp(
+    result = map_geocoding_cmlp(
+        burst_id,
+        date,
         cmlp,
         simulation,
         simulation_ml,
@@ -214,10 +219,12 @@ def single_gmlp(
 
     # --- Merge with Geometric Data ---
     # Read the pre-computed geometric grid data (e.g., LIA, anf).
-    return (burst_id, dt)
+    return result
 
 
 def map_geocoding_cmlp(
+    burst_id:str,
+    date:str,
     cmlp: xr.DataTree,
     simulation: xr.Dataset,
     simulation_ml: dict,
@@ -228,7 +235,7 @@ def map_geocoding_cmlp(
     enable_dask: bool = True,
     border: int = 10,
     **kwargs,
-) -> xr.DataTree:
+    ) -> tuple[str,str,xr.Dataset]:
     """
     Orchestrate the block-wise geocoding of a single coregistered SLC.
 
@@ -300,79 +307,68 @@ def map_geocoding_cmlp(
 
     # --- Initialize Output GSLC Dataset ---
     # Create the empty Zarr store for the Geocoded SLC.
-    n_elements = len(cmlp.keys())
-    for counter, (date, data) in enumerate(cmlp.items()):
-        data = data.ds
-        data_vars = list(data.data_vars)
-        dims = {k: DIMS if "past_reference_date" not in data[k].dims else LONG_DIMS for k in data_vars}
-        shape = {k: [*data[k].shape[:-2], y.size, x.size] for k in data_vars}
-        dtype = {k: data[k].dtype.name for k in data_vars}
-        coords = {k: v.values for k, v in data.coords.items() if k in COORDS}
-        coords["y"] = y
-        coords["x"] = x
-        ch = {k: chunks[k] for k in data.chunksizes.keys() if k in LONG_DIMS}
-        ch["y"] = chunks["y"]
-        ch["x"] = chunks["x"]
-        image = save_empty_dataset(
-            data_vars=data_vars,
-            dims=dims,
-            shape=shape,
-            chunks=ch,
-            dtype=dtype,
-            coords=coords,
-            crs=selection.rio.crs.to_string(),
-            data_path=normpath(f"{data_path_tmp}/gmlp/{date}"),
-            storage_options=get_storage_options(kwargs, key="storage_options_dynamic"),
-            skip_read=False if counter == (n_elements - 1) else True,
-        )
-
+    data = cmlp.ds
+    data_vars = list(data.data_vars)
+    dims = {k: DIMS if "past_reference_date" not in data[k].dims else LONG_DIMS for k in data_vars}
+    shape = {k: [*data[k].shape[:-2], y.size, x.size] for k in data_vars}
+    dtype = {k: data[k].dtype.name for k in data_vars}
+    coords = {k: v.values for k, v in data.coords.items() if k in COORDS}
+    coords["y"] = y
+    coords["x"] = x
+    ch = {k: chunks[k] for k in data.chunksizes.keys() if k in LONG_DIMS}
+    ch["y"] = chunks["y"]
+    ch["x"] = chunks["x"]
+    image = save_empty_dataset(
+        data_vars=data_vars,
+        dims=dims,
+        shape=shape,
+        chunks=ch,
+        dtype=dtype,
+        coords=coords,
+        crs=selection.rio.crs.to_string(),
+        data_path=normpath(f"{data_path_tmp}/gmlp/{date}"),
+        storage_options=get_storage_options(kwargs, key="storage_options_dynamic"),
+        skip_read=False
+    )
+    
     image = image.phase.isel({k: 0 for k in image.phase.dims if k not in ["y", "x"]})
-    dtaz, dtrg = get_radar_spacing(image.azimuth_time, image.slant_range_time)
-    acquisition_dates = list(cmlp.keys())
-    product = cmlp[acquisition_dates[0]].ds
-
     # --- Map the Geocoding Worker Function ---
     # This call applies the `warp_cmlp` function to each block of the simulation grid.
     save_options = {
-        i: {
+        0: {
             "data_path": normpath(f"{data_path_tmp}/gmlp/{date}"),
             "save_options": {
                 "consolidated": False,
                 "storage_options": get_storage_options(kwargs, key="storage_options_dynamic"),
             },
         }
-        for i, date in enumerate(acquisition_dates)
     }
-
     map_blocks(
         blockwise_warp_cmlp,
         image,
-        args=(selection, product, cmlp, acquisition_dates, kernel, data_path_tmp),
+        args=(selection, data,  kernel),
         kwargs=kwargs
         | {
-            "dtaz": dtaz,
-            "dtrg": dtrg,
+            "dtaz": radar_spacing["azimuth_time"].astype(float),
+            "dtrg": radar_spacing["slant_range_time"],
         },
         combine=False,
         enable_dask=enable_dask,
         store_mapping=save_options,
     )
-    dt = xr.DataTree()
-    for date in acquisition_dates:
-        data = read(
-            normpath(f"{data_path_tmp}/gmlp/{date}"),
-            storage_options=get_storage_options(kwargs, key="storage_options_dynamic"),
-        )
-        dt[date] = data
-    return dt
+    gmlp = read(
+        normpath(f"{data_path_tmp}/gmlp/{date}"),
+        storage_options=get_storage_options(kwargs, key="storage_options_dynamic"),
+        as_type="xr.Dataset"
+    )
+
+    return (burst_id,date,gmlp)
 
 
 def blockwise_warp_cmlp(
     image: xr.DataArray,
     simulation: xr.Dataset,
-    product: xr.Dataset,
-    cmlp: xr.DataTree,
-    acquisition_dates: xr.DataArray,
+    cmlp: xr.Dataset,
     kernel: dict,
     dtaz: float,
     dtrg: float,
@@ -380,7 +376,7 @@ def blockwise_warp_cmlp(
     method: str = "linear",
     chunk: dict = {},
     **kwargs,
-) -> Generator[xr.Dataset, None, None]:
+    ) -> xr.Dataset:
     """
     Warp coregistered SLC data to a ground-projected grid (Geocoded SLC).
 
@@ -434,7 +430,7 @@ def blockwise_warp_cmlp(
     yslice = slice(ymin, ymax) if spacing_out[1] > 0 else slice(ymax, ymin)
 
     simulation = simulation.sel(x=xslice, y=yslice)
-    rg, az = extract_rg_az(product, simulation, dtaz=dtaz, dtrg=dtrg)
+    rg, az = extract_rg_az(cmlp, simulation, dtaz=dtaz, dtrg=dtrg)
     # Average coordinates to find the center of each pixel.
     simulation["azimuth_time"].data = az
     simulation["slant_range_time"].data = rg
@@ -453,8 +449,8 @@ def blockwise_warp_cmlp(
     (ind,) = np.where(
         (rg_interp >= kernel_margin[1])
         & (az_interp >= kernel_margin[0])
-        & (rg_interp < (product.slant_range_time.size - kernel_margin[1]))
-        & (az_interp < (product.azimuth_time.size - kernel_margin[0]))
+        & (rg_interp < (cmlp.slant_range_time.size - kernel_margin[1]))
+        & (az_interp < (cmlp.azimuth_time.size - kernel_margin[0]))
     )
 
     # Define the subset of radar coordinates needed for interpolation.
@@ -472,34 +468,32 @@ def blockwise_warp_cmlp(
 
     # Translate coordinates to be relative to the bounding box origin.
     x, y = x - xmin, y - ymin
-    for date in acquisition_dates:
-        ds = xr.Dataset()
-        radar_data = cmlp[date].to_dataset()
-        for name, var in radar_data.data_vars.items():
-            var_shape = list(var.shape)
-            var_shape[-2], var_shape[-1] = shape[0], shape[1]
-            var_dims = list(var.dims)
-            var_dims[-2], var_dims[-1] = "y", "x"
-            ds[name] = xr.DataArray(np.zeros(var_shape, dtype=var.dtype), dims=var_dims)
+    ds = xr.Dataset()
+    for name, var in cmlp.data_vars.items():
+        var_shape = list(var.shape)
+        var_shape[-2], var_shape[-1] = shape[0], shape[1]
+        var_dims = list(var.dims)
+        var_dims[-2], var_dims[-1] = "y", "x"
+        ds[name] = xr.DataArray(np.zeros(var_shape, dtype=var.dtype), dims=var_dims)
+    # Select the required portion of the input data.
+    cmlp = cmlp.isel(slant_range_time=slice(xmin, xmax), azimuth_time=slice(ymin, ymax))
+    if ind.size > 0:
+        # --- Prepare Data for Interpolation ---
+        # --- Loop over each acquisition date ---
+        for name in cmlp.data_vars:
+            name = str(name)
+            # 1. Evaluate string conditions ONCE outside the loop for speed
+            is_phase = name == "phase"
+            is_coh = "coh" in name
+            warp_cmlp(
+                source=cmlp[name].compute(),
+                target=ds[name],
+                target_indexes=ind,
+                x=x,
+                y=y,
+                kernel=kernel,
+                is_phase=is_phase,
+                is_coherence=is_coh,
+            )
 
-        # Select the required portion of the input data.
-        radar_data = radar_data.isel(slant_range_time=slice(xmin, xmax), azimuth_time=slice(ymin, ymax))
-        if ind.size > 0:
-            # --- Prepare Data for Interpolation ---
-            # --- Loop over each acquisition date ---
-            for name in radar_data.data_vars.keys():
-                name = str(name)
-                # 1. Evaluate string conditions ONCE outside the loop for speed
-                is_phase = name == "phase"
-                is_coh = "coh" in name
-                warp_cmlp(
-                    source=radar_data[name],
-                    target=ds[name],
-                    target_indexes=ind,
-                    x=x,
-                    y=y,
-                    kernel=kernel,
-                    is_phase=is_phase,
-                    is_coherence=is_coh,
-                )
-        yield ds
+    return ds
