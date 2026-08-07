@@ -656,8 +656,8 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
     acquisition_date_arp_coeffs = {}
     acquisition_date_t0 = {}
     acquisition_date_orbit_type = {}
-    for acquisition_date in slc.coreg.measurements.acquisition_date:
-        acquisition_date_annot = slc.orig[str(acquisition_date.values)].measurements.slc.attrs
+    for acquisition_date in slc.coreg.measurements.acquisition_date.values:
+        acquisition_date_annot = slc.orig[acquisition_date].measurements.slc.attrs
         acquisition_date_annot = acquisition_date_annot[list(acquisition_date_annot.keys())[0]]
         acquisition_date_arp_coeffs[acquisition_date] = {
             e: get_coefficients(f"Position.ARPPoly.{e}.Coefs", acquisition_date_annot) for e in ["X", "Y", "Z"]
@@ -666,10 +666,8 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
         if any(coeff is None for coeff in acquisition_date_arp_coeffs[acquisition_date].values()):
             raise ValueError("Missing ARP polynomial coefficients in metadata.")
         # Determine the type of orbit data used for this acquisition.
-        if ("conditions" in slc.orig[str(acquisition_date.values)]) and (
-            "orbit" in slc.orig[str(acquisition_date.values)].conditions
-        ):
-            orb_type = slc.orig[str(acquisition_date.values)].conditions.orbit.attrs["orbit_type"]
+        if ("conditions" in slc.orig[acquisition_date]) and ("orbit" in slc.orig[acquisition_date].conditions):
+            orb_type = slc.orig[acquisition_date].conditions.orbit.attrs["orbit_type"]
         else:
             orb_type = "AUX_ANNOTATED"
         acquisition_date_orbit_type[acquisition_date] = orb_type
