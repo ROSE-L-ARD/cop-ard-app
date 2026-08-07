@@ -385,11 +385,13 @@ def sparse_multilook_core(data: xr.Dataset, cohe_th: float, multilook: dict):
 
 
 def slice_and_drop_coordinates(
-    ds: xr.DataArray, slices: dict[str, slice], dimension_coordinates_to_keep: list[str]
+    ds: xr.DataArray,  dimension_coordinates_to_keep: list[str],slices: dict[str, slice] | None = None,
 ) -> xr.DataArray:
     """Helper to apply slices and drop unwanted coordinates."""
     coords_to_drop = [k for k in ds.coords if k not in dimension_coordinates_to_keep]
-    return ds.isel(slices).drop_vars(coords_to_drop)
+    if slices is not None:
+        ds = ds.isel(slices)
+    return ds.drop_vars(coords_to_drop)
 
 
 def get_bbox(slcs, reference_date: str | None = None):
