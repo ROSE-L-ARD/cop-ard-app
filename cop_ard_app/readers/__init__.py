@@ -16,7 +16,7 @@
 Sarpy Readers Module Initialization
 
 This module configures the Sarpy library to recognize and use custom Sentinel-1
-readers (EOPF and SAFE formats) developed within the `s1_ard_core` package.
+readers (EOPF and SAFE formats) developed within the `cop_ard_app` package.
 
 It imports the necessary Sarpy converter module and the custom reader modules,
 then registers the custom "is_a" functions with Sarpy's opener mechanism.
