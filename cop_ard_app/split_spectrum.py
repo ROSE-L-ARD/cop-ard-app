@@ -120,7 +120,7 @@ def remove_iono_surface_chunk(
 
 def remove_iono_surface_single_burst(
     burst_id: str,
-    burst: xr.DataTree,
+    burst: xr.Dataset,
     coeffs: xr.DataArray,
     H_iono: xr.DataArray | float,
     H_orb: xr.DataArray |float,
@@ -130,7 +130,7 @@ def remove_iono_surface_single_burst(
 ) -> tuple[str, xr.DataTree] | None:
 
     # recontruct the surface over all points
-    cstack = burst.coreg.measurements.cstack
+    cstack = burst.cstack
     
     # select preferred polarization
     pol = get_best_pol(cstack.polarization.values)
@@ -140,8 +140,8 @@ def remove_iono_surface_single_burst(
     CollectStart = annot_pol["Timeline"]["CollectStart"][:-1]
 
     # init output file structure
-    burst['coreg/measurements/phase_iono'] = xr.zeros_like(burst['coreg/measurements/cstack'].isel(polarization=0), dtype="float32")
-    write(burst['coreg/measurements'], outfolder.append(f'bursts/{burst_id}/coreg/measurements'), skip_read=True)
+    burst['phase_iono'] = xr.zeros_like(burst['cstack'].isel(polarization=0), dtype="float32")
+    write(burst, outfolder.append(f'bursts/{burst_id}/coreg/measurements'), skip_read=True)
     
     store_mapping = {
         0: {
@@ -163,7 +163,7 @@ def remove_iono_surface_single_burst(
         store_mapping=store_mapping, #store_directory=outfolder.append(f"bursts/{burst_id}/coreg/measurements"),
     )
     
-    return burst_id, read(outfolder.append(f"bursts/{burst_id}"), consolidate_metadata=True)
+    return 
 
 @timeit
 def remove_iono_surface(
@@ -177,21 +177,19 @@ def remove_iono_surface(
     logger.debug(outfolder)
     write(outdatatree, data_path=outfolder, skip_read=True)
 
-    args = [(burst_id, slc) for burst_id, slc in slcs.bursts.items()]
+    args = [(burst_id, slc.coreg.measurements.to_dataset()) for burst_id, slc in slcs.bursts.items()]
     args = list(zip(*args))
 
     # update all bursts
-    _ = cast(
-        list[tuple[str, xr.DataTree]],
-        map(
-            remove_iono_surface_single_burst,
-            args=args,
-            kwargs={"coeffs": coeffs, "H_iono": H_iono, "H_orb": H_orb, "degree": degree, "outfolder": outfolder, "enable_dask": enable_dask},
-            enable_dask=enable_dask,
-            combine=False,
-        ),
-    )
 
+    map(
+        remove_iono_surface_single_burst,
+        args=args,
+        kwargs={"coeffs": coeffs, "H_iono": H_iono, "H_orb": H_orb, "degree": degree, "outfolder": outfolder, "enable_dask": enable_dask},
+        enable_dask=enable_dask,
+        combine=False,
+    )
+    
     return read(data_path=outfolder, consolidate_metadata=True)
 
 
