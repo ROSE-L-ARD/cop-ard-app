@@ -514,7 +514,7 @@ def initialize_simulation(
     radar_grid_pixel_area = annot["Grid"]["Col"]["SS"] * annot["Grid"]["Row"]["SS"]
     # Calculate time steps as timedelta64 and float for margin calculation.
     margin = get_margin(
-        time_ca_polynomial_coefficients=annot["RMA"]["INCA"]["TimeCAPoly"],
+        time_ca_polynomial_coefficients=annot["RMA"]["INCA"]["TimeCAPoly"]["Coefs"],
         azimuth_time_spacing=annot["Grid"]["Col"]["SS"],
         slant_range_time_spacing=annot["Grid"]["Row"]["SS"],
     )

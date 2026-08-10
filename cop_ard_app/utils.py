@@ -16,6 +16,8 @@ from pyproj.transformer import TransformerGroup
 from scipy.constants import speed_of_light
 
 from cop_ard_app.model import get_az_rg_times, get_coefficients
+from cop_ard_app.io import write
+from cop_ard_app.computation import map
 
 
 class GeoEnvPlugin(dask.distributed.WorkerPlugin):
@@ -408,8 +410,84 @@ def sparse_multilook_core(data: xr.Dataset, cohe_th: float, multilook: dict):
 
 
 def slice_and_drop_coordinates(
-    ds: xr.DataArray, slices: dict[str, slice], dimension_coordinates_to_keep: list[str]
+    ds: xr.DataArray,
+    dimension_coordinates_to_keep: list[str],
+    slices: dict[str, slice] | None = None,
 ) -> xr.DataArray:
     """Helper to apply slices and drop unwanted coordinates."""
     coords_to_drop = [k for k in ds.coords if k not in dimension_coordinates_to_keep]
-    return ds.isel(slices).drop_vars(coords_to_drop)
+    if slices is not None:
+        ds = ds.isel(slices)
+    return ds.drop_vars(coords_to_drop)
+
+
+def get_bbox(slcs, reference_date: str | None = None):
+    """
+    Get the bounding box of the SAR data.
+
+    Parameters
+    ----------
+    slcs : xr.DataTree
+        DataTree of SAR data.
+    reference_date : str, optional
+        Reference date for selecting specific data.
+
+    Returns
+    -------
+    list
+        Bounding box [min_lon, min_lat, max_lon, max_lat].
+    """
+    lat, lon = [], []
+
+    # Iterate through all scenes.
+    for slc in (slcs.bursts if "bursts" in slcs else {"data": slcs}).values():
+        # Optionally filter by a reference date.
+        for date in slc.orig if reference_date is None else [reference_date]:
+            # Extract corner coordinates from the metadata.
+            annot = slc.orig[date].measurements.slc.attrs
+            annot = annot[list(annot.keys())[0]]
+            for v in annot["GeoData"]["ImageCorners"]:
+                lat.append(v["Lat"])
+                lon.append(v["Lon"])
+
+    # Calculate the min/max latitude and longitude, rounding to one decimal place.
+    return [
+        np.floor(np.min(lon) * 10) / 10,
+        np.floor(np.min(lat) * 10) / 10,
+        np.ceil(np.max(lon) * 10) / 10,
+        np.ceil(np.max(lat) * 10) / 10,
+    ]
+
+
+def save_single_burst(burst_id, current_reference, stable_reference, reference_db_path, multiburst):
+    path = f"bursts/{burst_id}" if multiburst else burst_id
+    current_reference_path = f"{reference_db_path}/{path}/current_reference"
+    stable_reference_path = f"{reference_db_path}/{path}/stable_reference"
+
+    write(current_reference, current_reference_path)
+
+    if stable_reference is not None:
+        for date in stable_reference.acquisition_date.values:
+            write(stable_reference.sel(acquisition_date=date), f"{stable_reference_path}/{date}")
+
+
+def update_reference_database(current_reference_tree, stable_references_tree, reference_db_path):
+    multiburst = "bursts" in current_reference_tree
+    args = []
+    for k, v in (current_reference_tree.bursts if multiburst else {"data": current_reference_tree}).items():
+        c_ref = v.measurements.cstack
+        s_ref = (
+            (stable_references_tree.bursts[k] if multiburst else stable_references_tree).measurements.cstack
+            if stable_references_tree is not None
+            else None
+        )
+        a = (k, c_ref, s_ref)
+        args.append(a)
+
+    args = list(zip(*args))
+    map(
+        save_single_burst,
+        args,
+        kwargs={"reference_db_path": reference_db_path, "multiburst": multiburst},
+        enable_dask=True,
+    )

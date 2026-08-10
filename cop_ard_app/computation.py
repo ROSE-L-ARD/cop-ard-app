@@ -293,7 +293,7 @@ def get_chunks(
         _chunks = dict(chunks)
         _indices = {k: (0,) * len(v) for k, v in _chunks.items()}
     n_chunks = list(_chunks.values())[0]
-    n_chunks = len(n_chunks) if isinstance(n_chunks, tuple) else n_chunks
+    n_chunks = len(n_chunks) if isinstance(n_chunks, (list, tuple)) else n_chunks
     return _chunks, _indices, n_chunks
 
 
@@ -842,7 +842,6 @@ def try_to_store(
 
     if store_mapping:
         # If store_mapping exists it will be used and cache_directory if provided will be ignored
-        logger.debug(f"Try to save results ({chunk}) using as configurations ({store_mapping})", tags=["store"])
 
         # Indices provided must be lower than the number of elements returned by executed function
         if max(list(store_mapping.keys())) >= n_results:
@@ -872,11 +871,6 @@ def try_to_store(
                     j_result = j_result.reset_coords(drop=True)
                 if j_drop_attrs:
                     j_result = j_result.drop_attrs()
-                logger.debug(
-                    f"Saving {j}-th element ({j_result}) of results into {j_data_path} using as region {j_region}",
-                    tags=["store"],
-                    verbose=True,
-                )
                 results_l[j] = write(j_result, data_path=j_data_path, region=j_region, **j_opts)
             else:
                 logger.warning(
@@ -884,12 +878,8 @@ def try_to_store(
                 )
         results = typef(results_l)
     elif store_directory is not None:
-        logger.debug(
-            f"Try to save results into cache directory ({store_directory}) using the following options: {save_options}",
-            tags=["store"],
-        )
+        _, typef, results_l = setup(results)
 
-        logger.debug(f"Results to be saved: {results_l}", verbose=True, tags=["store"])
         results = typef(
             (
                 write(j, data_path=store_directory, **{**save_options, "skip_read": False})  # type: ignore

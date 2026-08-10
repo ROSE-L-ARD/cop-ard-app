@@ -947,14 +947,13 @@ def blockwise_rtc_ap(
         # Read sparse matrix components (CSR format)
         w = read(f, as_type="xr.Dataset", consolidated=False, storage_options=so)
         # --- Start Radiometric Terrain Correction (RTC) Area Projection (AP) ---
-        anf, lia, a_block = compute_rtc_ap(
+        anf, lia, a_block, bbox_radar = compute_rtc_ap(
             csr_matrix=w,
             simulation=simulation,
             radar_grid_pixel_area=radar_grid_pixel_area,
             normal_order=normal_order,
             bbox=bbox,
         )
-        bbox_radar = np.array([bbox[3], 0, bbox[2], 0])
         ablock_dt = xr.DataTree(children={".".join([str(i) for i in bbox_radar]): xr.DataTree(dataset=a_block)})
     else:
         # If no weights were computed (e.g., empty chunk), create empty arrays
