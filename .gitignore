@@ -27,7 +27,8 @@ share/python-wheels/
 *.egg
 MANIFEST
 cop_ard_app/readers/sarpy_saocom.py
-
+cli/
+scripts
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
