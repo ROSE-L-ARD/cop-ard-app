@@ -113,7 +113,7 @@ def update_orbit(
     """
 
     def get_reference_time_from_attrs(attrs: dict):
-        attrs[list(attrs)[0]]["Timeline"]["CollectStart"]
+        return attrs[list(attrs)[0]]["Timeline"]["CollectStart"]
 
     slcs_info: dict[str, Any] = {}
     # --- Step 1: Collect SLC Time Intervals and Metadata ---
@@ -187,12 +187,11 @@ def update_orbit(
         for k, s in (slcs.bursts if multiburst else {"data": slcs}).items()
         for d, v in s.orig.items()
     ]
-    args = list(zip(*args))
     refit_orbits = cast(
         list[xr.Dataset | None],
         map(
             refit_orbit_coefficients,
-            args,
+            list(zip(*args)),
             kwargs={"poly_degree": poly_degree},
             combine=False,
             enable_dask=enable_dask,
@@ -205,7 +204,7 @@ def update_orbit(
         list,
         map(
             overwrite_orbit_coefficients,
-            args,
+            list(zip(*args)),
             kwargs={"wdir_path": wdir_path, "multiburst": multiburst, **kwargs},
             combine=False,
             enable_dask=enable_dask,

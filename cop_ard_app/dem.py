@@ -17,7 +17,6 @@ from cop_ard_app.io import exists, get_storage_options, normpath, open_copdem30m
 from cop_ard_app.utils import GeoEnvPlugin
 
 
-@timeit
 def dem_reproject(
     dem: xr.DataArray,
     spacing: dict[str, Any],

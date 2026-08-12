@@ -50,16 +50,16 @@ def import_ETAD(
     if not is_valid:
         raise TypeError("Invalid input: Expected a list of Path objects for ETAD files.")
     acquisition_date: Union[str, np.datetime64]
-    etad_paths = []
+    etad_paths = set()
     # --- Find Matching ETAD Files ---
     for acquisition_date in acquisition_dates:
         acquisition_date = np.datetime64(acquisition_date)
         # Format the date as YYYYMMDD to match typical ETAD filenames.
         date = acquisition_date.astype("M8[D]").astype(object).strftime("%Y%m%d")
         # Find all files in the `etad_files` list that contain this date string.
-        files = [file for file in etad_files if date in file.name]
+        files = {file for file in etad_files if date in file.name}
         if files:
-            etad_paths.extend(files)
+            etad_paths.update(files)
     used_etad: list[str] = []
     # --- Import ETAD and Orbits ---
     if etad_paths:
@@ -68,7 +68,7 @@ def import_ETAD(
             etad_file_list=etad_paths,
             slcs=slcs,
             multiburst=multiburst,
-            wdir_path=f"{wdir_path}/slcs",
+            wdir_path=f"{wdir_path}/ETAD",
             enable_dask=enable_dask,
             **kwargs,
         )
@@ -76,7 +76,6 @@ def import_ETAD(
         if any(e is None for e in orbit_paths):
             raise RuntimeError("The input slcs is not completely convered by the input ETAD file(s)")
         # Update the SLC DataTree with the new precise orbit information.
-        logger.info(orbit_paths)
         update_orbit(
             slcs=slcs,
             multiburst=multiburst,
@@ -253,7 +252,7 @@ def update_etad(
 
 
 def import_etad_stack(
-    etad_file_list: list,
+    etad_file_list: set,
     slcs: xr.DataTree,
     multiburst: bool,
     wdir_path: str,
@@ -285,7 +284,6 @@ def import_etad_stack(
         t0az = np.datetime64(etad_nc.attrs["azimuthTimeMin"], "ns")
         t0rg = etad_nc.attrs["rangeTimeMin"]
         etad_acquisition_date = discover_etaddate_slcsdate(slcs_az, etad_nc, multiburst).pop()
-
         if not etad_acquisition_date:
             logger.info(f"ETAD file without correspondence: {etad_nc_path}")
             continue

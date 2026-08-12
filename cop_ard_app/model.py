@@ -284,6 +284,24 @@ def extract_acquisition_dates(
     return list(acquisition_dates)
 
 
+def extract_acquisition_id(
+    slcs: xr.DataTree,
+    multiburst: bool = False,
+) -> set:
+    """
+    Extract a unique, sorted list of acquisition dates from the DataTree.
+    """
+    ids = set()
+
+    # Iterate through all original data nodes.
+    for i in (slcs.bursts if multiburst else {"data": slcs}).values():
+        for j in i.orig:
+            # Get the acquisition date from the coordinates.
+            ids.add(j)
+
+    return ids
+
+
 def get_az_rg_times(annot):
     """
     Compute azimuth and slant range time coordinate arrays from SICD metadata.

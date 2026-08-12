@@ -787,7 +787,7 @@ def stack_geometry(
     working_directory_static: str,
     working_directory_tmp: str,
     reference_date: str,
-    chunk_length: int = 1024,
+    chunk_length: int = 2048,
     multiburst: bool = True,
     recompute: bool = False,
     enable_dask: bool = True,
