@@ -29,13 +29,12 @@ these custom readers when given a path to a corresponding Sentinel-1 product.
 import sarpy.io.complex.converter
 
 import cop_ard_app.readers.sarpy_rosel as sarpy_rosel
-import cop_ard_app.readers.sarpy_sentinel_eopf as sarpy_eopf
 import cop_ard_app.readers.sarpy_sentinel_safe as sarpy_safe
 
 # Register the EOPF reader's identification function (`is_a`) with Sarpy.
-# This allows Sarpy to recognize EOPF products.
-sarpy.io.complex.converter.register_opener(sarpy_eopf.is_a)
 # This allows Sarpy to recognize individual SAFE measurement files.
 sarpy.io.complex.converter.register_opener(sarpy_safe.is_a)
 # This allows Sarpy to recognize individual ROSEL measurement files.
 sarpy.io.complex.converter.register_opener(sarpy_rosel.is_a)
+# This allows Sarpy to recognize individual SAOCOM products.
+

@@ -1,8 +1,7 @@
-import json
 import os
 from collections import defaultdict
 from typing import Any, Hashable, Sequence, cast
-import cop_ard_app.readers  # register sarpy readers
+
 import numpy as np
 import sarpy.io.complex.sentinel
 import xarray as xr
@@ -16,10 +15,13 @@ from cop_ard_core.slc import (
     merge_dict,
     noise_removal,
 )
+from cop_ard_core.utils import sync_sicd_metadata
 
+import cop_ard_app.readers
 from cop_ard_app.computation import init_zarr_groups, map, map_blocks
 from cop_ard_app.io import (
     Path,
+    exists,
     generate_empty_dataset,
     get_storage_options,
     is_s3_path,
@@ -32,7 +34,7 @@ from cop_ard_app.io import (
     write,
 )
 from cop_ard_app.model import (
-    extract_acquisition_dates,
+    extract_acquisition_id,
     extract_orbits,
     get_az_rg_meters,
     get_az_rg_times,
@@ -40,13 +42,14 @@ from cop_ard_app.model import (
     get_burst_id_safe,
     get_coefficients,
     get_footprint,
-    map_index_to_group,
 )
+
+cop_ard_app.readers.__file__
 
 
 def import_slice(
     slc: xr.DataArray,
-    in_path: str | xr.DataArray,
+    in_path: str,
     index: int,
     processed_pol: str,
     calibration_flag: bool = False,
@@ -83,15 +86,10 @@ def import_slice(
     if processed_pol not in slc.polarization.values:
         return
     # Handle data that's already in memory (as an xarray.DataArray).
-    if isinstance(in_path, xr.DataArray):
-        # Assign the data from the in-memory array to the target slice.
-        slc.data = in_path.data.reshape(slc.shape).astype("complex64")
-    # Handle data that needs to be read from a file.
-    else:
-        ds = sarpy_open(in_path)
-        # Read the specific binary data chunk from the file.
-        arr = ds.read(slice(None, None), chunk["azimuth_time"], index=index).astype("complex64").T
-        slc.data = arr.reshape(slc.shape)
+    ds = sarpy_open(in_path)
+    # Read the specific binary data chunk from the file.
+    arr = ds.read(slice(None, None), chunk["azimuth_time"], index=index).astype("complex64").T
+    slc.data = arr.reshape(slc.shape)
     # --- Processing Steps ---
     # Noise must be removed before calibration as it's a function of raw DN.
     if noise_removal_flag:
@@ -115,7 +113,7 @@ def import_slice(
 def import_image(
     group: str,
     outer_dict: dict,
-    in_path: str | None,
+    in_path: str,
     out_path: str,
     calib_type: str | None = None,
     noise_removal_flag: bool | None = None,
@@ -160,45 +158,32 @@ def import_image(
     annot = {}
     data = {}
     indexes = {}
-    if in_path is None:
-        for e, (k, v) in enumerate(outer_dict.items()):
-            pols.append(k)
-            indexes[k] = v[0]
-            data[k] = v[1]
-            attrs = json.loads(v[2])
-            annot[k] = attrs["annot"]
-            data[k].attrs = attrs["annot"]
-            if e == 0:
-                stac_discovery = attrs["stac_discovery"]
-                processing_history = attrs["processing_history"]
-    else:
-        # Extract polarization and metadata for each layer.
-        for k, v in outer_dict.items():
-            pols.append(k)
-            indexes[k] = v[0]
-            data[k] = v[1]
-            annot[k] = sarpy_open(v[1]).sicd_meta[v[0]].to_dict()
-            for el in ["Row", "Col"]:
-                if "WgtFunct" in annot[k]["Grid"][el]:
-                    del annot[k]["Grid"][el]["WgtFunct"]
+    # Extract polarization and metadata for each layer.
+    for k, v in outer_dict.items():
+        pols.append(k)
+        indexes[k] = v[0]
+        data[k] = v[1]
+        annot[k] = sarpy_open(v[1]).sicd_meta[v[0]].to_dict()
+        for el in ["Row", "Col"]:
+            if "WgtFunct" in annot[k]["Grid"][el]:
+                del annot[k]["Grid"][el]["WgtFunct"]
+    annot = sync_sicd_metadata(annot)
 
     # Compute the coordinate arrays (azimuth/range in meters and time).
     azimuth_m, slant_range_m = get_az_rg_meters(annot[pols[0]])
     azimuth_time, slant_range_time = get_az_rg_times(annot[pols[0]])
 
     # Get the acquisition date from the metadata.
-    try:
-        acquisition_date = str(annot[pols[0]].Timeline.CollectStart)[:10]
-    except AttributeError:
-        acquisition_date = str(path_to_dict(annot[pols[0]], "Timeline.CollectStart"))[:10]
+    acquisition_date = str(path_to_dict(annot[pols[0]], "Timeline.CollectStart")).replace("Z", "")
 
     # Define the final output path for this specific image group.
     data_path = os.path.join(out_path, group)
+    logger.debug(f"Saving group: {data_path}")
+
     # --- Initialize Zarr Storage ---
     dt = xr.DataTree.from_dict({k: xr.Dataset() for k in ["measurements", "conditions", "quality"]})
-    if in_path is None:
-        dt["conditions"].attrs["stac_discovery"] = stac_discovery
-        dt["conditions"].attrs["processing_history"] = processing_history
+    dt["conditions"].attrs["stac_discovery"] = {}
+    dt["conditions"].attrs["processing_history"] = {}
     # --- Create and Save Empty SLC Dataset ---
     # This creates the structure on disk with the correct dimensions, coordinates, and metadata.
     coords = {
@@ -243,30 +228,20 @@ def import_image(
             },
         }
         # --- Process Data Slice by Slice ---
-        if in_path is not None:
-            ds = sarpy_open(in_path)
+        ds = sarpy_open(in_path)
         for pol in pols:
             index = indexes[pol]
             slc = data[pol]
             args = []
             obj = [image.slc]
             # Define the chunking strategy for `map_blocks`.
-            if in_path is not None:
-                chunksizes = {k: v for k, v in chunks.items() if k in image.dims}
-                chunksizes["slant_range_time"] = slant_range_time.size
-                chunksizes["azimuth_time"] = min([azimuth_time.size, chunksizes["azimuth_time"]])
-                annot = ds.sicd_meta[index]
-                processed_pol = annot.get_processed_polarization().replace(":", "")
-                annot = annot.to_dict()
-                args.append(slc)
-            else:
-                chunksizes = None
-                slc = slc.chunk(
-                    {k: v[0] for k, v in image.chunksizes.items() if k in ["slant_range_time", "azimuth_time"]}
-                )
-                annot = slc.attrs
-                processed_pol = annot["ImageFormation"]["TxRcvPolarizationProc"].replace(":", "")
-                obj.append(slc)
+            chunksizes = {k: v for k, v in chunks.items() if k in image.dims}
+            chunksizes["slant_range_time"] = slant_range_time.size
+            chunksizes["azimuth_time"] = min([azimuth_time.size, chunksizes["azimuth_time"]])
+            annot = ds.sicd_meta[index]
+            processed_pol = annot.get_processed_polarization().replace(":", "")
+            annot = annot.to_dict()
+            args.append(slc)
             calibration_flag = calib_type is not None
             noise_poly_coeffs = get_coefficients("Radiometric.NoiseLevel.NoisePoly.Coefs", annot)
             calibration_polynomial_coeffs = get_coefficients(f"Radiometric.{calib_type}SFPoly.Coefs", annot)
@@ -300,8 +275,6 @@ def import_image(
                 compute_on_host=compute_on_host,
                 store_mapping={0: save_options},
             )
-    else:
-        logger.info("Imported SLC image structure only (data import skipped).")
 
     image = read(data_path, storage_options=get_storage_options(kwargs))
     if not isinstance(image, xr.DataTree):
@@ -348,7 +321,11 @@ def group_discover(
     for index in indices:
         annot = ds.sicd_meta[index]
         # Get acquisition date and polarization from metadata.
-        acquisition_date = str(annot.Timeline.CollectStart)[:10]
+        Parameters = annot.CollectionInfo.Parameters.to_dict()
+        absolute_number = str(Parameters["ABSOLUTE_ORBIT"])
+        collector_name = str(annot.CollectionInfo.CollectorName)
+        acquisition_id = f"{collector_name}_{absolute_number}"
+
         pol = annot.get_processed_polarization().replace(":", "")
         # Filter by polarization if specified.
         if polarizations:
@@ -361,9 +338,8 @@ def group_discover(
             footprint = get_footprint(ds, index)
             if (aoi_wkt is not None) and (not intersect(footprint, aoi_wkt)):
                 continue
-
             # Generate a unique group ID based on swath and burst ID.
-            if isinstance(in_path, xr.DataTree) or (not is_s3_path(in_path)):
+            if not is_s3_path(in_path):
                 swath, burstid = get_burst_id(annot)
             else:
                 storage_options = get_storage_options(kwargs)
@@ -375,29 +351,12 @@ def group_discover(
                     annot,
                     get_relative_orbit_number(root_node, ns),
                 )
-            gg = os.path.join("bursts", f"{swath}_{burstid}", "orig", acquisition_date)
+            gg = os.path.join("bursts", f"{swath}_{burstid}", "orig", acquisition_id)
         else:
             # For single burst or stripmap, the group is just 'orig/date'.
-            gg = os.path.join("orig", acquisition_date)
-            swath, burstid = None, None
+            gg = os.path.join("orig", acquisition_id)
         # Append the relevant metadata/data to the corresponding group.
-        if isinstance(in_path, xr.DataTree):
-            datatree_group = map_index_to_group(in_path, swath, burstid, pol)
-            annot = annot.to_dict()
-            # Remove large, unnecessary fields from metadata.
-            for e in ["Row", "Col"]:
-                if "WgtFunct" in annot["Grid"][e]:
-                    del annot["Grid"][e]["WgtFunct"]
-            data = in_path[datatree_group]
-            slc = data.measurements.slc
-            attrs = {
-                "annot": annot,
-                "stac_discovery": data.attrs["stac_discovery"],
-                "processing_history": data.attrs["processing_history"],
-            }
-            mydict[gg][pol].extend([index, slc, json.dumps(attrs)])
-        else:
-            mydict[gg][pol].extend([index, in_path])
+        mydict[gg][pol].extend([index, in_path])
 
     return mydict
 
@@ -483,7 +442,7 @@ def import_slc(
 
 @timeit
 def import_slc_stack(
-    or_f: list[str | xr.DataTree],
+    or_f: list[str],
     out_path,
     aoi_wkt: str | None = None,
     multiburst: bool = False,
@@ -528,16 +487,18 @@ def import_slc_stack(
     if not or_f:
         raise ValueError("The input list cannot be empty.")
 
-    base_type = type(or_f[0])
-    if base_type not in (str, xr.DataTree) or any(not isinstance(f, base_type) for f in or_f):
-        raise TypeError(f"All elements must be uniformly xr.DataTree or str. Got: {base_type.__name__}")
+    if exists(out_path, storage_options=get_storage_options(kwargs)):
+        raise ValueError(f"Output path {out_path} already exists.")
+
+    if not do_import:
+        logger.info("Importing SLC image structure only (data import skipped).")
     # --- Step 1: Discover Image Groups ---
     # In parallel, discover all the relevant image groups (bursts, polarizations, etc.) from the input files.
     res = map(
         group_discover,
         or_f,
         kwargs=dict(aoi_wkt=aoi_wkt, multiburst=multiburst, indices=indices, polarizations=polarizations, **kwargs),
-        enable_dask=True if base_type is str else False,
+        enable_dask=enable_dask,
         combine=False,
     )
 
@@ -552,62 +513,34 @@ def import_slc_stack(
     # Map the `import_slc` function over each input file. This will process the data
     # in parallel and write the results directly to the initialized Zarr store.
     slcs = xr.DataTree()
-    if base_type is str:
-        map_results = map(
-            import_slc,
-            or_f,
-            kwargs=dict(
-                out_path=out_path,
-                aoi_wkt=aoi_wkt,
-                multiburst=multiburst,
-                calib_type=calib_type,
-                noise_removal_flag=noise_removal_flag,
-                deramp=deramp,
-                indices=indices,
-                polarizations=polarizations,
-                apply_invalid_mask_flag=apply_invalid_mask_flag,
-                chunks=chunks,
-                do_import=do_import,
-                enable_dask=enable_dask,
-                **kwargs,
-            ),
-            map_equally=True,  # Distribute work evenly.
-            combine=False,
+    map_results = map(
+        import_slc,
+        or_f,
+        kwargs=dict(
+            out_path=out_path,
+            aoi_wkt=aoi_wkt,
+            multiburst=multiburst,
+            calib_type=calib_type,
+            noise_removal_flag=noise_removal_flag,
+            deramp=deramp,
+            indices=indices,
+            polarizations=polarizations,
+            apply_invalid_mask_flag=apply_invalid_mask_flag,
+            chunks=chunks,
+            do_import=do_import,
             enable_dask=enable_dask,
-        )
-        # --- Step 4: Reread and Return Result ---
-        # After all workers have finished writing, open the consolidated Zarr store.
-        if not isinstance(map_results, list):
-            raise ValueError(f"Expected list of xr.DataTree, got {type(map_results)}")
-        for result in map_results:
-            for group, slc in result:
-                slcs[group] = slc
-    else:
-        # Prepare the arguments for the `import_image` map operation.
-        args = [[index for index in groups.keys()], [group for group in groups.values()]]
-
-        # Map the `import_image` function over the discovered groups.
-        map_results = map(
-            import_image,
-            args,
-            kwargs=dict(
-                in_path=None,
-                out_path=out_path,
-                calib_type=calib_type,
-                noise_removal_flag=noise_removal_flag,
-                deramp=deramp,
-                apply_invalid_mask_flag=apply_invalid_mask_flag,
-                chunks=chunks,
-                do_import=do_import,
-                enable_dask=enable_dask,
-                **kwargs,
-            ),
-            combine=False,
-            enable_dask=enable_dask,
-        )
-        if not isinstance(map_results, list):
-            raise ValueError(f"Expected list of xr.DataTree, got {type(map_results)}")
-        for group, slc in map_results:
+            **kwargs,
+        ),
+        map_equally=True,  # Distribute work evenly.
+        combine=False,
+        enable_dask=enable_dask,
+    )
+    # --- Step 4: Reread and Return Result ---
+    # After all workers have finished writing, open the consolidated Zarr store.
+    if not isinstance(map_results, list):
+        raise ValueError(f"Expected list of xr.DataTree, got {type(map_results)}")
+    for result in map_results:
+        for group, slc in result:
             slcs[group] = slc
 
     return slcs
@@ -683,13 +616,12 @@ def finalize_import(
 
     # Check if the DataTree is organized by bursts and needs a reference date
     if multiburst and reference_date is None:
-        acquisition_dates = extract_acquisition_dates(slcs, multiburst=True)
-
+        acquisition_ids = extract_acquisition_id(slcs, multiburst=True)
         if recompute:
-            if len(acquisition_dates) != 1:
-                raise ValueError(f"Expected exactly one acquisition date, got {len(acquisition_dates)}")
+            if len(acquisition_ids) != 1:
+                raise ValueError(f"Expected exactly one acquisition id, got {len(acquisition_ids)}")
 
-            reference_date = acquisition_dates[0]
+            reference_date = next(iter(acquisition_ids))
             logger.info("Saving reference SLC structure to static working directory.")
 
             # Unzip dictionary items into two lists for mapping: (burst_ids, slc_objects)
@@ -756,7 +688,7 @@ def overwrite_orbit_coefficients(
     wdir_path: str,
     multiburst: bool,
     **kwargs,
-) -> xr.Dataset | None:
+) -> tuple[str, str, xr.Dataset | None]:
     """
     Refit orbit polynomials using precise orbit data and update SLC metadata.
 
@@ -786,11 +718,12 @@ def overwrite_orbit_coefficients(
     path = f"bursts/{burst_id}" if multiburst else ""
     data_path = normpath(f"{wdir_path}/{path}/orig/{acquisition_date}/conditions/orbit")
 
+    logger.debug(f"data_path: {data_path}")
     # Proceed only if precise orbit data is available.
     if orbit is None:
         # If no orbit data was provided, log and return None.
         logger.info(f"No orbit update for the {burst_id} image: {acquisition_date}")
-        return None
+        return (burst_id, acquisition_date, None)
 
     # Write the new orbit dataset to the 'conditions/orbit' group in the Zarr store.
     orbit = cast(
@@ -802,7 +735,7 @@ def overwrite_orbit_coefficients(
             storage_options=get_storage_options(kwargs),
         ),
     )
-    return orbit
+    return (burst_id, acquisition_date, orbit)
 
 
 def update_slcs(slcs: xr.DataTree, multiburst: bool, conditions: list):

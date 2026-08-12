@@ -568,15 +568,36 @@ class SentinelDetails(object):
 
         def get_collection_info():  # type: () -> CollectionInfoType
             collection_info = out_sicd.CollectionInfo.copy()
-            collection_info.CollectorName = cast(ElementTree.Element, root_node.find("./adsHeader/missionId")).text
+            mission_id = cast(ElementTree.Element, root_node.find("./adsHeader/missionId")).text
+            collection_info.CollectorName = mission_id
             collection_info.RadarMode.ModeID = cast(ElementTree.Element, root_node.find("./adsHeader/mode")).text
+
             t_slice = get_slice()
             swath = get_swath()
+            abs_orbit_str = find_string(root_node, "./adsHeader/absoluteOrbitNumber")
+            rel_orbit_node = self._find(".//safe:relativeOrbitNumber")
+            if rel_orbit_node is not None:
+                rel_orbit_str = rel_orbit_node.text
+            else:
+                # Fallback
+                try:
+                    abs_orbit_int = int(abs_orbit_str)
+                    if mission_id == "S1A":
+                        rel_orbit_str = str(((abs_orbit_int - 73) % 175) + 1)
+                    elif mission_id == "S1B":
+                        rel_orbit_str = str(((abs_orbit_int - 27) % 175) + 1)
+                    else:
+                        rel_orbit_str = "UNKNOWN"
+                except ValueError:
+                    rel_orbit_str = "UNKNOWN"
+
             collection_info.Parameters = {
                 "SLICE": t_slice,
                 "BURST": "1",
                 "SWATH": swath,
                 "ORBIT_SOURCE": "SLC_INTERNAL",
+                "ABSOLUTE_ORBIT": abs_orbit_str,
+                "RELATIVE_ORBIT": rel_orbit_str,
             }
             return collection_info
 
