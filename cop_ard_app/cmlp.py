@@ -20,13 +20,13 @@ def stack_cmlp(
     slcs: xr.DataTree,
     posting: dict,
     working_directory: str,
-    revisit_cycle: np.timedelta64,
     memory_param: float = 0.95,
     coherence_threshold: float = 0.1,
-    stable_reference_step: int = 10,
+    stable_interval_days: int = 365,
     max_past_stable_history: int = 100,
     reference_database_path: Path | None = None,
     enable_dask: bool = True,
+    save_metrics: bool = True,
     **kwargs,
 ):
     multiburst = "bursts" in slcs
@@ -49,11 +49,11 @@ def stack_cmlp(
                 posting=posting,
                 multiburst=multiburst,
                 working_directory=working_directory,
-                revisit_cycle=revisit_cycle,
                 memory_param=memory_param,
                 coherence_threshold=coherence_threshold,
-                stable_reference_step=stable_reference_step,
+                stable_interval_days=stable_interval_days,
                 max_past_stable_history=max_past_stable_history,
+                save_metrics=save_metrics,
                 **kwargs,
             ),
             enable_dask=enable_dask,
@@ -89,11 +89,11 @@ def single_cmlp(
     posting: dict,
     multiburst: bool,
     working_directory: str,
-    revisit_cycle: np.timedelta64,
     memory_param: float = 0.95,
     coherence_threshold: float = 0.1,
-    stable_reference_step: int = 10,
+    stable_interval_days: int = 365,
     max_past_stable_history: int = 100,
+    save_metrics: bool = True,
     **kwargs,
 ):
     # 1. Setup paths and validation
@@ -117,7 +117,7 @@ def single_cmlp(
             ds = read(
                 last_reference_path.path, as_type="xr.Dataset", storage_options=last_reference_path.storage_options
             )["cstack"]
-            last_reference = slice_and_drop_coordinates(ds,dimension_coordinates_to_keep=DIMS)
+            last_reference = slice_and_drop_coordinates(ds, dimension_coordinates_to_keep=DIMS)
             starting_date = last_reference.attrs["starting_date"]
         except Exception as e:
             raise ValueError(f"Failed to load current reference at {last_reference_path.path}: {e}")
@@ -141,7 +141,10 @@ def single_cmlp(
             raise ValueError(f"Failed to load stable references from {stable_reference_path.path}: {e}")
     # 3. Calculate Date Milestones
     stable_reference_dates = calculate_stable_dates(
-        acquisition_dates, revisit_cycle, stable_reference_step, stable_reference, starting_date
+        acquisition_dates,
+        stable_interval_days,
+        stable_reference,
+        starting_date,
     )
     # 4. Initialize Output Stores
     _initialize_cmlp_zarr_stores(
@@ -151,6 +154,7 @@ def single_cmlp(
         stable_reference_dates,
         posting,
         chunks,
+        save_metrics,
         kwargs,
     )
 
@@ -166,6 +170,7 @@ def single_cmlp(
             output_path=f"{data_path}/cmlp/{date}",
             compute_phase=True,
             name="short_term_coh",
+            save_metrics=save_metrics,
         )
         # Step 2: Update the Reference State
         current_reference = (
@@ -200,6 +205,7 @@ def single_cmlp(
                     coherence_threshold=coherence_threshold,
                     shape=normalized_interf.shape,
                     output_path=f"{data_path}/cmlp/{date}",
+                    save_metrics=save_metrics,
                 )
                 .compute()
                 .chunk(chunks)
@@ -257,11 +263,7 @@ def _prepare_cstack(cstack: xr.DataArray) -> tuple[xr.DataArray, dict]:
     """
 
     chunks = {k: v[0] for k, v in cstack.chunksizes.items() if k in SHORT_DIMS}
-    cstack_sel = (
-        cstack
-        .drop_vars([k for k in cstack.coords if k not in DIMS])
-        .sortby("acquisition_date")
-    )
+    cstack_sel = cstack.drop_vars([k for k in cstack.coords if k not in DIMS]).sortby("acquisition_date")
 
     return cstack_sel, chunks
 
@@ -273,6 +275,7 @@ def _initialize_cmlp_zarr_stores(
     stable_reference_dates: np.ndarray,
     posting: dict,
     chunks: dict,
+    save_metrics: bool,
     kwargs: dict,
 ) -> None:
     """
@@ -328,51 +331,52 @@ def _initialize_cmlp_zarr_stores(
         )
 
     # 2. Initialize Short/Long Term Stores
-    coords_rolling = {}
-    for k, v in multilook.items():
-        coord = cstack[k]
-        is_datetime = np.issubdtype(coord.dtype, np.datetime64)
-        if is_datetime:
-            ref_time = coord.values[0]
-            coord_num = (coord - ref_time).astype(float)
-        else:
-            coord_num = coord
-        centered_coord = coord_num.rolling({k: v}).mean()
-        if is_datetime:
-            centered_coord = ref_time + centered_coord.astype("timedelta64[ns]")
-        coords_rolling[k] = centered_coord.isel({k: slices[k]})
-   
+    if save_metrics:
+        coords_rolling = {}
+        for k, v in multilook.items():
+            coord = cstack[k]
+            is_datetime = np.issubdtype(coord.dtype, np.datetime64)
+            if is_datetime:
+                ref_time = coord.values[0]
+                coord_num = (coord - ref_time).astype(float)
+            else:
+                coord_num = coord
+            centered_coord = coord_num.rolling({k: v}).mean()
+            if is_datetime:
+                centered_coord = ref_time + centered_coord.astype("timedelta64[ns]")
+            coords_rolling[k] = centered_coord.isel({k: slices[k]})
 
-    coords_rolling["polarization"] = cstack.polarization.values
+        coords_rolling["polarization"] = cstack.polarization.values
 
-    for date in acquisition_dates:
-        data_vars = ["phase", "short_term_coh"]
-        dims_coarse = {k: SHORT_DIMS for k in data_vars}
-        s0 = [coords_rolling[i].size for i in SHORT_DIMS]
-        shape_coarse = {k: s0 for k in data_vars}
-        ch = chunks.copy()
-        coords_rolling["acquisition_date"] = date
+        for date in acquisition_dates:
+            data_vars = ["phase", "short_term_coh"]
+            dims_coarse = {k: SHORT_DIMS for k in data_vars}
+            s0 = [coords_rolling[i].size for i in SHORT_DIMS]
+            shape_coarse = {k: s0 for k in data_vars}
+            ch = chunks.copy()
+            coords_rolling["acquisition_date"] = date
 
-        sd = stable_reference_dates.astype("datetime64[ns]")
-        d = np.datetime64(date, "ns")
-        (ind,) = np.where(sd <= d)
-        if ind.size != 0:
-            data_vars.append("long_term_coh")
-            dims_coarse["long_term_coh"] = LONG_DIMS
-            coords_rolling["past_reference_date"] = stable_reference_dates[ind]
-            shape_coarse["long_term_coh"] = [coords_rolling[i].size for i in LONG_DIMS]
-            ch["past_reference_date"] = 1
-        save_empty_dataset(
-            data_vars=data_vars,
-            dims=dims_coarse,
-            coords=coords_rolling,
-            shape=shape_coarse,
-            chunks=ch,
-            dtype={k: "float32" for k in data_vars},
-            skip_read=True,
-            data_path=f"{data_path}/cmlp/{date}",
-            storage_options=storage_opts,
-        )
+            sd = stable_reference_dates.astype("datetime64[ns]")
+            d = np.datetime64(date, "ns")
+            (ind,) = np.where(sd <= d)
+            if ind.size != 0:
+                data_vars.append("long_term_coh")
+                dims_coarse["long_term_coh"] = LONG_DIMS
+                coords_rolling["past_reference_date"] = stable_reference_dates[ind]
+                shape_coarse["long_term_coh"] = [coords_rolling[i].size for i in LONG_DIMS]
+                ch["past_reference_date"] = 1
+            save_empty_dataset(
+                data_vars=data_vars,
+                dims=dims_coarse,
+                coords=coords_rolling,
+                shape=shape_coarse,
+                chunks=ch,
+                dtype={k: "float32" for k in data_vars},
+                skip_read=True,
+                data_path=f"{data_path}/cmlp/{date}",
+                storage_options=storage_opts,
+            )
+
 
 def _compute_and_save_interferogram(
     target_slc: xr.DataArray,
@@ -381,6 +385,7 @@ def _compute_and_save_interferogram(
     output_path: str,
     compute_phase: bool,
     name: str,
+    save_metrics: bool,
 ) -> np.ndarray:
     """
     Computes a normalized interferogram between a target and reference,
@@ -409,20 +414,21 @@ def _compute_and_save_interferogram(
     # 1. Compute Normalized Interferogram
     normalized_interf = get_normalized_interf(target_slc, reference_slc, posting).values
     # 2. Extract Statistics
-    data = {}
-    data[name] = (SHORT_DIMS, np.abs(normalized_interf))
-    if compute_phase:
-        data["phase"] = (SHORT_DIMS, np.angle(normalized_interf))
-    ds = xr.Dataset(data)
+    if save_metrics:
+        data = {}
+        data[name] = (SHORT_DIMS, np.abs(normalized_interf))
+        if compute_phase:
+            data["phase"] = (SHORT_DIMS, np.angle(normalized_interf))
+        ds = xr.Dataset(data)
 
-    # 3. Write to Disk
-    write(
-        ds,
-        output_path,
-        mode="r+",
-        skip_read=True,
-        consolidated=False,
-    )
+        # 3. Write to Disk
+        write(
+            ds,
+            output_path,
+            mode="r+",
+            skip_read=True,
+            consolidated=False,
+        )
 
     return normalized_interf
 
@@ -465,21 +471,17 @@ def _update_stable_reference(
     # 2. Prepare the dataset (Pad -> Chunk -> Expand -> Transpose -> Dataset)
     ds = current_reference.chunk(chunks).to_dataset(name="cstack")
     # 3. Write to the specific slot
-    new_stable_reference = (
-        cast(
-            xr.Dataset,
-            write(
-                ds,
-                f"{data_path}/stable_reference/{date}",
-                mode="r+",
-                skip_read=False,
-                consolidated=False,
-                region={k: slice(None) for k in SHORT_DIMS},
-            ),
-        )
-        .cstack
-        .expand_dims("acquisition_date")
-    )
+    new_stable_reference = cast(
+        xr.Dataset,
+        write(
+            ds,
+            f"{data_path}/stable_reference/{date}",
+            mode="r+",
+            skip_read=False,
+            consolidated=False,
+            region={k: slice(None) for k in SHORT_DIMS},
+        ),
+    ).cstack.expand_dims("acquisition_date")
     # 4. Reload the updated history from disk
     # We read up to the current index (idx + 1) to get the 'new' history
     # We apply the 'slices' to remove the padding we just added (if any)
@@ -497,6 +499,7 @@ def _correct_drift(
     coherence_threshold: float,
     shape: tuple,
     output_path: str,
+    save_metrics: bool,
 ) -> xr.DataArray:
     """
     Estimates and applies long-term drift correction using historical stable references.
@@ -525,9 +528,11 @@ def _correct_drift(
     """
 
     # 1. Initialize Drift Accumulator
-    shape_coh = (shape[0], stable_reference.acquisition_date.size, shape[1], shape[2])
     drift_interf = np.full(shape, np.nan, dtype="complex64")
-    long_term_coh = np.empty(shape_coh, dtype="float32")
+
+    if save_metrics:
+        shape_coh = (shape[0], stable_reference.acquisition_date.size, shape[1], shape[2])
+        long_term_coh = np.empty(shape_coh, dtype="float32")
     # 2. Iteratively fill drift_interf with coherent pixels from history
     for iteration, stable_date in enumerate(stable_reference.acquisition_date.values):
         stable_ref_slice = stable_reference.sel(acquisition_date=stable_date)
@@ -538,19 +543,21 @@ def _correct_drift(
             posting=posting,
             coherence_threshold=coherence_threshold,
         )
-        long_term_coh[:, iteration, ...] = coherence
+        if save_metrics:
+            long_term_coh[:, iteration, ...] = coherence
 
-    data = {}
-    data["long_term_coh"] = (LONG_DIMS, long_term_coh)
-    ds = xr.Dataset(data)
-    # 3. Write to Disk
-    write(
-        ds,
-        output_path,
-        mode="r+",
-        skip_read=True,
-        consolidated=False,
-    )
+    if save_metrics:
+        data = {}
+        data["long_term_coh"] = (LONG_DIMS, long_term_coh)
+        ds = xr.Dataset(data)
+        # 3. Write to Disk
+        write(
+            ds,
+            output_path,
+            mode="r+",
+            skip_read=True,
+            consolidated=False,
+        )
 
     # 3. Normalize to Unit Phasor
     magnitude = np.abs(drift_interf)
@@ -580,12 +587,12 @@ def _correct_drift(
     valid_ref_data = current_reference.data[:, :valid_az, :valid_rg]
 
     # Rotate the valid reference block by the conjugate of the drift
-    correction = (valid_ref_data.reshape(shape_slc) * drift_phasor.reshape(shape_ph).conj())
+    correction = valid_ref_data.reshape(shape_slc) * drift_phasor.reshape(shape_ph).conj()
     correction_reshaped = correction.reshape((n_bands, valid_az, valid_rg))
 
     # 7. Merge back into the full-sized shape
     # We copy the original data first so the un-updated margins are preserved
-    corrected_data = current_reference.data.copy() 
+    corrected_data = current_reference.data.copy()
     # Inject the rotated values strictly into the valid bounds
     corrected_data[:, :valid_az, :valid_rg] = correction_reshaped
 
@@ -595,6 +602,6 @@ def _correct_drift(
         dims=current_reference.dims,
         coords=current_reference.coords,
         name=current_reference.name,
-        attrs=current_reference.attrs
+        attrs=current_reference.attrs,
     )
     return corrected_reference
