@@ -11,10 +11,12 @@ from typing import Literal, Sequence
 import numpy as np
 import structlog
 import xarray as xr
-from cop_ard_core.matching import compute_pearson_coefficient, initialize_patches
+from cop_ard_core.matching import compute_pearson_coefficient, initialize_patches, polyfit
+from cop_ard_core.utils import get_best_pol
 from scipy.constants import speed_of_light
 
-from cop_ard_app.computation import map_blocks
+from cop_ard_app.computation import map, map_blocks
+from cop_ard_app.model import extract_acquisition_id
 
 logger = structlog.get_logger(__name__)
 
@@ -69,18 +71,113 @@ def chunks_optimization(
     return chunks, patches
 
 
+# (disparity, slcs.coreg.measurements.drg, slcs.coreg.measurements.daz),
+# args=(annot),
+# kwargs={
+#     "deg": options.get("poly_deg", 3),
+#     "cohe_th": options.get("poly_cohe_th", 0.3),
+#     "norm": options.get("poly_norm", 1),
+# },
+
+
+def estimate_poly_matching(
+    slcs: xr.DataTree,
+    disparity_map: xr.DataTree,
+    deg: int = 3,
+    cohe_th: float = 0.3,
+    norm: int = 1,
+    kernel_shape: list = [15, 15],
+    enable_dask: bool = True,
+):
+    multiburst = True if "bursts" in slcs else False
+    acquisition_ids = extract_acquisition_id(slcs, multiburst)
+    args = []
+
+    for k, v in (slcs.bursts if multiburst else {"data": slcs}).items():
+        measurements = v.coreg.measurements
+        for id in measurements.acquisition_date.values:
+            m = measurements.sel(acquisition_date=id)
+            d = (disparity_map.bursts[k].sel() if multiburst else disparity_map).sel(acquisition_date=id)
+            a = (k, id, d, m.daz, m.drg)
+            args.append(a)
+
+    # Transpose the list of tuples for the map function.
+    args = list(zip(*args))
+
+    results = map(
+        polyfit,
+        args,
+        kwargs={"deg": deg, "cohe_th": cohe_th, "kernel_shape": kernel_shape},
+        enable_dask=enable_dask,
+    )
+
+    from cop_ard_app.io import write
+
+    for burst_id, acquisition_id, m1_x, m1_y, dx, dy in results:
+        path = f"/data/tmp/polyfit/{burst_id}/{acquisition_id}"
+        for n, m in zip(["m1_x", "m1_y", "dx", "dy"], [m1_x, m1_y, dx, dy]):
+            write(m.to_dataset(name="A"), f"{path}/{n}")
+
+
+def stack_disparity(
+    slcs: xr.DataTree,
+    reference_date: str,
+    wsize: Sequence[int] = [256, 256],
+    wstep: Sequence[int] = [256, 256],
+    wsearch: Sequence[int] = [5, 5],
+    dim: Sequence[int] = [1, 1],
+    block_size: int = 10,
+    enable_dask: bool = True,
+) -> xr.DataTree:
+    multiburst = True if "bursts" in slcs else False
+    args = []
+    for k, v in (slcs.bursts if multiburst else {"data": slcs}).items():
+        a = (k, v.coreg.measurements.cstack)
+        args.append(a)
+
+    # Transpose the list of tuples for the map function.
+    args = list(zip(*args))
+
+    # --- Execute Coregistration in Parallel ---
+    # Map the `coreg_single_burst` function over the list of arguments.
+    results = map(
+        compute_stack_pearson_coefficient,
+        args,
+        kwargs=dict(
+            reference_date=reference_date,
+            wsize=wsize,
+            wstep=wstep,
+            wsearch=wsearch,
+            block_size=block_size,
+            dim=dim,
+            enable_dask=enable_dask,
+        ),
+        enable_dask=enable_dask,
+        combine=False,
+    )
+    disparity_map = xr.DataTree()
+    if multiburst:
+        for k, v in results:
+            disparity_map[f"bursts/{k}"] = v
+    else:
+        for k, v in results:
+            disparity_map = xr.DataTree(v)
+
+    return disparity_map
+
+
 def compute_stack_pearson_coefficient(
+    burst_id: str,
     stack: xr.DataArray,
     reference_date: str,
     wsize: Sequence[int],
     wstep: Sequence[int],
     wsearch: Sequence[int],
-    mode: Literal["amplitude", "complex"] = "amplitude",
-    forward: bool = True,
-    dim: Sequence[int] | None = None,
-    data_type: Literal["times", "pixels"] = "times",
+    block_size: int,
+    dim: Sequence[int],
+    enable_dask: bool = True,
     **kwargs,
-) -> np.ndarray:
+) -> tuple[str, xr.DataArray]:
     """
 
     Compute the maximum of the Pearson correlation coefficient of a stack of images w.r.t a reference image
@@ -96,12 +193,14 @@ def compute_stack_pearson_coefficient(
     if reference_date not in stack.acquisition_date:
         raise Exception("Unable to find the master date in stack")
 
-    available_pols = set(stack.polarization.values)
-    priorities = ["V:V", "H:H", "V:H", "H:V"]
-    pol = next((p for p in priorities if p in available_pols), None)
+    best_pol = get_best_pol(stack.polarization.values)
     # x and y coordinates must be added and used here as dimensions replacing slant_range_time, azimuth_time
+    annot = stack.attrs[best_pol]
+    timeca_polynomial_coeffs = annot["RMA"]["INCA"]["TimeCAPoly"]["Coefs"]
+    azimuth_grid_spacing = annot["Grid"]["Col"]["SS"]
+    range_grid_spacing = annot["Grid"]["Row"]["SS"]
     xyz_stack = (
-        stack.sel(polarization=pol)
+        stack.sel(polarization=best_pol)
         .squeeze()
         .assign_coords(
             {k: ([j], range(stack[j].size)) for k, j in zip(["y", "x"], ["azimuth_time", "slant_range_time"])}
@@ -124,12 +223,12 @@ def compute_stack_pearson_coefficient(
     chunks_opt, cc_patches = chunks_optimization(xyz_stack, cc_patches)
     args = (
         cc_patches,
-        kwargs.get("block_size", 10),
+        block_size,
         wsearch,
-        mode,
-        forward,
+        timeca_polynomial_coeffs,
+        azimuth_grid_spacing,
+        range_grid_spacing,
         dim,
-        data_type,
     )
     # Cross-Correlation computation via map_blocks
     results = map_blocks(
@@ -138,10 +237,11 @@ def compute_stack_pearson_coefficient(
         args=args,
         chunks=chunks_opt,
         combine=False,
+        enable_dask=enable_dask,
     )
 
     disparity = xr.concat(results, dim="point").drop_vars("point")
-    return disparity
+    return (burst_id, disparity)
 
 
 def blockwise_pearson_coefficient(
@@ -153,11 +253,8 @@ def blockwise_pearson_coefficient(
     timeca_polynomial_coeffs: np.ndarray,
     azimuth_grid_spacing: float,
     range_grid_spacing: float,
-    mode: Literal["amplitude", "complex"] = "amplitude",
-    forward: bool = True,
-    dim: Sequence[int] | None = None,
-    data_type: Literal["times", "pixels"] = "times",
-    chunk: dict | None = None,
+    dim: Sequence[int],
+    chunk: dict = {},
     job_id: int = 0,
 ):
     """
@@ -170,28 +267,23 @@ def blockwise_pearson_coefficient(
     # Identification of patches belong to the current chunk
     j_patches = patches.sel(job_id=job_id)
 
-    if data_type == "times":
-        # Patch center and spacing expressed in times
-        pixel_to_time = np.array(
-            [
-                [timeca_polynomial_coeffs[1] * azimuth_grid_spacing * 1e9],
-                [2 * range_grid_spacing / speed_of_light],
-            ],
-            dtype="float64",
-        )
-        y_dim, x_dim = "azimuth_time", "slant_range_time"
-
-    else:
-        # Patch center and spacing expressed in pixels
-        pixel_to_time, y_dim, x_dim = np.ones((2, 1), dtype="float32"), "y", "x"
+    # Patch center and spacing expressed in times
+    pixel_to_time = np.array(
+        [
+            [timeca_polynomial_coeffs[1] * azimuth_grid_spacing * 1e9],
+            [2 * range_grid_spacing / speed_of_light],
+        ],
+        dtype="float64",
+    )
+    y_dim, x_dim = "azimuth_time", "slant_range_time"
 
     # Reference image initialize
-    reference = abs(reference.compute()) if mode == "amplitude" else reference.compute()
+    reference = abs(reference.compute())
 
     # Loop over chunks along the acquisition_date (z) dimension to keep controlled the memory usage
     for i in range(0, stack.z.size, block_size):
         i_stack = stack.isel(z=slice(i, i + block_size)).compute()
-        i_stack = abs(i_stack) if mode == "amplitude" else i_stack
+        i_stack = abs(i_stack)
 
         for j in range(j_patches.patch.size):
             j_patch = j_patches.isel(job_id=j)  # patch is expected to be indexed over job_id
@@ -208,12 +300,10 @@ def blockwise_pearson_coefficient(
                     patch=j_patch,
                     stack=j_stack,
                     reference=j_reference,
-                    peak_window_size=wsearch,
-                    forward=forward,
                     pixel_to_time=pixel_to_time,
+                    peak_window_size=wsearch,
                     y_dim=y_dim,
                     x_dim=x_dim,
-                    data_type=data_type,
                     correlation_kernel_size=dim,
                 )
             )
