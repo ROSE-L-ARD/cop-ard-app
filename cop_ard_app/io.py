@@ -25,7 +25,6 @@ import zarr.storage
 from cop_ard_core.logger import logger
 
 
-
 class SentinelSarpyObj(object):
     """
     A wrapper class to handle Sentinel-1 metadata extraction using Sarpy,
@@ -115,7 +114,7 @@ def sarpy_open(in_path: str | xr.DataTree, allowed_partial_open: bool = False, s
     return ds
 
 
-def read_slc_static(burst_id: str, acquisition_dates: list[str], working_directory: str, **kwargs):
+def read_slc_static(burst_id: str, acquisition_ids: list[str], working_directory: str, **kwargs):
     """
     Check the static directory for a reference SLC.
 
@@ -147,9 +146,10 @@ def read_slc_static(burst_id: str, acquisition_dates: list[str], working_directo
         and already loaded in `slc.orig`. Otherwise, returns the loaded
         `xr.Datatree` itself.
     """
+
     storage_opts = get_storage_options(kwargs)
     slc_path = f"{working_directory}/processed_data/{burst_id}/slc.ok"
-    reference_date = None
+    acquisition_id = None
 
     if not exists(slc_path, storage_options=storage_opts):
         logger.info(f"Missing reference SLC marker for burst {burst_id}.")
@@ -162,16 +162,19 @@ def read_slc_static(burst_id: str, acquisition_dates: list[str], working_directo
                 storage_options=storage_opts,
             ),
         )
-
+        annot = ds.measurements.slc.attrs
+        annot = annot[list(annot)[0]]
+        absolute_number = str(annot["CollectionInfo"]["Parameters"]["ABSOLUTE_ORBIT"])
+        collector_name = str(annot["CollectionInfo"]["CollectorName"])
+        acquisition_id = f"{collector_name}_{absolute_number}"
         # Extract date (casting to string to ensure matching with slc.orig keys)
-        reference_date = str(ds.measurements.acquisition_date.values[0])
-        logger.info(f"Extracted reference_date: {reference_date} for burst {burst_id}.")
+        logger.info(f"Extracted acquisition_id: {acquisition_id} for burst {burst_id}.")
 
-        if reference_date in acquisition_dates:
-            logger.info(f"Reference date {reference_date} already in slc.orig.")
+        if acquisition_id in acquisition_ids:
+            logger.info(f"Reference date {acquisition_id} already in slc.orig.")
             ds = 1
 
-    return (burst_id, reference_date, ds)
+    return (burst_id, acquisition_id, ds)
 
 
 def save_slc_static(burst_id: str, slc: xr.DataTree, working_directory: str, **kwargs):

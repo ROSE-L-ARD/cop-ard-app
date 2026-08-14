@@ -9,7 +9,7 @@ N              ?= 4
 SCHEDULER_HOST ?= 127.0.0.1
 PORT           ?= 8786
 
-.PHONY: scheduler worker format fix test
+.PHONY: scheduler worker cluster kill format fix test 
 
 # --- Dask Targets ---
 scheduler:
@@ -18,7 +18,14 @@ scheduler:
 worker:
 	uv run dask worker tcp://$(SCHEDULER_HOST):$(PORT) --nworkers $(N) --nthreads 1 --memory-limit 0
 
-# --- Quality Assurance Targets ---
+cluster:
+	$(MAKE) scheduler & sleep 2 && $(MAKE) worker
+
+kill:
+	-@pkill -f "dask scheduler" || true
+	-@pkill -f "dask worker" || true
+
+#--- Quality Assurance Targets ---
 format:
 	uv run --extra formatter --frozen ruff format $(SOURCES) $(TESTS) $(NOTEBOOKS)
 	uv run --extra formatter --frozen ruff check --select I --fix $(SOURCES) $(TESTS)

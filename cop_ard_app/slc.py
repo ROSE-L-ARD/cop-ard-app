@@ -174,11 +174,12 @@ def import_image(
     azimuth_time, slant_range_time = get_az_rg_times(annot[pols[0]])
 
     # Get the acquisition date from the metadata.
-    acquisition_date = str(path_to_dict(annot[pols[0]], "Timeline.CollectStart")).replace("Z", "")
+    absolute_number = str(path_to_dict(annot[pols[0]], "CollectionInfo.Parameters.ABSOLUTE_ORBIT"))
+    collector_name = str(path_to_dict(annot[pols[0]], "CollectionInfo.CollectorName"))
+    acquisition_id = f"{collector_name}_{absolute_number}"
 
     # Define the final output path for this specific image group.
     data_path = os.path.join(out_path, group)
-    logger.debug(f"Saving group: {data_path}")
 
     # --- Initialize Zarr Storage ---
     dt = xr.DataTree.from_dict({k: xr.Dataset() for k in ["measurements", "conditions", "quality"]})
@@ -187,7 +188,7 @@ def import_image(
     # --- Create and Save Empty SLC Dataset ---
     # This creates the structure on disk with the correct dimensions, coordinates, and metadata.
     coords = {
-        "acquisition_date": ("acquisition_date", [acquisition_date]),
+        "acquisition_date": ("acquisition_date", [acquisition_id]),
         "azimuth_time": ("azimuth_time", azimuth_time),
         "slant_range_time": ("slant_range_time", slant_range_time),
         "azimuth_m": ("azimuth_time", azimuth_m),
@@ -551,7 +552,7 @@ def finalize_import(
     slcs: xr.DataTree,
     working_directory: str,
     recompute: bool = False,
-    reference_date: str | None = None,
+    acquisition_id: str | None = None,
     enable_dask: bool = True,
     **kwargs,
 ) -> tuple[xr.DataTree, str]:
@@ -615,17 +616,17 @@ def finalize_import(
     multiburst = "bursts" in slcs
 
     # Check if the DataTree is organized by bursts and needs a reference date
-    if multiburst and reference_date is None:
+    if multiburst and acquisition_id is None:
         acquisition_ids = extract_acquisition_id(slcs, multiburst=True)
         if recompute:
             if len(acquisition_ids) != 1:
                 raise ValueError(f"Expected exactly one acquisition id, got {len(acquisition_ids)}")
 
-            reference_date = next(iter(acquisition_ids))
+            acquisition_id = next(iter(acquisition_ids))
             logger.info("Saving reference SLC structure to static working directory.")
 
             # Unzip dictionary items into two lists for mapping: (burst_ids, slc_objects)
-            args = [(burst_id, slc.orig[reference_date]) for burst_id, slc in slcs.bursts.items()]
+            args = [(burst_id, slc.orig[acquisition_id]) for burst_id, slc in slcs.bursts.items()]
             args = list(zip(*args))
             # Use a parallel map to save each burst's reference SLC
             map(
@@ -646,9 +647,9 @@ def finalize_import(
             if not isinstance(static_slcs, list):
                 raise TypeError(f"Expected a list from computation.map, got {type(static_slcs).__name__}")
 
-            for burst_id, ref_date, status_or_data in static_slcs:
-                if ref_date is not None:
-                    reference_date = ref_date
+            for burst_id, acq_id, status_or_data in static_slcs:
+                if acq_id is not None:
+                    acquisition_id = acq_id
                 if isinstance(status_or_data, int):
                     if status_or_data == 0:
                         logger.warning(f"No reference image found for burst {burst_id}. Removing from datatree.")
@@ -657,28 +658,28 @@ def finalize_import(
                         logger.info(f"Reference image already in stack for burst {burst_id}.")
                 else:
                     logger.info(f"Adding reference data for burst {burst_id}.")
-                    slcs[f"bursts/{burst_id}/orig/{ref_date}"] = status_or_data
+                    slcs[f"bursts/{burst_id}/orig/{acq_id}"] = status_or_data
 
             if len(slcs.bursts) == 0:
                 raise RuntimeError("No reference image found for any bursts. DataTree is empty.")
 
     # Handles cases where reference_date is provided, OR data is NOT organized by bursts
     else:
-        if reference_date is None:
+        if acquisition_id is None:
             raise ValueError("`reference_date` must be provided when data is not organized by bursts.")
 
         # Check if the reference date is present in the main 'orig' group
         if multiburst:
-            if any(reference_date not in burst.orig for burst in slcs.bursts.values()):
+            if any(acquisition_id not in burst.orig for burst in slcs.bursts.values()):
                 raise ValueError("Reference image not found in one or more bursts in the SLC stack.")
         else:
-            if reference_date not in slcs.orig:
+            if acquisition_id not in slcs.orig:
                 raise ValueError("Reference image not found in the SLC stack.")
 
-    if not isinstance(reference_date, str):
-        raise TypeError(f"Expected `reference_date` to be a string, got {type(reference_date).__name__}")
+    if not isinstance(acquisition_id, str):
+        raise TypeError(f"Expected `reference_date` to be a string, got {type(acquisition_id).__name__}")
 
-    return slcs, reference_date
+    return slcs, acquisition_id
 
 
 def overwrite_orbit_coefficients(
@@ -718,7 +719,6 @@ def overwrite_orbit_coefficients(
     path = f"bursts/{burst_id}" if multiburst else ""
     data_path = normpath(f"{wdir_path}/{path}/orig/{acquisition_date}/conditions/orbit")
 
-    logger.debug(f"data_path: {data_path}")
     # Proceed only if precise orbit data is available.
     if orbit is None:
         # If no orbit data was provided, log and return None.
@@ -763,18 +763,18 @@ def update_slcs(slcs: xr.DataTree, multiburst: bool, conditions: list):
         The updated `slcs` DataTree.
     """
     # Iterate through the list of results.
-    for burst_id, acquisition_date, orbit in conditions:
+    for burst_id, acquisition_id, orbit in conditions:
         if orbit is None:
             continue
 
         path_prefix = f"bursts/{burst_id}" if multiburst else ""
-        base_node = f"{path_prefix}/orig/{acquisition_date}"
+        base_node = f"{path_prefix}/orig/{acquisition_id}"
 
         # 2. Assign the new orbit dataset to its place in the DataTree
         slcs[f"{base_node}/conditions/orbit"] = orbit
 
         # 3. Pre-extract coefficients
-        xyz_coeffs = orbit.coeffs.sel(acquisition_date=acquisition_date)
+        xyz_coeffs = orbit.coeffs.squeeze(dim="acquisition_date")
 
         # 4. Update the metadata attributes
         slc_path = f"{base_node}/measurements/slc"

@@ -227,7 +227,7 @@ def extract_orbits(
             )
             # Prioritize pre-computed orbit data if available.
             if "orbit" in j.conditions:
-                orbits_datatree[data_id] = j.conditions.orbit.coeffs.sel(acquisition_date=data_id)
+                orbits_datatree[data_id] = j.conditions.orbit.coeffs.squeeze("acquisition_date")
 
     # Filter by specific acquisition dates if provided.
     if acquisition_date is not None:
@@ -277,7 +277,7 @@ def extract_acquisition_dates(
     for i in (slcs.bursts if multiburst else {"data": slcs}).values():
         for j in i.orig.values():
             # Get the acquisition date from the coordinates.
-            k = j.measurements.acquisition_date.values[0]
+            k = j.measurements.slc.azimuth_time.values[0]
             # Use a set to automatically handle uniqueness.
             acquisition_dates.add(k)
 
