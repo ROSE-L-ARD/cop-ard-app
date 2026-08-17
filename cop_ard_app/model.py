@@ -206,7 +206,7 @@ beam_ids = {
 
 def extract_orbits(
     slcs: xr.DataTree,
-    acquisition_date: list[str] | None = None,
+    acquisition_id: list[str] | None = None,
     multiburst: bool = False,
     degrees: int = 11,
 ) -> xr.DataArray:
@@ -227,12 +227,12 @@ def extract_orbits(
             )
             # Prioritize pre-computed orbit data if available.
             if "orbit" in j.conditions:
-                orbits_datatree[data_id] = j.conditions.orbit.coeffs.squeeze("acquisition_date")
+                orbits_datatree[data_id] = j.conditions.orbit.coeffs.squeeze("acquisition_id")
 
     # Filter by specific acquisition dates if provided.
-    if acquisition_date is not None:
-        orbits = {k: v for k, v in orbits.items() if k in acquisition_date}
-        reference_times = {k: v for k, v in reference_times.items() if k in acquisition_date}
+    if acquisition_id is not None:
+        orbits = {k: v for k, v in orbits.items() if k in acquisition_id}
+        reference_times = {k: v for k, v in reference_times.items() if k in acquisition_id}
 
     # --- Consolidate Coefficients ---
     # Initialize an array to hold the coefficients.
@@ -253,9 +253,9 @@ def extract_orbits(
     # --- Create Final DataArray ---
     orbits = xr.DataArray(
         data=coeffs,
-        dims=["acquisition_date", "degree", "axis"],
+        dims=["acquisition_id", "degree", "axis"],
         coords={
-            "acquisition_date": list(orbits),
+            "acquisition_id": list(orbits),
             "degree": np.arange(0, degrees, 1, dtype=int),
             "axis": np.arange(0, 3, 1, dtype=int),
         },

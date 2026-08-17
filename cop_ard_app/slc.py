@@ -123,7 +123,7 @@ def import_image(
     chunks: dict[Hashable, int] = {
         "azimuth_time": 2048,
         "slant_range_time": 2048,
-        "acquisition_date": 1,
+        "acquisition_id": 1,
         "polarization": 1,
     },
     compute_on_host: bool = True,
@@ -177,7 +177,7 @@ def import_image(
     absolute_number = str(path_to_dict(annot[pols[0]], "CollectionInfo.Parameters.ABSOLUTE_ORBIT"))
     collector_name = str(path_to_dict(annot[pols[0]], "CollectionInfo.CollectorName"))
     acquisition_id = f"{collector_name}_{absolute_number}"
-
+    acquisition_date = str(path_to_dict(annot[pols[0]], "Timeline.CollectStart")).replace("Z", "")
     # Define the final output path for this specific image group.
     data_path = os.path.join(out_path, group)
 
@@ -188,7 +188,8 @@ def import_image(
     # --- Create and Save Empty SLC Dataset ---
     # This creates the structure on disk with the correct dimensions, coordinates, and metadata.
     coords = {
-        "acquisition_date": ("acquisition_date", [acquisition_id]),
+        "acquisition_id": ("acquisition_id", [acquisition_id]),
+        "acquisition_date": ("acquisition_id", [acquisition_date]),
         "azimuth_time": ("azimuth_time", azimuth_time),
         "slant_range_time": ("slant_range_time", slant_range_time),
         "azimuth_m": ("azimuth_time", azimuth_m),
@@ -197,15 +198,16 @@ def import_image(
 
     chunks_ = chunks.copy()
     if do_import:
-        dims = ["polarization", "acquisition_date", "azimuth_time", "slant_range_time"]
+        dims = ["polarization", "acquisition_id", "azimuth_time", "slant_range_time"]
         shape = [len(pols), 1, annot[pols[0]]["ImageData"]["NumCols"], annot[pols[0]]["ImageData"]["NumRows"]]
         coords["polarization"] = ("polarization", pols)
     else:
         dims = ["azimuth_time", "slant_range_time"]
         shape = [annot[pols[0]]["ImageData"]["NumCols"], annot[pols[0]]["ImageData"]["NumRows"]]
         chunks_.pop("polarization", None)
-        chunks_.pop("acquisition_date", None)
+        chunks_.pop("acquisition_id", None)
 
+    logger.debug(chunks_)
     image = generate_empty_dataset(
         data_vars=["slc"],
         dims={"slc": dims},
@@ -374,7 +376,7 @@ def import_slc(
     polarizations: list[str] | None = None,
     apply_invalid_mask_flag: bool = False,
     do_import: bool = True,
-    chunks={"acquisition_date": 1, "azimuth_time": 2048, "slant_range_time": 2048},
+    chunks={"acquisition_id": 1, "azimuth_time": 2048, "slant_range_time": 2048},
     enable_dask: bool = True,
     **kwargs,
 ) -> list[xr.DataTree]:
@@ -454,7 +456,7 @@ def import_slc_stack(
     polarizations: list[str] | None = None,
     apply_invalid_mask_flag: bool = False,
     do_import: bool = True,
-    chunks={"polarization": 1, "acquisition_date": 1, "azimuth_time": 2048, "slant_range_time": 2048},
+    chunks={"polarization": 1, "acquisition_id": 1, "azimuth_time": 2048, "slant_range_time": 2048},
     enable_dask: bool = True,
     **kwargs,
 ) -> xr.DataTree:
@@ -684,7 +686,7 @@ def finalize_import(
 
 def overwrite_orbit_coefficients(
     burst_id: str,
-    acquisition_date: str,
+    acquisition_id: str,
     orbit: xr.Dataset | None,
     wdir_path: str,
     multiburst: bool,
@@ -701,7 +703,7 @@ def overwrite_orbit_coefficients(
     ----------
     burst_id : str
         The identifier of the burst being processed.
-    acquisition_date : str
+    acquisition_id : str
         The acquisition date of the SLC.
     slc : xr.DataTree
         The DataTree node for the specific burst to be updated.
@@ -713,17 +715,17 @@ def overwrite_orbit_coefficients(
     Returns
     -------
     tuple[str, str, xr.Dataset | None]
-        A tuple containing the burst_id, acquisition_date, and a new Dataset
+        A tuple containing the burst_id, acquisition_id, and a new Dataset
         with the refitted orbit coefficients, or None if no update was performed.
     """
     path = f"bursts/{burst_id}" if multiburst else ""
-    data_path = normpath(f"{wdir_path}/{path}/orig/{acquisition_date}/conditions/orbit")
+    data_path = normpath(f"{wdir_path}/{path}/orig/{acquisition_id}/conditions/orbit")
 
     # Proceed only if precise orbit data is available.
     if orbit is None:
         # If no orbit data was provided, log and return None.
-        logger.info(f"No orbit update for the {burst_id} image: {acquisition_date}")
-        return (burst_id, acquisition_date, None)
+        logger.info(f"No orbit update for the {burst_id} image: {acquisition_id}")
+        return (burst_id, acquisition_id, None)
 
     # Write the new orbit dataset to the 'conditions/orbit' group in the Zarr store.
     orbit = cast(
@@ -735,7 +737,7 @@ def overwrite_orbit_coefficients(
             storage_options=get_storage_options(kwargs),
         ),
     )
-    return (burst_id, acquisition_date, orbit)
+    return (burst_id, acquisition_id, orbit)
 
 
 def update_slcs(slcs: xr.DataTree, multiburst: bool, conditions: list):
@@ -774,7 +776,7 @@ def update_slcs(slcs: xr.DataTree, multiburst: bool, conditions: list):
         slcs[f"{base_node}/conditions/orbit"] = orbit
 
         # 3. Pre-extract coefficients
-        xyz_coeffs = orbit.coeffs.squeeze(dim="acquisition_date")
+        xyz_coeffs = orbit.coeffs.squeeze(dim="acquisition_id")
 
         # 4. Update the metadata attributes
         slc_path = f"{base_node}/measurements/slc"

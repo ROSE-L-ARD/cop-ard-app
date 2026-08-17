@@ -33,7 +33,7 @@ def dem_to_radar(
     dem: xr.DataArray,
     orbits: xr.DataArray,
     working_dir: str,
-    chunks: dict = {"x": 1024, "y": 1024, "acquisition_date": 1},
+    chunks: dict = {"x": 1024, "y": 1024, "acquisition_id": 1},
     skip_read: bool = True,
     enable_dask: bool = True,
     **kwargs,
@@ -71,12 +71,12 @@ def dem_to_radar(
         raise Exception("Chunks must contains x, y and acquisition_date keys")
     # Define the path for the simulation output.
     data_path = f"{working_dir}/simulation"
-    acquisition_dates = orbits.acquisition_date.values
+    acquisition_ids = orbits.acquisition_id.values
     xy_chunks = {k: v for k, v in chunks.items() if k in SPATIAL_DIMS_}
     x = dem.x.values
     y = dem.y.values
     # --- Step 1: Initialize Output Storage ---
-    simulation = init_simulation_dataset(acquisition_dates, dem.rio.crs, x, y, xy_chunks, data_path, **kwargs)
+    simulation = init_simulation_dataset(acquisition_ids, dem.rio.crs, x, y, xy_chunks, data_path, **kwargs)
 
     if not isinstance(simulation, xr.Dataset):
         raise Exception(f"Expected xr.Dataset, got {type(simulation)}")
@@ -167,7 +167,7 @@ def update_elevation(
 
 
 def init_simulation_dataset(
-    acquisition_dates: np.ndarray,
+    acquisition_ids: np.ndarray,
     crs: CRS,
     x: np.ndarray,
     y: np.ndarray,
@@ -204,10 +204,10 @@ def init_simulation_dataset(
         An xarray.Dataset representing the initialized (but mostly empty) simulation data,
         read back from the newly created Zarr store.
     """
-    simulation = init_simulation(acquisition_dates, crs, x, y)
+    simulation = init_simulation(acquisition_ids, crs, x, y)
 
     # Apply the specified chunking to the dataset.
-    simulation = simulation.chunk({**xy_chunks, "acquisition_date": 1, "axis": -1})
+    simulation = simulation.chunk({**xy_chunks, "acquisition_id": 1, "axis": -1})
 
     # Save the simulation to a Zarr store on disk.
     simulation = write(
@@ -399,7 +399,7 @@ def stack_simulation(
 @timeit
 def stack_simulation_ml(
     simulation_tree: xr.DataTree,
-    reference_date: str,
+    reference_id: str,
     multiburst: str,
     working_directory: str,
     recompute: bool = False,
@@ -443,7 +443,7 @@ def stack_simulation_ml(
             single_simulation_ml,
             args,
             kwargs=dict(
-                reference_date=reference_date,
+                reference_id=reference_id,
                 working_directory=working_directory,
                 recompute=recompute,
                 **kwargs,
@@ -596,7 +596,7 @@ def single_simulation_ml(
     burst_id: str,
     simulation: xr.Dataset,
     multiburst: bool,
-    reference_date: str,
+    reference_id: str,
     working_directory: str,
     recompute: bool = False,
     **kwargs,
@@ -641,7 +641,7 @@ def single_simulation_ml(
         chunks = dict(x=simulation.chunksizes["x"][0], y=simulation.chunksizes["y"][0])
         simulation_ml = extract_simulation_ml(
             simulation=simulation,
-            reference_date=reference_date,
+            reference_id=reference_id,
             coarsen_config=chunks,
         )
         for k, v in simulation_ml.items():
