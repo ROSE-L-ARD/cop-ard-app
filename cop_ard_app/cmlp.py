@@ -109,6 +109,7 @@ def single_cmlp(
     # 2. Prepare Data (Slicing, Padding, Chunking)
     cstack_sel, chunks = _prepare_cstack(cstack)
     acquisition_dates = cstack_sel.acquisition_date.values
+    acquisition_ids = cstack_sel.acquisition_id.values
     # Handle inputs for resumption (Apply same slicing to inputs)
     last_reference = None
     starting_date = None
@@ -151,6 +152,7 @@ def single_cmlp(
         data_path,
         cstack,
         acquisition_dates,
+        acquisition_ids,
         stable_reference_dates,
         posting,
         chunks,
@@ -272,6 +274,7 @@ def _initialize_cmlp_zarr_stores(
     data_path: str,
     cstack: xr.DataArray,
     acquisition_dates: np.ndarray,
+    acquisition_ids: np.ndarray,
     stable_reference_dates: np.ndarray,
     posting: dict,
     chunks: dict,
@@ -348,13 +351,14 @@ def _initialize_cmlp_zarr_stores(
 
         coords_rolling["polarization"] = cstack.polarization.values
 
-        for date in acquisition_dates:
+        for date,date_id in zip(acquisition_dates,acquisition_ids):
             data_vars = ["phase", "short_term_coh"]
             dims_coarse = {k: SHORT_DIMS for k in data_vars}
             s0 = [coords_rolling[i].size for i in SHORT_DIMS]
             shape_coarse = {k: s0 for k in data_vars}
             ch = chunks.copy()
             coords_rolling["acquisition_date"] = date
+            coords_rolling["acquisition_id"] = date_id
 
             sd = stable_reference_dates.astype("datetime64[ns]")
             d = np.datetime64(date, "ns")

@@ -818,18 +818,18 @@ def updateOrbits(slc: xr.DataTree) -> xr.Dataset:
     # This provides a baseline set of orbit data from the original product files.
     orbits = extract_orbits(slc, multiburst=False)
     orbits = orbits.to_dataset(name="coeffs")
-    num_dates = orbits.sizes["acquisition_date"]
+    num_dates = orbits.sizes["acquisition_id"]
     orbits["reference_time"] = (
-        "acquisition_date",
-        [orbits.coeffs.reference_times[date] for date in orbits.acquisition_date.values],
+        "acquisition_id",
+        [orbits.coeffs.reference_times[date] for date in orbits.acquisition_id.values],
     )
-    orbits["type"] = ("acquisition_date", ["AUX_ANNOTATED"] * num_dates)
-    orbits["orbit_files"] = ("acquisition_date", [""] * num_dates)
+    orbits["type"] = ("acquisition_id", ["AUX_ANNOTATED"] * num_dates)
+    orbits["orbit_files"] = ("acquisition_id", [""] * num_dates)
     for date_key, v in slc.orig.items():
         if ("conditions" in v) and ("orbit" in v.conditions):
             precise_orbit = v.conditions.orbit
             # Safely locate the specific date across the DataArray
-            loc_dict = {"acquisition_date": date_key}
+            loc_dict = {"acquisition_id": date_key}
             # Overwrite the coefficients
             orbits["coeffs"].loc[loc_dict] = precise_orbit.coeffs.loc[loc_dict]
             # Overwrite the metadata to reflect the precise orbit
@@ -844,7 +844,7 @@ def updateOrbits(slc: xr.DataTree) -> xr.Dataset:
             if "reference_time" in precise_orbit.attrs:
                 orbits["reference_time"].loc[loc_dict] = precise_orbit.attrs["reference_time"]
 
-    orbits = orbits.chunk(axis=-1, degree=-1, acquisition_date=1)
+    orbits = orbits.chunk(axis=-1, degree=-1, acquisition_id=1)
 
     return orbits
 
@@ -872,16 +872,16 @@ def updateETAD(slc: xr.DataTree) -> xr.Dataset | None:
     if all(("conditions" in v) and ("ETAD" in v.conditions) for _, v in slc.orig.items()):
         # Create a list of ETAD datasets, one for each acquisition.
         etads = [
-            v.conditions.ETAD.to_dataset().assign_coords(acquisition_date=k).expand_dims("acquisition_date")
+            v.conditions.ETAD.to_dataset().assign_coords(acquisition_id=k).expand_dims("acquisition_id")
             for k, v in slc.orig.items()
         ]
         # Add the original ETAD filename as a variable.
         etads = [
-            e.assign({k: (["acquisition_date"], [os.path.basename(e.attrs.get(k, ""))]) for k in ["etad_file"]})
+            e.assign({k: (["acquisition_id"], [os.path.basename(e.attrs.get(k, ""))]) for k in ["etad_file"]})
             for e in etads
         ]
         # Concatenate the list of datasets into a single dataset along the acquisition_date dimension.
-        etads = xr.concat(etads, dim="acquisition_date")
+        etads = xr.concat(etads, dim="acquisition_id")
         # Re-chunk the final dataset.
         etads = etads.chunk({k: 2048 for k in etads.dims})
     else:

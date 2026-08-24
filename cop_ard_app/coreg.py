@@ -17,7 +17,7 @@ from cop_ard_app.utils import get_margin
 
 def init_single_coreg_stack(
     slcs: xr.DataTree,
-    ref_date: str,
+    ref_id: str,
     wdir_path: str,
     recompute: bool = False,
     **kwargs,
@@ -39,32 +39,36 @@ def init_single_coreg_stack(
     """
     if wdir_path is None:
         raise Exception("Output SLCs path is required.")
-    if (ref_date in slcs.orig.keys()) is False:
+    if (ref_id in slcs.orig.keys()) is False:
         raise Exception("Reference image not available.")
 
     # --- Write the Empty Structure to Disk ---
     crg = xr.DataTree.from_dict({k: xr.Dataset() for k in ["conditions", "quality"]})
-    acquisition_dates = list(slcs.orig.keys())
-    if (recompute is False) and len(acquisition_dates) != 1:
-        acquisition_dates = [d for d in acquisition_dates if d != ref_date]
+    acquisition_ids = list(slcs.orig.keys())
+    acquisition_dates = [slcs.orig[i].measurements.acquisition_date.values[0] for i in acquisition_ids]
+    if (recompute is False) and len(acquisition_ids) != 1:
+        acquisition_dates = [date for i, date in zip(acquisition_ids, acquisition_dates) if i != ref_id]
+        acquisition_ids = [i for i in acquisition_ids if i != ref_id]
+
     # 1. Gather polarizations directly as sets
-    pol_sets = [set(str(p) for p in slcs.orig[d].measurements.polarization.values) for d in acquisition_dates]
+    pol_sets = [set(str(p) for p in slcs.orig[d].measurements.polarization.values) for d in acquisition_ids]
     # 2. Find the total unique polarizations across all dates
     all_pols = set.union(*pol_sets) if pol_sets else set()
 
     # 3. Check that every date has the complete set of polarizations
-    for d, p_set in zip(acquisition_dates, pol_sets):
+    for d, p_set in zip(acquisition_ids, pol_sets):
         if p_set != all_pols:
             raise ValueError(f"For acquisition date {d} got polarizations {p_set}, expected {all_pols}")
 
-    slc = slcs.orig[ref_date].measurements.slc
-    slc_sec = slcs.orig[acquisition_dates[0]].measurements.slc
-    shape = [len(all_pols), len(acquisition_dates), slc.azimuth_time.size, slc.slant_range_time.size]
+    slc = slcs.orig[ref_id].measurements.slc
+    ref_date = slc.acquisition_date.values
+    slc_sec = slcs.orig[acquisition_ids[0]].measurements.slc
+    shape = [len(all_pols), len(acquisition_ids), slc.azimuth_time.size, slc.slant_range_time.size]
     measurements_path = os.path.join(wdir_path, "coreg", "measurements")
     data_vars = ["cstack", "phase_model"]
     dims = {
-        "cstack": ["polarization", "acquisition_date", "azimuth_time", "slant_range_time"],
-        "phase_model": ["acquisition_date", "azimuth_time", "slant_range_time"],
+        "cstack": ["polarization", "acquisition_id", "azimuth_time", "slant_range_time"],
+        "phase_model": ["acquisition_id", "azimuth_time", "slant_range_time"],
     }
     shape_dict = {"cstack": shape, "phase_model": shape[1:]}
     dtype = {"cstack": "complex64", "phase_model": "float64"}
@@ -72,7 +76,8 @@ def init_single_coreg_stack(
 
     coords = {
         "polarization": ("polarization", list(all_pols)),
-        "acquisition_date": ("acquisition_date", acquisition_dates),
+        "acquisition_id": ("acquisition_id", acquisition_ids),
+        "acquisition_date": ("acquisition_id", acquisition_dates),
         "azimuth_time": ("azimuth_time", slc.azimuth_time.values),
         "slant_range_time": ("slant_range_time", slc.slant_range_time.values),
         "azimuth_m": ("azimuth_time", slc.azimuth_m.values),
@@ -87,7 +92,7 @@ def init_single_coreg_stack(
         dtype=dtype,
         data_path=measurements_path,
         coords=coords,
-        attrs={"coregistration_reference_date": ref_date},
+        attrs={"coregistration_reference_date": ref_date, "coregistration_reference_id": ref_id},
         attrs_data_vars={"cstack": slc.attrs},
         skip_read=False,
         compute=True,
@@ -97,8 +102,8 @@ def init_single_coreg_stack(
 
     data_vars = ["daz", "drg"]
     dims = {
-        "daz": ["acquisition_date", "azimuth_time", "slant_range_time"],
-        "drg": ["acquisition_date", "azimuth_time", "slant_range_time"],
+        "daz": ["acquisition_id", "azimuth_time", "slant_range_time"],
+        "drg": ["acquisition_id", "azimuth_time", "slant_range_time"],
     }
     shape_dict = {"daz": shape[1:], "drg": shape[1:]}
     dtype = {"daz": "timedelta64[ns]", "drg": "float64"}
@@ -136,6 +141,7 @@ def init_single_coreg_stack(
 
 
 def initialize_LUT_coords(
+    acquisition_id: xr.DataArray,
     acquisition_date: xr.DataArray,
     azimuth_time: xr.DataArray,
     slant_range_time: xr.DataArray,
@@ -168,6 +174,7 @@ def initialize_LUT_coords(
     # Create the coarse grid by decimating the full-resolution coordinates.
     LUT_coords = xr.Dataset(
         coords={
+            "acquisition_id": acquisition_id,
             "acquisition_date": acquisition_date,
             "azimuth_time": azimuth_time,
             "slant_range_time": slant_range_time,
@@ -183,10 +190,10 @@ def initialize_LUT_coords(
     LUT_coords = LUT_coords.assign(
         {
             "drg": (
-                ["acquisition_date", "azimuth_time", "slant_range_time"],
+                ["acquisition_id", "azimuth_time", "slant_range_time"],
                 np.full(
                     (
-                        LUT_coords.acquisition_date.size,
+                        LUT_coords.acquisition_id.size,
                         LUT_coords.azimuth_time.size,
                         LUT_coords.slant_range_time.size,
                     ),
@@ -195,10 +202,10 @@ def initialize_LUT_coords(
                 ),
             ),
             "daz": (
-                ["acquisition_date", "azimuth_time", "slant_range_time"],
+                ["acquisition_id", "azimuth_time", "slant_range_time"],
                 np.full(
                     (
-                        LUT_coords.acquisition_date.size,
+                        LUT_coords.acquisition_id.size,
                         LUT_coords.azimuth_time.size,
                         LUT_coords.slant_range_time.size,
                     ),
@@ -220,7 +227,7 @@ def coreg_single_burst(
     simulation_ml: dict,
     multiburst: bool,
     daz_drg: xr.Dataset | None,
-    reference_date: str,
+    reference_id: str,
     working_directory: str,
     recompute: bool = False,
     save_daz_drg: bool = False,
@@ -273,7 +280,7 @@ def coreg_single_burst(
     coreg_path = normpath(f"{working_directory}/{path}")
     slc = init_single_coreg_stack(
         slc,
-        reference_date,
+        reference_id,
         coreg_path,
         recompute=recompute,
         **kwargs,
@@ -286,6 +293,7 @@ def coreg_single_burst(
 
     # Initialize the coarse grid for the Lookup Tables.
     LUT_coords = initialize_LUT_coords(
+        acquisition_id=measurements.acquisition_id,
         acquisition_date=measurements.acquisition_date,
         azimuth_time=measurements.azimuth_time,
         slant_range_time=measurements.slant_range_time,
@@ -356,6 +364,12 @@ def coreg_single_burst(
         single_pol_annotation["Grid"]["Col"]["SS"] * single_pol_annotation["RMA"]["INCA"]["TimeCAPoly"]["Coefs"][1]
     )
     range_grid_spacing = 2 * single_pol_annotation["Grid"]["Row"]["SS"] / speed_of_light
+    chunksizes = {
+        "azimuth_time": measurements.unify_chunks().chunksizes["azimuth_time"][0],
+        "slant_range_time": measurements.unify_chunks().chunksizes["slant_range_time"][0],
+        "acquisition_id": 10,
+    }
+
     map_blocks(
         warp_dazdrg,
         obj=[measurements.cstack, *chunkable_dazdrg],  # if available, chunk daz and drg; otherwise, pass placeholders
@@ -365,7 +379,7 @@ def coreg_single_burst(
             simulation_secondary,
             simulation_ml,
             margin,
-            measurements.coregistration_reference_date,
+            measurements.coregistration_reference_id,
             azimuth_grid_spacing,
             range_grid_spacing,
         ),
@@ -374,11 +388,7 @@ def coreg_single_burst(
         },
         combine=False,
         enable_dask=enable_dask,
-        chunksizes={
-            "azimuth_time": measurements.unify_chunks().chunksizes["azimuth_time"][0],
-            "slant_range_time": measurements.unify_chunks().chunksizes["slant_range_time"][0],
-            "acquisition_date": 10,
-        },
+        chunksizes=chunksizes,
         store_mapping=store_mapping,
     )
 
@@ -401,9 +411,9 @@ def coreg_single_burst(
 
     map_blocks(
         blockwise_warp_cslc,
-        obj=[measurements.cstack, measurements.phase_model, daz_drg.daz, daz_drg.drg, measurements.acquisition_date],
+        obj=[measurements.cstack, measurements.phase_model, daz_drg.daz, daz_drg.drg, measurements.acquisition_id],
         args=(
-            measurements.coregistration_reference_date,
+            measurements.coregistration_reference_id,
             orig_slcs,
             orig_etad,
             kernel,
@@ -414,11 +424,7 @@ def coreg_single_burst(
         },
         combine=False,
         enable_dask=enable_dask,
-        chunksizes={
-            "azimuth_time": measurements.unify_chunks().chunksizes["azimuth_time"][0],
-            "slant_range_time": measurements.unify_chunks().chunksizes["slant_range_time"][0],
-            "acquisition_date": 10,
-        },
+        chunksizes=chunksizes,
         store_mapping=store_mapping,
     )
 
@@ -430,7 +436,7 @@ def coreg_single_burst(
             kwargs={"LUT_coords": LUT_coords},
             combine=False,
             enable_dask=enable_dask,
-            chunksizes={"acquisition_date": daz_drg.acquisition_date.size},
+            chunksizes={"acquisition_id": daz_drg.acquisition_id.size},
         ),
     )
     # --- Step 3: Update Metadata ---
@@ -473,7 +479,7 @@ def stack_coregistration(
     slcs: xr.DataTree,
     simulation_reference_tree: xr.DataTree,
     simulation_ml_tree: dict,
-    reference_date: str,
+    reference_id: str,
     working_directory: str,
     simulation_secondary_tree: xr.DataTree | None = None,
     save_daz_drg: bool = False,
@@ -553,7 +559,7 @@ def stack_coregistration(
             coreg_single_burst,
             args,
             kwargs=dict(
-                reference_date=reference_date,
+                reference_id=reference_id,
                 working_directory=working_directory,
                 enable_dask=enable_dask,
                 recompute=recompute,
@@ -656,7 +662,7 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
     acquisition_date_arp_coeffs = {}
     acquisition_date_t0 = {}
     acquisition_date_orbit_type = {}
-    for acquisition_date in slc.coreg.measurements.acquisition_date.values:
+    for acquisition_date in slc.coreg.measurements.acquisition_id.values:
         acquisition_date_annot = slc.orig[acquisition_date].measurements.slc.attrs
         acquisition_date_annot = acquisition_date_annot[list(acquisition_date_annot.keys())[0]]
         acquisition_date_arp_coeffs[acquisition_date] = {
@@ -741,8 +747,8 @@ def blockwise_warp_cslc(
     coreg_phase_model: xr.DataArray,
     daz: xr.DataArray,
     drg: xr.DataArray,
-    coreg_acquisition_date: xr.DataArray,
-    coregistration_reference_date: np.datetime64,
+    coreg_acquisition_id: xr.DataArray,
+    coregistration_reference_id: np.datetime64,
     orig_slcs: xr.DataTree,
     orig_etad: xr.DataTree,
     kernel: dict,
@@ -793,32 +799,32 @@ def blockwise_warp_cslc(
     margin = kernel["kernel_shape"] // 2 + 1
 
     # --- Main Loop: Process each acquisition date ---
-    for i, acquisition_date in enumerate(coreg_acquisition_date.values):
+    for i, acquisition_id in enumerate(coreg_acquisition_id.values):
         # Extract the original SLC image and its metadata for the current date.
-        slc = orig_slcs.orig[acquisition_date].slc
+        slc = orig_slcs.orig[acquisition_id].slc
         single_pol_annotation = slc.attrs[list(slc.attrs.keys())[0]]
         min_tx_frequency = single_pol_annotation["RadarCollection"]["TxFrequency"]["Min"]
         max_tx_frequency = single_pol_annotation["RadarCollection"]["TxFrequency"]["Max"]
         dkcoa_polynomial_coeffs = get_coefficients("Grid.Col.DeltaKCOAPoly.Coefs", single_pol_annotation)
         timeca_polynomial_coeffs = get_coefficients("RMA.INCA.TimeCAPoly.Coefs", single_pol_annotation)
         if dkcoa_polynomial_coeffs is None or timeca_polynomial_coeffs is None:
-            raise ValueError(f"Failed to extract polynomial coefficients for acquisition date {acquisition_date}")
+            raise ValueError(f"Failed to extract polynomial coefficients for acquisition date {acquisition_id}")
 
         dtaz = timeca_polynomial_coeffs[1] * single_pol_annotation["Grid"]["Col"]["SS"] * 1e9
         dtrg = 2 * single_pol_annotation["Grid"]["Row"]["SS"] / speed_of_light
         scp_pixel_row = single_pol_annotation["ImageData"]["SCPPixel"]["Row"]
         scp_pixel_col = single_pol_annotation["ImageData"]["SCPPixel"]["Col"]
-        etad_correction_grid = orig_etad[acquisition_date].ds
+        etad_correction_grid = orig_etad[acquisition_id].ds
         evaluation_offset = {k: v.start for k, v in chunk.items()}
         warp_cslc(
             coreg_cstack=coreg_cstack,
             coreg_phase_model=coreg_phase_model,
             slc=slc,
-            daz=daz.sel(acquisition_date=acquisition_date),
-            drg=drg.sel(acquisition_date=acquisition_date),
-            acquisition_date=acquisition_date,
+            daz=daz.sel(acquisition_id=acquisition_id),
+            drg=drg.sel(acquisition_id=acquisition_id),
+            acquisition_id=acquisition_id,
             acquisition_date_index=i,
-            coregistration_reference_date=coregistration_reference_date,
+            coregistration_reference_id=coregistration_reference_id,
             etad_correction_grid=etad_correction_grid,
             kernel=kernel,
             azimuth_grid_spacing=dtaz,
@@ -877,18 +883,18 @@ def updateLut(
     # Handle cases with and without a polarization dimension.
     if out_name in ["sigma0", "gamma0", "noise"]:
         xLUT = xr.DataArray(
-            np.zeros((pols.size, slcs.coreg.measurements.acquisition_date.size, *grid)),
-            dims=["polarization", "acquisition_date", "slant_range_time", "azimuth_time"],
-            coords={"acquisition_date": slcs.coreg.measurements.acquisition_date.values, "polarization": pols},
+            np.zeros((pols.size, slcs.coreg.measurements.acquisition_id.size, *grid)),
+            dims=["polarization", "acquisition_id", "slant_range_time", "azimuth_time"],
+            coords={"acquisition_id": slcs.coreg.measurements.acquisition_id.values, "polarization": pols},
         )  # type: Union[xr.Dataset,xr.DataArray]
     else:
         xLUT = xr.DataArray(
-            np.zeros((slcs.coreg.measurements.acquisition_date.size, *grid)),
-            dims=["acquisition_date", "slant_range_time", "azimuth_time"],
-            coords={"acquisition_date": slcs.coreg.measurements.acquisition_date.values},
+            np.zeros((slcs.coreg.measurements.acquisition_id.size, *grid)),
+            dims=["acquisition_id", "slant_range_time", "azimuth_time"],
+            coords={"acquisition_id": slcs.coreg.measurements.acquisition_id.values},
         )
     # --- Main Loop: Compute LUT for each acquisition ---
-    for i, dd in enumerate(slcs.coreg.measurements.acquisition_date.values):
+    for i, dd in enumerate(slcs.coreg.measurements.acquisition_id.values):
         # Handle per-polarization coefficients if necessary.
         if "polarization" in xLUT.dims:
             for p, pol in enumerate(xLUT.polarization.values):
@@ -898,8 +904,8 @@ def updateLut(
                     raise ValueError(f"Could not find coefficients for polarization {pol}")
                 # compute Doppler on the new reference system
                 xLUT[p, i, :, :], az_ref, rg_ref = getLUT(
-                    slcs.coreg.measurements.sel(acquisition_date=dd),
-                    daz_drg.sel(acquisition_date=dd),
+                    slcs.coreg.measurements.sel(acquisition_id=dd),
+                    daz_drg.sel(acquisition_id=dd),
                     slcs.orig[dd].measurements.to_dataset(),
                     coeffs,
                     grid,
@@ -912,8 +918,8 @@ def updateLut(
                 raise ValueError("Could not find coefficients for polarization")
             # compute Doppler on the new reference system
             xLUT[i, :, :], az_ref, rg_ref = getLUT(
-                slcs.coreg.measurements.sel(acquisition_date=dd),
-                daz_drg.sel(acquisition_date=dd),
+                slcs.coreg.measurements.sel(acquisition_id=dd),
+                daz_drg.sel(acquisition_id=dd),
                 slcs.orig[dd].measurements.to_dataset(),
                 coeffs,
                 grid,

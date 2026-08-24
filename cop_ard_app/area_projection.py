@@ -199,7 +199,7 @@ def map_shadow(
 
     # Create an empty Dask array with the shape and chunks of the radar grid
     if "polarization" in slc.dims:
-        radar_data = slc.isel(acquisition_date=0, polarization=0)
+        radar_data = slc.isel(acquisition_id=0, polarization=0)
     else:
         radar_data = slc
     # Define arguments for the worker function
@@ -341,7 +341,7 @@ def stack_mask(
     simulation_tree: xr.Dataset,
     simulation_ml_tree: dict[str, xr.Dataset],
     working_directory_static: str,
-    reference_date: str,
+    reference_id: str,
     multiburst: bool = True,
     recompute: bool = False,
     **kwargs,
@@ -383,7 +383,7 @@ def stack_mask(
     args = []
     # Prepare arguments for each burst if in multiburst mode
     for k, v in (slcs.bursts if multiburst else {"data": slcs}).items():
-        v = v.orig[reference_date].measurements.slc
+        v = v.orig[reference_id].measurements.slc
         s = (simulation_tree.bursts[k] if multiburst else simulation_tree).to_dataset()
         s_ml = simulation_ml_tree["bursts"][k] if multiburst else simulation_ml_tree
         a = (k, v, s, s_ml, multiburst)
@@ -786,7 +786,7 @@ def stack_geometry(
     simulation_ml_tree: dict[str, xr.Dataset],
     working_directory_static: str,
     working_directory_tmp: str,
-    reference_date: str,
+    reference_id: str,
     chunk_length: int = 2048,
     multiburst: bool = True,
     recompute: bool = False,
@@ -842,7 +842,7 @@ def stack_geometry(
     args = []
     # Prepare arguments for each burst if in multiburst mode
     for k, v in (slcs.bursts if multiburst else {"data": slcs}).items():
-        v = v.orig[reference_date].measurements.slc
+        v = v.orig[reference_id].measurements.slc
         s = (simulation_tree.bursts[k] if multiburst else simulation_tree).to_dataset()
         s_ml = simulation_ml_tree["bursts"][k] if multiburst else simulation_ml_tree
         a = (k, v, s, s_ml, multiburst)

@@ -67,7 +67,7 @@ def dem_to_radar(
     xr.Dataset or None
         The final simulation dataset read from disk if `skip_read` is False, otherwise None.
     """
-    if (set(chunks.keys()) == set((*SPATIAL_DIMS_, "acquisition_date"))) is False:
+    if (set(chunks.keys()) == set((*SPATIAL_DIMS_, "acquisition_id"))) is False:
         raise Exception("Chunks must contains x, y and acquisition_date keys")
     # Define the path for the simulation output.
     data_path = f"{working_dir}/simulation"
@@ -143,7 +143,7 @@ def update_elevation(
     xr.Dataset
         The updated simulation dataset, read back from the Zarr store.
     """
-    chunks = {**xy_chunks, "acquisition_date": 1, "axis": -1}
+    chunks = {**xy_chunks, "acquisition_id": 1, "axis": -1}
     # Assign the elevation data ('z' from the DEM) to the 'h' variable in the simulation.
     simulation["h"] = resampled_dem.z
     # Re-chunk the simulation dataset to ensure consistency.
@@ -228,7 +228,7 @@ def single_simulation(
     orbits: xr.DataArray,
     working_directory: str,
     master_image: bool = False,
-    chunks: dict = {"x": 1024, "y": 1024, "acquisition_date": 1},
+    chunks: dict = {"x": 1024, "y": 1024, "acquisition_id": 1},
     recompute: bool = False,
     enable_dask: bool = True,
     **kwargs,
@@ -323,7 +323,7 @@ def stack_simulation(
     orbits: xr.DataArray,
     multiburst: bool,
     working_directory: str,
-    chunks: dict = {"x": 1024, "y": 1024, "acquisition_date": 1},
+    chunks: dict = {"x": 1024, "y": 1024, "acquisition_id": 1},
     master_image: bool = False,
     recompute: bool = False,
     **kwargs,
@@ -528,7 +528,7 @@ def initialize_simulation(
     if bbox_geo is None:
         raise ValueError("Could not determine geographic bounding box from radar bounding box.")
     selection = extract_simul_on_radar_chunk(
-        simulation, simulation.acquisition_date.values[0], bbox_radar, bbox_geo
+        simulation, simulation.acquisition_id.values[0], bbox_radar, bbox_geo
     ).squeeze()  # Remove singleton dimensions.
     # Get the geographic bounding box of the selected simulation subset.
     bbox_geo = [selection.x.min().values, selection.y.min().values, selection.x.max().values, selection.y.max().values]

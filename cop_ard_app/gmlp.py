@@ -292,13 +292,13 @@ def map_geocoding_cmlp(
         (
             extract_simul_on_radar_chunk(
                 simulation,
-                simulation.acquisition_date.values[0],
+                simulation.acquisition_id.values[0],
                 bbox_radar,
                 bbox_geo,
             )
         )
         .squeeze()
-        .drop_vars(["axis", "dem_distance", "acquisition_date", "h"])
+        .drop_vars(["axis", "dem_distance", "acquisition_id", "h"])
     )
     # Define the output coordinates at pixel centers.
     shape, off = compute_shape_and_off(selection, spacing)
