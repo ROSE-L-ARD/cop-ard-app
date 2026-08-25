@@ -255,18 +255,12 @@ def get_spacing(slcs: xr.DataTree, path: str) -> list:
     for burst in slcs.values():
         if burst[path].azimuth_time.size > 0:
             azimuth_time += [
-                (
-                    burst[path].azimuth_time.max().values
-                    - burst[path].azimuth_time.min().values
-                ).astype(float)
+                (burst[path].azimuth_time.max().values - burst[path].azimuth_time.min().values).astype(float)
                 / (burst[path].azimuth_time.size - 1)
             ]
         if burst[path].slant_range_time.size > 0:
             slant_range_time += [
-                (
-                    burst[path].slant_range_time.max().values
-                    - burst[path].slant_range_time.min().values
-                )
+                (burst[path].slant_range_time.max().values - burst[path].slant_range_time.min().values)
                 / (burst[path].slant_range_time.size - 1)
             ]
 
@@ -290,7 +284,7 @@ def get_poly(poly, poly_type: str, dd: str):
 
 @timeit
 def get_stack_phramp_diff(
-    acquisition_date: xr.DataArray,
+    acquisition_id: xr.DataArray,
     azimuth_time: xr.DataArray,
     slant_range_time: xr.DataArray,
     drg_full: xr.DataArray,
@@ -301,9 +295,8 @@ def get_stack_phramp_diff(
 ):
     ph_ramp_diff_list = []
 
-    for k, dd in enumerate(acquisition_date.values):
+    for k, dd in enumerate(acquisition_id.values):
         #  call core function
-        # y_poly[dd].attrs["type"] = y_poly.type
 
         acquisition_date_annot = annot[dd]
         # centre scene coordinates
@@ -312,27 +305,19 @@ def get_stack_phramp_diff(
         rg_mid = rg_time[acquisition_date_annot["ImageData"]["SCPPixel"]["Row"]]
         az_mid = az_time[acquisition_date_annot["ImageData"]["SCPPixel"]["Col"]]
 
-        timeca_polynomial_coeffs = get_coefficients(
-            "RMA.INCA.TimeCAPoly.Coefs", acquisition_date_annot
-        )
+        timeca_polynomial_coeffs = get_coefficients("RMA.INCA.TimeCAPoly.Coefs", acquisition_date_annot)
         if timeca_polynomial_coeffs is None:
-            raise ValueError(
-                f"Missing TimeCAPoly coefficients for acquisition date {dd} in annotation."
-            )
-        dkcoa_polynomial_coeffs = get_coefficients(
-            "Grid.Col.DeltaKCOAPoly.Coefs", acquisition_date_annot
-        )
+            raise ValueError(f"Missing TimeCAPoly coefficients for acquisition date {dd} in annotation.")
+        dkcoa_polynomial_coeffs = get_coefficients("Grid.Col.DeltaKCOAPoly.Coefs", acquisition_date_annot)
         if dkcoa_polynomial_coeffs is None:
-            raise ValueError(
-                f"Missing DeltaKCOA polynomial coefficients for acquisition date {dd} in annotation."
-            )
+            raise ValueError(f"Missing DeltaKCOA polynomial coefficients for acquisition date {dd} in annotation.")
         azimuth_grid_spacing = acquisition_date_annot["Grid"]["Col"]["SS"]
 
         res = get_phramp_diff(
             azimuth_time=azimuth_time,
             slant_range_time=slant_range_time,
-            daz=daz_full.sel(acquisition_date=dd).coarsen(multilook, boundary="trim").mean(),  # type: ignore mean is injected dynamically
-            drg=drg_full.sel(acquisition_date=dd).coarsen(multilook, boundary="trim").mean(),  # type: ignore mean is injected dynamically
+            daz=daz_full.sel(acquisition_id=dd).coarsen(multilook, boundary="trim").mean(),  # type: ignore mean is injected dynamically
+            drg=drg_full.sel(acquisition_id=dd).coarsen(multilook, boundary="trim").mean(),  # type: ignore mean is injected dynamically
             timeca_polynomial_coeffs=timeca_polynomial_coeffs,
             dkcoa_polynomial_coeffs=dkcoa_polynomial_coeffs,
             azimuth_grid_spacing=azimuth_grid_spacing,
@@ -343,9 +328,7 @@ def get_stack_phramp_diff(
         ph_ramp_diff_list.append(res)
 
     # return the concatenated dataarray
-    return xr.concat(ph_ramp_diff_list, dim="acquisition_date").assign_coords(
-        {"acquisition_date": acquisition_date}
-    )
+    return xr.concat(ph_ramp_diff_list, dim="acquisition_id").assign_coords({"acquisition_id": acquisition_id})
 
 
 def sparse_multilook(data: xr.Dataset, cohe_th: float, multilook: dict):

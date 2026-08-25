@@ -46,16 +46,11 @@ def esd_single_burst(
              reference_date_i image as ESD reference
 
     """
-    # logger.info(f"Processing overlap area between bursts: {burst_id} and {get_next_burst_id(burst_id)}")
 
-    def time_to_pixel_az(
-        stack: xr.Dataset, dtaz: float, reference_time: datetime.datetime | None = None
-    ):
+    def time_to_pixel_az(stack: xr.Dataset, dtaz: float, reference_time: datetime.datetime | None = None):
         if reference_time is None:
             reference_time = stack.azimuth_time[0].values
-        azimuth_pixel = np.round(
-            (stack.azimuth_time - reference_time).astype("float64") / 1e9 / dtaz
-        ).astype("int32")
+        azimuth_pixel = np.round((stack.azimuth_time - reference_time).astype("float64") / 1e9 / dtaz).astype("int32")
         stack = stack.assign_coords({"azimuth_pixel": azimuth_pixel})
 
         return stack.swap_dims(azimuth_time="azimuth_pixel"), reference_time
@@ -75,35 +70,24 @@ def esd_single_burst(
     next_burst_sec, _ = time_to_pixel_az(next_burst_sec, dtaz, reference_time_sec)
 
     # now the overlap area between burst can be easily computed #
-    sel_ref = next_burst_ref.drop_vars(
-        next_burst_ref.data_vars
-    ) + current_burst_ref.drop_vars(current_burst_ref.data_vars)
-    sel_sec = next_burst_sec.drop_vars(
-        next_burst_sec.data_vars
-    ) + current_burst_sec.drop_vars(current_burst_sec.data_vars)
+    sel_ref = next_burst_ref.drop_vars(next_burst_ref.data_vars) + current_burst_ref.drop_vars(
+        current_burst_ref.data_vars
+    )
+    sel_sec = next_burst_sec.drop_vars(next_burst_sec.data_vars) + current_burst_sec.drop_vars(
+        current_burst_sec.data_vars
+    )
 
     v_dims = [j for j in sel_ref.dims if j not in ["i", "j"]]
 
     # overlap area extraction from current and next bursts #
-    next_burst_ref = next_burst_ref.sel(
-        {k: sel_ref.coords[k] for k in v_dims}
-    ).cstack.sel(polarization=pol)
-    current_burst_ref = current_burst_ref.sel(
-        {k: sel_ref.coords[k] for k in v_dims}
-    ).cstack.sel(polarization=pol)
-    next_burst_sec = next_burst_sec.sel(
-        {k: sel_sec.coords[k] for k in v_dims}
-    ).cstack.sel(polarization=pol)
-    current_burst_sec = current_burst_sec.sel(
-        {k: sel_sec.coords[k] for k in v_dims}
-    ).cstack.sel(polarization=pol)
+    next_burst_ref = next_burst_ref.sel({k: sel_ref.coords[k] for k in v_dims}).cstack.sel(polarization=pol)
+    current_burst_ref = current_burst_ref.sel({k: sel_ref.coords[k] for k in v_dims}).cstack.sel(polarization=pol)
+    next_burst_sec = next_burst_sec.sel({k: sel_sec.coords[k] for k in v_dims}).cstack.sel(polarization=pol)
+    current_burst_sec = current_burst_sec.sel({k: sel_sec.coords[k] for k in v_dims}).cstack.sel(polarization=pol)
 
     # returns the estimated azimuth shift and the corresponding quality index #
     # new dimension id and corresponding coords added to the shifts #
-    coords = {
-        k: (["id"], [current_burst_ref[k].mean().values])
-        for k in ["azimuth_time", "slant_range_time"]
-    }
+    coords = {k: (["id"], [current_burst_ref[k].mean().values]) for k in ["azimuth_time", "slant_range_time"]}
     esd = map_blocks(
         compute_azimuth_shifts,
         (current_burst_sec, next_burst_sec, current_burst_ref, next_burst_ref),
@@ -111,7 +95,7 @@ def esd_single_burst(
             "multilook": multilook,
             "coherence_threshold": coherence_threshold,
         },
-        chunksizes={"acquisition_date": 100},
+        chunksizes={"acquisition_id": 100},
         enable_dask=enable_dask,
         force_compute=force_compute,
     )
@@ -173,8 +157,7 @@ def estimate(
         join="outer",
     )
 
-    args = [esd.sel(acquisition_date=d) for d in esd.acquisition_date.values]
-
+    args = [esd.sel(acquisition_id=d) for d in esd.acquisition_id.values]
     esd_opt = cast(
         list,
         map(
@@ -186,7 +169,7 @@ def estimate(
         ),
     )
     for e in esd_opt:
-        d = e.acquisition_date.values
+        d = e.acquisition_id.values
         esd["mean_phase"].loc[:, d] = e.mean_phase
         esd["mean_shift"].loc[:, d] = e.mean_shift
 
@@ -209,9 +192,12 @@ def find_global_shift(esd: xr.Dataset, poly_degree: int = 0, norm: int = 1):
 
     # scaling coefficients for the slant_range_time and azimuth_time coordinates
     s_x, s_y = [
-        (esd[e].max() - esd[e].min()).astype("float64").values / 2.0
-        for e in ["slant_range_time", "azimuth_time"]
+        (esd[e].max() - esd[e].min()).astype("float64").values / 2.0 for e in ["slant_range_time", "azimuth_time"]
     ]
+    if s_x == 0.0:
+        s_x = np.array([1.0])
+    if s_y == 0.0:
+        s_y = np.array([1.0])
 
     # rescale and center the coordinates of the points where the model is evaluated
     az = ((esd.azimuth_time - t0).astype("float64") / s_y).values
@@ -219,16 +205,14 @@ def find_global_shift(esd: xr.Dataset, poly_degree: int = 0, norm: int = 1):
 
     # call the global surface estimation function
     coeffs = detrend.estimate_global_surface(
-        # np.vstack((az, rg)).T,
         np.atleast_2d(az).reshape(-1, 1),
         esd.mean_shift.values.ravel(),
         esd.coherence.values.ravel(),
         degree=poly_degree,
         norm=norm,
     ).x
-    print(f"Estimated polynomial coefficients: {coeffs=} {coeffs.shape=}")
 
-    return to_dataset_1D(coeffs, esd.acquisition_date, t0, r0, s_y, s_x)
+    return to_dataset_1D(coeffs, esd.acquisition_id, t0, r0, s_y, s_x)
 
 
 def to_dataset(X, acquisition_date, t0, r0, s_y, s_x):

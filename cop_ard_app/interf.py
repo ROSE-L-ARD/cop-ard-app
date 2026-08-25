@@ -13,7 +13,7 @@ from cop_ard_app.utils import (
 )
 
 from cop_ard_core.utils import (
-    get_best_pol, 
+    get_best_pol,
     get_azimuth_time_raw,
 )
 
@@ -37,9 +37,7 @@ def update_interf_coordinates(interf: xr.Dataset, multilook: dict) -> xr.Dataset
 
 
 # @timeit
-def get_interf_single_burst(
-    cslc_ref: xr.DataArray, cslc_sec: xr.DataArray, multilook: dict
-) -> xr.Dataset:
+def get_interf_single_burst(cslc_ref: xr.DataArray, cslc_sec: xr.DataArray, multilook: dict) -> xr.Dataset:
     """
     Compute the interferometric phase and coherence with respect to a reference date
     applying a boxcar filter
@@ -79,6 +77,7 @@ def extract_coreg_aoi(coreg: xr.Dataset, a_min: float, r_min: float, multilook: 
     coreg_sel = coreg_sel.swap_dims(y="azimuth_time", x="slant_range_time").chunk(chunk_burst)
 
     return coreg_sel
+
 
 @timeit
 def extract_interf_single(
@@ -123,8 +122,8 @@ def extract_interf_single(
     interf = update_interf_coordinates(interf, multilook)
 
     # add raw image azimuth times
-    TimeCOAPoly = annot_dict[interf.acquisition_date.values[0]]["Grid"]["TimeCOAPoly"]["Coefs"]
-    CollectStart = annot_dict[interf.acquisition_date.values[0]]["Timeline"]["CollectStart"][:-1]
+    TimeCOAPoly = annot_dict[interf.acquisition_id.values[0]]["Grid"]["TimeCOAPoly"]["Coefs"]
+    CollectStart = np.datetime64(annot_dict[interf.acquisition_id.values[0]]["Timeline"]["CollectStart"][:-1], "ns")
     azimuth_time_raw = get_azimuth_time_raw(coreg_ref_sel["cstack"], TimeCOAPoly, CollectStart, multilook)
     interf["azimuth_time_raw"] = (["azimuth_time", "slant_range_time"], azimuth_time_raw.values)
 
@@ -132,7 +131,7 @@ def extract_interf_single(
         # logger.debug("save phase_ramp")
         # compute multilooked phase corrections
         ph_ramp_diff_ml = get_stack_phramp_diff(
-            interf.acquisition_date,
+            interf.acquisition_id,
             interf.azimuth_time,
             interf.slant_range_time,
             coreg_sec_sel.drg,
@@ -150,6 +149,7 @@ def extract_interf_single(
 
     return (burst_id, interf)
 
+
 @timeit
 def extract_interf_multi(
     reference_slcs: xr.DataTree,
@@ -159,24 +159,14 @@ def extract_interf_multi(
     **kwargs,
 ):
     name = list(reference_slcs.bursts)[0]
-    available_pols_ref = {
-        str(i)
-        for i in reference_slcs.bursts[name].coreg.measurements.polarization.values
-    }
-    available_pols_sec = {
-        str(i)
-        for i in secondary_slcs.bursts[name].coreg.measurements.polarization.values
-    }
-    pol = get_best_pol(
-        list(set(available_pols_ref).intersection(set(available_pols_sec)))
-    )
+    available_pols_ref = {str(i) for i in reference_slcs.bursts[name].coreg.measurements.polarization.values}
+    available_pols_sec = {str(i) for i in secondary_slcs.bursts[name].coreg.measurements.polarization.values}
+    pol = get_best_pol(list(set(available_pols_ref).intersection(set(available_pols_sec))))
 
     args = [
         (
             burst_id,
-            json.dumps(
-                {k: v.measurements.slc.attrs[pol] for k, v in slc_ref.orig.items()}
-            ),
+            json.dumps({k: v.measurements.slc.attrs[pol] for k, v in slc_ref.orig.items()}),
             slc_ref.coreg.measurements.ds.unify_chunks(),
             slc_sec.coreg.measurements.ds.unify_chunks(),
         )
@@ -205,7 +195,7 @@ def extract_interf_multi(
         ds = ds.assign(
             {
                 "id": xr.full_like(
-                    ds.phase.isel(polarization=0, acquisition_date=0),
+                    ds.phase.isel(polarization=0, acquisition_id=0),
                     fill_value=id,
                     dtype="int8",
                 )
@@ -215,15 +205,14 @@ def extract_interf_multi(
 
     return interf
 
+
 @timeit
 def mosaic_interf(interf: xr.DataTree, force_compute: bool = True) -> xr.Dataset:
 
+    data = interf.bursts[list(interf.bursts.children)[0]].to_dataset()
+    chunks = {k: v[0] for k, v in data.chunksizes.items()}
     # TODO: margins for mosaic do be adapted to the multilook and the valid points
-    mosaic: xr.Dataset = (
-        interf.bursts[list(interf.bursts.children)[0]]
-        .to_dataset()
-        .isel(azimuth_time=slice(3, -3), slant_range_time=slice(3, -8))
-    )
+    mosaic: xr.Dataset = data.isel(azimuth_time=slice(3, -3), slant_range_time=slice(3, -8))
     mosaic = mosaic.swap_dims({"azimuth_time": "y", "slant_range_time": "x"})
     mosaic = mosaic.reset_coords([e for e in mosaic.coords if e not in mosaic.dims])
 
@@ -236,8 +225,13 @@ def mosaic_interf(interf: xr.DataTree, force_compute: bool = True) -> xr.Dataset
 
     mosaic = mosaic.swap_dims({"y": "azimuth_time", "x": "slant_range_time"})
     mosaic = mosaic.reset_coords([e for e in mosaic.coords if e not in mosaic.dims])
+    mosaic["phase"] = mosaic.phase.transpose("polarization", "acquisition_id", "azimuth_time", "slant_range_time")
+    mosaic["cohe"] = mosaic.cohe.transpose("polarization", "acquisition_id", "azimuth_time", "slant_range_time")
+    if force_compute:
+        mosaic = mosaic.compute()
 
-    return mosaic.compute() if force_compute else mosaic
+    return mosaic.chunk(chunks)
+
 
 @timeit
 def get_mosaic_interf(

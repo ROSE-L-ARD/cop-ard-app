@@ -14,6 +14,7 @@ from cop_ard_app.io import Path, read, write
 from cop_ard_app.model import get_carrier_frequency
 from cop_ard_app.utils import get_bounding_box
 
+
 @timeit
 def separate_dispersive_spectrum_components(
     reference_slcs: xr.DataTree,
@@ -66,10 +67,8 @@ def separate_dispersive_spectrum_components(
     if wdir_path is not None:
         # save to disk
         mosaic_l_path = wdir_path.append("mosaic_l")
-        logger.debug(f"save mosaic_l to file {mosaic_l_path}")
         mosaic_l = cast(xr.Dataset, write(mosaic_l, data_path=mosaic_l_path, mode="w"))
         mosaic_h_path = wdir_path.append("mosaic_h")
-        logger.debug(f"save mosaic_h to file {str(mosaic_h_path)}")
         mosaic_h = cast(xr.Dataset, write(mosaic_h, data_path=mosaic_h_path, mode="w"))
 
     # joint interferogram phase unwrapping
@@ -101,21 +100,25 @@ def separate_dispersive_spectrum_components(
 def remove_iono_surface_chunk(
     cstack: xr.DataArray,
     coeffs: xr.DataArray,
-    TimeCOAPoly: np.ndarray, 
+    TimeCOAPoly: np.ndarray,
     CollectStart: np.ndarray,
     H_iono: xr.DataArray | float,
-    H_orb: xr.DataArray |float,
+    H_orb: xr.DataArray | float,
     degree: int = 1,
 ) -> tuple[xr.DataArray, xr.DataArray] | None:
 
     # compute raw  azimuth time
     azimuth_time_raw = get_azimuth_time_raw(cstack, TimeCOAPoly, CollectStart)
 
-    surf = reconstruct_iono_surface(cstack.azimuth_time, cstack.slant_range_time, azimuth_time_raw, coeffs, H_iono, H_orb, degree=degree)
+    surf = reconstruct_iono_surface(
+        cstack.azimuth_time, cstack.slant_range_time, azimuth_time_raw, coeffs, H_iono, H_orb, degree=degree
+    )
 
     cstack *= np.exp(-1j * surf)
 
-    return xr.Dataset({"cstack": cstack, "phase_iono": surf.expand_dims({"acquisition_date": cstack.acquisition_date.values})})
+    return xr.Dataset(
+        {"cstack": cstack, "phase_iono": surf.expand_dims({"acquisition_id": cstack.acquisition_id.values})}
+    )
 
 
 def remove_iono_surface_single_burst(
@@ -123,7 +126,7 @@ def remove_iono_surface_single_burst(
     burst: xr.Dataset,
     coeffs: xr.DataArray,
     H_iono: xr.DataArray | float,
-    H_orb: xr.DataArray |float,
+    H_orb: xr.DataArray | float,
     outfolder: Path,
     degree: int = 1,
     enable_dask: bool = True,
@@ -131,27 +134,27 @@ def remove_iono_surface_single_burst(
 
     # recontruct the surface over all points
     cstack = burst.cstack
-    
+
     # select preferred polarization
     pol = get_best_pol(cstack.polarization.values)
     annot_pol = cstack.attrs[pol]
 
     TimeCOAPoly = annot_pol["Grid"]["TimeCOAPoly"]["Coefs"]
-    CollectStart = annot_pol["Timeline"]["CollectStart"][:-1]
+    CollectStart = np.datetime64(annot_pol["Timeline"]["CollectStart"][:-1], "ns")
 
     # init output file structure
-    burst['phase_iono'] = xr.zeros_like(burst['cstack'].isel(polarization=0), dtype="float32")
-    write(burst, outfolder.append(f'bursts/{burst_id}/coreg/measurements'), skip_read=True)
-    
+    burst["phase_iono"] = xr.zeros_like(burst["cstack"].isel(polarization=0), dtype="float32")
+    write(burst, outfolder.append(f"bursts/{burst_id}/coreg/measurements"), skip_read=True)
+
     store_mapping = {
         0: {
             "data_path": outfolder.append(f"bursts/{burst_id}/coreg/measurements"),
             # "dims": ["acquisition_date", "azimuth_time", "slant_range_time"],
-            "save_options": {"skip_read": True,
-                             "consolidated": False,
-                             },
+            "save_options": {
+                "skip_read": True,
+                "consolidated": False,
             },
-
+        },
     }
 
     map_blocks(
@@ -160,15 +163,22 @@ def remove_iono_surface_single_burst(
         args=(coeffs, TimeCOAPoly, CollectStart, H_iono, H_orb, degree),
         enable_dask=enable_dask,
         combine=False,
-        store_mapping=store_mapping, #store_directory=outfolder.append(f"bursts/{burst_id}/coreg/measurements"),
+        store_mapping=store_mapping,  # store_directory=outfolder.append(f"bursts/{burst_id}/coreg/measurements"),
     )
-    
-    return 
+
+    return
+
 
 @timeit
 def remove_iono_surface(
-    slcs: xr.DataTree, coeffs: xr.DataArray, H_iono: float, H_orb: float, outfolder: Path, degree: int = 1,
-    enable_dask: bool = True) -> xr.DataTree:
+    slcs: xr.DataTree,
+    coeffs: xr.DataArray,
+    H_iono: float,
+    H_orb: float,
+    outfolder: Path,
+    degree: int = 1,
+    enable_dask: bool = True,
+) -> xr.DataTree:
 
     # init out datatree
     outdatatree = xr.DataTree()
@@ -185,11 +195,18 @@ def remove_iono_surface(
     map(
         remove_iono_surface_single_burst,
         args=args,
-        kwargs={"coeffs": coeffs, "H_iono": H_iono, "H_orb": H_orb, "degree": degree, "outfolder": outfolder, "enable_dask": enable_dask},
+        kwargs={
+            "coeffs": coeffs,
+            "H_iono": H_iono,
+            "H_orb": H_orb,
+            "degree": degree,
+            "outfolder": outfolder,
+            "enable_dask": enable_dask,
+        },
         enable_dask=enable_dask,
         combine=False,
     )
-    
+
     return read(data_path=outfolder, consolidate_metadata=True)
 
 
@@ -214,12 +231,19 @@ def split_spectrum(
     bbox = tuple(get_bounding_box(reference_slcs.bursts, "coreg/measurements"))
 
     # estimate ESD at full-band
-    logger.debug("estimate ESD at full-band")
-    esd = estimate(reference_slcs, secondary_slcs, poly_degree=esd_poly_degree, enable_dask=enable_dask, force_compute=force_compute)
+
+    esd = estimate(
+        reference_slcs,
+        secondary_slcs,
+        poly_degree=esd_poly_degree,
+        enable_dask=enable_dask,
+        force_compute=force_compute,
+    )
+    logger.debug(f"esd: {esd}")
 
     # fit polynomial function to ESD and remove it from the interferogram
     y_poly = find_global_shift(esd, poly_degree=esd_poly_degree)
-
+    # y_poly = None
     # separate dispersive and non-dispersive components
     logger.debug("separate dispersive and non-dispersive components")
     phase_iono, phase_nd = separate_dispersive_spectrum_components(
@@ -251,10 +275,14 @@ def split_spectrum(
 
     # remove ionosphere from cslc and update structure
     logger.debug("remove ionosphere from cslc and update structure")
-    secondary_slcs_filt = remove_iono_surface(secondary_slcs, coeffs, H_iono, H_orb, 
-                                              degree=split_spectrum_poly_degree, 
-                                              outfolder=Path(os.path.join(str(wdir_path), "slc_filt")),
-                                              enable_dask=enable_dask,
-                                              )
+    secondary_slcs_filt = remove_iono_surface(
+        secondary_slcs,
+        coeffs,
+        H_iono,
+        H_orb,
+        degree=split_spectrum_poly_degree,
+        outfolder=Path(os.path.join(str(wdir_path), "slc_filt")),
+        enable_dask=enable_dask,
+    )
 
     return secondary_slcs_filt

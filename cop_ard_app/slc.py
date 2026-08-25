@@ -218,7 +218,7 @@ def import_image(
         attrs_data_vars={"slc": annot},
     )
     dt["measurements"] = image
-    write(dt, data_path, mode="w", compute=False, storage_options=get_storage_options(kwargs))
+    write(dt, data_path, mode="w", compute=True, storage_options=get_storage_options(kwargs))
 
     if do_import:
         # Define the path to the measurements group.
