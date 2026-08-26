@@ -9,17 +9,14 @@
 from typing import Literal, Sequence
 
 import numpy as np
-import structlog
 import xarray as xr
-from cop_ard_core.matching import compute_pearson_coefficient, initialize_patches, polyfit
+from cop_ard_core.matching import compute_pearson_coefficient, initialize_patches, fix_disparity
+from cop_ard_core.detrend import fit_2d_poly, to_polygrid2d
 from cop_ard_core.utils import get_best_pol
 from scipy.constants import speed_of_light
 
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.model import extract_acquisition_id
-
-logger = structlog.get_logger(__name__)
-
 
 def chunks_optimization(
     stack: xr.DataArray,
@@ -83,21 +80,38 @@ def chunks_optimization(
 def estimate_poly_matching(
     slcs: xr.DataTree,
     disparity_map: xr.DataTree,
-    deg: int = 3,
+    degree: int = 2,
     cohe_th: float = 0.3,
     norm: int = 1,
     kernel_shape: list = [15, 15],
     enable_dask: bool = True,
-):
+) -> xr.DataTree:
+    """Starting from the disparity maps evaluated ion cotrrespondence of each burst / slice the global polynomial correction function is evaluated.
+    Corrections are stored in a datatree. At first level the nodes corresponds to the acquisition_id. 
+    At the second level the two polynomial corrections x_poly and y_poly are provided.
+    Each single polynomial is stored in a dataarray with the following structure:
+    coordinates: i, j
+    coeffs: coefficients to be used by the function numpy.polynomial.polyval2d
+    attrs:
+    - deg: degree of the polynomial
+    - offset: offset to be applied to the azimuth_time and slant_range_time coordinates
+    - scale_fact: scaling factor to be appied to the azimuth_time and slant_range_time coordinates
+    Example of usage:
+    from numpy.polynomial.polynomial import polyval2d
+    x = (slant_range_time - offset[0]) / scale_fact[0]
+    y = (azimuth_time - offset[1]) / scale_fact[1]
+
+    surf = polyval2d(coeffs, x, y) 
+    """
     multiburst = True if "bursts" in slcs else False
     acquisition_ids = extract_acquisition_id(slcs, multiburst)
     args = []
 
     for k, v in (slcs.bursts if multiburst else {"data": slcs}).items():
         measurements = v.coreg.measurements
-        for id in measurements.acquisition_date.values:
-            m = measurements.sel(acquisition_date=id)
-            d = (disparity_map.bursts[k].sel() if multiburst else disparity_map).sel(acquisition_date=id)
+        for id in measurements.acquisition_id.values:
+            m = measurements.sel(acquisition_id=id)
+            d = (disparity_map.bursts[k] if multiburst else disparity_map).sel(acquisition_id=id)
             a = (k, id, d, m.daz, m.drg)
             args.append(a)
 
@@ -105,19 +119,37 @@ def estimate_poly_matching(
     args = list(zip(*args))
 
     results = map(
-        polyfit,
+        fix_disparity,
         args,
-        kwargs={"deg": deg, "cohe_th": cohe_th, "kernel_shape": kernel_shape},
+        kwargs={"cohe_th": cohe_th, "kernel_shape": kernel_shape},
         enable_dask=enable_dask,
     )
 
-    from cop_ard_app.io import write
+    x_poly = get_polynomial_correction(acquisition_ids, results, 'dx', degree=degree, norm=norm)
+    y_poly = get_polynomial_correction(acquisition_ids, results, 'dy', degree=degree, norm=norm)
 
-    for burst_id, acquisition_id, m1_x, m1_y, dx, dy in results:
-        path = f"/data/tmp/polyfit/{burst_id}/{acquisition_id}"
-        for n, m in zip(["m1_x", "m1_y", "dx", "dy"], [m1_x, m1_y, dx, dy]):
-            write(m.to_dataset(name="A"), f"{path}/{n}")
+    return x_poly, y_poly
 
+def get_polynomial_correction(acquisition_ids, results, dim: str, degree: int, norm: int):
+    poly_corr = {}
+    for id in acquisition_ids:
+        to_merge = [ds for _, acquisition_id, ds in results if acquisition_id == id]
+        ds_tot = xr.concat(to_merge, dim='point')
+        coeffs, x_sc, x_0, = fit_2d_poly(ds_tot.m1_x.values, ds_tot.m1_y.values, ds_tot[dim].values, 
+                                            degree=degree, norm=norm,
+                                            weights=ds_tot.coherence.values)
+        attrs = {"deg": degree, "offset": x_0, "scale_fact": x_sc}
+
+        # costruct dataarray with fit coefficients and attributes for rescaling and centering the coordinates
+        poly_corr[id]=xr.DataArray(
+            data=to_polygrid2d(coeffs.x, degree),
+            dims=["i", "j"],
+            name=id,
+            coords={key: np.arange(degree + 1) for key in ["i", "j"]},
+            attrs=attrs,
+        )
+
+    return xr.Dataset(poly_corr)
 
 def stack_disparity(
     slcs: xr.DataTree,
@@ -190,8 +222,8 @@ def compute_stack_pearson_coefficient(
 
     """
     # Check if the master date is in the input stack
-    if reference_date not in stack.acquisition_date:
-        raise Exception("Unable to find the master date in stack")
+    if reference_date not in stack.acquisition_id:
+        raise Exception(f"Unable to find the master date {reference_date} in stack {stack.acquisition_id.values}")
 
     best_pol = get_best_pol(stack.polarization.values)
     # x and y coordinates must be added and used here as dimensions replacing slant_range_time, azimuth_time
@@ -206,9 +238,10 @@ def compute_stack_pearson_coefficient(
             {k: ([j], range(stack[j].size)) for k, j in zip(["y", "x"], ["azimuth_time", "slant_range_time"])}
         )
         .swap_dims(azimuth_time="y", slant_range_time="x")
-        .rename(acquisition_date="z")
+        .rename(acquisition_id="z")
         .transpose("y", "x", "z")
-    )
+    ).unify_chunks()
+
     # Patches to be used to cross-correlate initialization
     cc_patches = initialize_patches(
         xyz_stack.y.size,
@@ -280,7 +313,7 @@ def blockwise_pearson_coefficient(
     # Reference image initialize
     reference = abs(reference.compute())
 
-    # Loop over chunks along the acquisition_date (z) dimension to keep controlled the memory usage
+    # Loop over chunks along the acquisition_id (z) dimension to keep controlled the memory usage
     for i in range(0, stack.z.size, block_size):
         i_stack = stack.isel(z=slice(i, i + block_size)).compute()
         i_stack = abs(i_stack)

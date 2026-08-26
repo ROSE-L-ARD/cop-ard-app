@@ -68,7 +68,7 @@ def dem_to_radar(
         The final simulation dataset read from disk if `skip_read` is False, otherwise None.
     """
     if (set(chunks.keys()) == set((*SPATIAL_DIMS_, "acquisition_id"))) is False:
-        raise Exception("Chunks must contains x, y and acquisition_date keys")
+        raise Exception("Chunks must contains x, y and acquisition_id keys")
     # Define the path for the simulation output.
     data_path = f"{working_dir}/simulation"
     acquisition_ids = orbits.acquisition_id.values

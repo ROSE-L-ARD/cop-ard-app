@@ -234,6 +234,8 @@ def coreg_single_burst(
     do_reramp: bool = True,
     do_flattening: bool = True,
     enable_dask: bool = True,
+    x_poly: xr.DataArray | None = None,
+    y_poly: xr.DataArray | None = None,
     **kwargs,
 ) -> tuple[str, xr.DataTree]:
     """
@@ -421,6 +423,8 @@ def coreg_single_burst(
         kwargs={
             "do_reramp": do_reramp,
             "do_flattening": do_flattening,
+            "x_poly": x_poly,
+            "y_poly": y_poly,
         },
         combine=False,
         enable_dask=enable_dask,
@@ -838,8 +842,8 @@ def blockwise_warp_cslc(
             dkcoa_polynomial_coeffs=dkcoa_polynomial_coeffs,
             do_reramp=do_reramp,
             do_flattening=do_flattening,
-            x_poly=x_poly,
-            y_poly=y_poly,
+            x_poly=x_poly[acquisition_id] if x_poly is not None else None,
+            y_poly=y_poly[acquisition_id] if y_poly is not None else None,
             evaluation_offset=evaluation_offset,
         )
     coreg = xr.Dataset({"cstack": coreg_cstack, "phase_model": coreg_phase_model})
