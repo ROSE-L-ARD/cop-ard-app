@@ -73,7 +73,7 @@ def separate_dispersive_spectrum_components(
 
     # joint interferogram phase unwrapping
     phase_unw_l, phase_unw_h, coherence = joint_unwrap(
-        mosaic_l.cohe, mosaic_h.cohe, mosaic_l.phase, mosaic_h.phase, cohe_th=cohe_th
+        mosaic_l.coherence, mosaic_h.coherence, mosaic_l.phase, mosaic_h.phase, cohe_th=cohe_th
     )
     phase_tot_l = phase_unw_l + mosaic_l.phase_ramp if "phase_ramp" in mosaic_l.data_vars else phase_unw_l
     phase_tot_h = phase_unw_h + mosaic_h.phase_ramp if "phase_ramp" in mosaic_h.data_vars else phase_unw_h

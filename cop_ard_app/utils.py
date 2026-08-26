@@ -373,7 +373,7 @@ def sparse_multilook_core(data: xr.Dataset, cohe_th: float, multilook: dict):
     x_size_ml = data[coords[1]].size // multilook[coords[1]] + 1
 
     data_stack = data.stack(points=coords)
-    data_stack = data_stack.where((data_stack.cohe > cohe_th).compute(), drop=True)
+    data_stack = data_stack.where((data_stack.coherence > cohe_th).compute(), drop=True)
 
     x_ml = np.round(data_stack[coords[1]] // multilook[coords[1]]).astype(int)
     y_ml = np.round(data_stack[coords[0]] // multilook[coords[0]]).astype(int)

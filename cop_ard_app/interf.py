@@ -53,7 +53,7 @@ def get_interf_single_burst(cslc_ref: xr.DataArray, cslc_sec: xr.DataArray, mult
     interf_ds["phase"] = xr.ufuncs.angle(interf_norm)
 
     # extract coherence
-    interf_ds["cohe"] = xr.ufuncs.abs(interf_norm)
+    interf_ds["coherence"] = xr.ufuncs.abs(interf_norm)
 
     return interf_ds
 
@@ -226,7 +226,7 @@ def mosaic_interf(interf: xr.DataTree, force_compute: bool = True) -> xr.Dataset
     mosaic = mosaic.swap_dims({"y": "azimuth_time", "x": "slant_range_time"})
     mosaic = mosaic.reset_coords([e for e in mosaic.coords if e not in mosaic.dims])
     mosaic["phase"] = mosaic.phase.transpose("polarization", "acquisition_id", "azimuth_time", "slant_range_time")
-    mosaic["cohe"] = mosaic.cohe.transpose("polarization", "acquisition_id", "azimuth_time", "slant_range_time")
+    mosaic["coherence"] = mosaic.coherence.transpose("polarization", "acquisition_id", "azimuth_time", "slant_range_time")
     if force_compute:
         mosaic = mosaic.compute()
 
