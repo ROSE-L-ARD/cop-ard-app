@@ -112,7 +112,7 @@ def estimate_poly_matching(
         for id in measurements.acquisition_id.values:
             m = measurements.sel(acquisition_id=id)
             d = (disparity_map.bursts[k] if multiburst else disparity_map).sel(acquisition_id=id)
-            a = (k, id, d, m.daz, m.drg)
+            a = (k, id, d, m.drg, m.daz)
             args.append(a)
 
     # Transpose the list of tuples for the map function.
