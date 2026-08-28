@@ -146,7 +146,7 @@ def read_slc_static(burst_id: str, acquisition_ids: list[str], working_directory
         and already loaded in `slc.orig`. Otherwise, returns the loaded
         `xr.Datatree` itself.
     """
-
+    path = f"bursts/{burst_id}" if burst_id != "data" else burst_id
     storage_opts = get_storage_options(kwargs)
     slc_path = f"{working_directory}/processed_data/{burst_id}/slc.ok"
     acquisition_id = None
@@ -158,14 +158,18 @@ def read_slc_static(burst_id: str, acquisition_ids: list[str], working_directory
         ds = cast(
             xr.DataTree,
             read(
-                f"{working_directory}/bursts/{burst_id}/reference",
+                f"{working_directory}/{path}/reference",
                 storage_options=storage_opts,
             ),
         )
         annot = ds.measurements.slc.attrs
         annot = annot[list(annot)[0]]
-        absolute_number = str(annot["CollectionInfo"]["Parameters"]["ABSOLUTE_ORBIT"])
         collector_name = str(annot["CollectionInfo"]["CollectorName"])
+        if burst_id != "data":
+            absolute_number = str(annot["CollectionInfo"]["Parameters"]["ABSOLUTE_ORBIT"])
+        else:
+            absolute_number = str(annot["Timeline"]["CollectStart"]).replace("Z", "")
+
         acquisition_id = f"{collector_name}_{absolute_number}"
         # Extract date (casting to string to ensure matching with slc.orig keys)
         logger.info(f"Extracted acquisition_id: {acquisition_id} for burst {burst_id}.")
@@ -203,12 +207,13 @@ def save_slc_static(burst_id: str, slc: xr.DataTree, working_directory: str, **k
     -------
     None
     """
+    path = f"bursts/{burst_id}" if burst_id != "data" else burst_id
     # Select the specific reference date DataArray from the burst's 'orig' group
     slc_path = f"{working_directory}/processed_data/{burst_id}/slc.ok"
     # Write the DataArray to the static working directory in overwrite mode ('w')
     write(
         slc,
-        f"{working_directory}/bursts/{burst_id}/reference",
+        f"{working_directory}/{path}/reference",
         mode="w",
         skip_read=True,  # Optimization: don't read data back after writing
         storage_options=get_storage_options(kwargs),
@@ -1279,6 +1284,7 @@ def path_to_dict(data: Mapping, path: str, pattern: str = ".") -> Any | None:
         if isinstance(result, Mapping):
             result = result.get(key)
         else:
+            logger.warning(f"Pattern {pattern} not found")
             return None
     return result
 

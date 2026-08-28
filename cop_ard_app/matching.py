@@ -18,6 +18,7 @@ from scipy.constants import speed_of_light
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.model import extract_acquisition_id
 
+
 def chunks_optimization(
     stack: xr.DataArray,
     patches: xr.DataArray | xr.Dataset,
@@ -87,7 +88,7 @@ def estimate_poly_matching(
     enable_dask: bool = True,
 ) -> xr.DataTree:
     """Starting from the disparity maps evaluated ion cotrrespondence of each burst / slice the global polynomial correction function is evaluated.
-    Corrections are stored in a datatree. At first level the nodes corresponds to the acquisition_id. 
+    Corrections are stored in a datatree. At first level the nodes corresponds to the acquisition_id.
     At the second level the two polynomial corrections x_poly and y_poly are provided.
     Each single polynomial is stored in a dataarray with the following structure:
     coordinates: i, j
@@ -101,7 +102,7 @@ def estimate_poly_matching(
     x = (slant_range_time - offset[0]) / scale_fact[0]
     y = (azimuth_time - offset[1]) / scale_fact[1]
 
-    surf = polyval2d(coeffs, x, y) 
+    surf = polyval2d(coeffs, x, y)
     """
     multiburst = True if "bursts" in slcs else False
     acquisition_ids = extract_acquisition_id(slcs, multiburst)
@@ -111,7 +112,7 @@ def estimate_poly_matching(
         measurements = v.coreg.measurements
         for id in measurements.acquisition_id.values:
             m = measurements.sel(acquisition_id=id)
-            d = (disparity_map.bursts[k] if multiburst else disparity_map).sel(acquisition_id=id)
+            d = (disparity_map.bursts[k] if multiburst else disparity_map["data"]).sel(acquisition_id=id)
             a = (k, id, d, m.drg, m.daz)
             args.append(a)
 
@@ -125,23 +126,33 @@ def estimate_poly_matching(
         enable_dask=enable_dask,
     )
 
-    x_poly = get_polynomial_correction(acquisition_ids, results, 'dx', degree=degree, norm=norm)
-    y_poly = get_polynomial_correction(acquisition_ids, results, 'dy', degree=degree, norm=norm)
+    x_poly = get_polynomial_correction(acquisition_ids, results, "dx", degree=degree, norm=norm)
+    y_poly = get_polynomial_correction(acquisition_ids, results, "dy", degree=degree, norm=norm)
 
     return x_poly, y_poly
+
 
 def get_polynomial_correction(acquisition_ids, results, dim: str, degree: int, norm: int):
     poly_corr = {}
     for id in acquisition_ids:
         to_merge = [ds for _, acquisition_id, ds in results if acquisition_id == id]
-        ds_tot = xr.concat(to_merge, dim='point')
-        coeffs, x_sc, x_0, = fit_2d_poly(ds_tot.m1_x.values, ds_tot.m1_y.values, ds_tot[dim].values, 
-                                            degree=degree, norm=norm,
-                                            weights=ds_tot.coherence.values)
+        ds_tot = xr.concat(to_merge, dim="point")
+        (
+            coeffs,
+            x_sc,
+            x_0,
+        ) = fit_2d_poly(
+            ds_tot.m1_x.values,
+            ds_tot.m1_y.values,
+            ds_tot[dim].values,
+            degree=degree,
+            norm=norm,
+            weights=ds_tot.coherence.values,
+        )
         attrs = {"deg": degree, "offset": x_0, "scale_fact": x_sc}
 
         # costruct dataarray with fit coefficients and attributes for rescaling and centering the coordinates
-        poly_corr[id]=xr.DataArray(
+        poly_corr[id] = xr.DataArray(
             data=to_polygrid2d(coeffs.x, degree),
             dims=["i", "j"],
             name=id,
@@ -150,6 +161,7 @@ def get_polynomial_correction(acquisition_ids, results, dim: str, degree: int, n
         )
 
     return xr.Dataset(poly_corr)
+
 
 def stack_disparity(
     slcs: xr.DataTree,
@@ -193,7 +205,7 @@ def stack_disparity(
             disparity_map[f"bursts/{k}"] = v
     else:
         for k, v in results:
-            disparity_map = xr.DataTree(v)
+            disparity_map["data"] = v
 
     return disparity_map
 

@@ -986,7 +986,7 @@ def finalize_coreg(
 
     for k, v in nodes.items():
         logger.debug(f"node: {k}")
-        path = f"bursts/{k}" if multiburst else f"data/{reference_id}"
+        path = f"bursts/{k}" if multiburst else f"data"
         current_reference_path = normpath(f"{working_directory}/{path}/current_reference")
 
         if exists(current_reference_path, storage_options=storage_options):
@@ -1014,6 +1014,12 @@ def finalize_coreg(
                 slcs[path].orig[reference_id].measurements["slc"] = cr_ds.cstack
                 logger.debug(f"slcs orig: {slcs[path].orig[reference_id].measurements}")
                 logger.debug(f"slcs coreg: {slcs[path].coreg.measurements}")
+            else:
+                logger.debug(f"SM MOD")
+                slcs.coreg.measurements = new_coreg_ds
+                slcs.orig[reference_id].measurements["slc"] = cr_ds.cstack
+                logger.debug(f"slcs orig: {slcs.orig[reference_id].measurements}")
+                logger.debug(f"slcs coreg: {slcs.coreg.measurements}")
         else:
             bursts_to_remove.append(k)
 

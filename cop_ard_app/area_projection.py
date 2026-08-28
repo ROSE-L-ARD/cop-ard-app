@@ -1242,10 +1242,14 @@ def blockwise_rasterization(
     )
     if w is not None:
         w_dt = xr.DataTree(children={block_id: xr.DataTree(dataset=w)})
+    else:
+        w_dt = None
     if layover is not None:
         layover_dt = xr.DataTree(children={f"layover_block_{i}": xr.DataTree() for i in range(2)})
         for i, (layover_bbox, layover_matrix) in enumerate(layover):
             layover_dt[f"layover_block_{i}/{layover_bbox}"] = xr.DataTree(dataset=layover_matrix)
+    else:
+        layover_dt = None
 
     # Combine geogrid results into a single dataset
     geo_data = xr.Dataset(data_vars={"nlooks": nlooks})
