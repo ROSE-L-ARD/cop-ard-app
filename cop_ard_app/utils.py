@@ -447,26 +447,53 @@ def save_single_burst(burst_id, current_reference, stable_reference, reference_d
     current_reference_path = f"{reference_db_path}/{path}/current_reference"
     stable_reference_path = f"{reference_db_path}/{path}/stable_reference"
 
+    # 1. Always write the current reference
     write(current_reference, current_reference_path)
 
+    # 2. Write stable references only if they exist
     if stable_reference is not None:
-        for date in stable_reference.acquisition_date.values:
-            write(stable_reference.sel(acquisition_date=date), f"{stable_reference_path}/{date}")
+        # Use acquisition_id to iterate and slice safely, avoiding datetime string formatting KeyError
+        for acq_id in stable_reference.acquisition_id.values:
+            # Safely extract the slice for this specific acquisition
+            s_ref_slice = stable_reference.sel(acquisition_id=acq_id)
+
+            # Extract the raw date value to keep the folder naming consistent with the past
+            date_val = s_ref_slice.acquisition_date.values
+
+            write(s_ref_slice, f"{stable_reference_path}/{date_val}")
 
 
 def update_reference_database(current_reference_tree, stable_references_tree, reference_db_path):
     multiburst = "bursts" in current_reference_tree
+
+    # 1. Check if the stable_references_tree is the dummy one we created to bypass EOPF errors
+    is_stable_dummy = False
+    if stable_references_tree is not None and "status" in stable_references_tree:
+        is_stable_dummy = stable_references_tree["status"].attrs.get("is_empty", False)
+
     args = []
+    # Iterate over the valid current references
     for k, v in (current_reference_tree.bursts if multiburst else {"data": current_reference_tree}).items():
         c_ref = v.measurements.cstack
-        s_ref = (
-            (stable_references_tree.bursts[k] if multiburst else stable_references_tree).measurements.cstack
-            if stable_references_tree is not None
-            else None
-        )
+
+        # 2. Safely extract s_ref, falling back to None if it's dummy or missing
+        s_ref = None
+        if not is_stable_dummy and stable_references_tree is not None:
+            if multiburst:
+                # Safely traverse the multiburst tree without causing KeyErrors
+                if "bursts" in stable_references_tree and k in stable_references_tree.bursts:
+                    node = stable_references_tree.bursts[k]
+                    if "measurements" in node and "cstack" in node.measurements:
+                        s_ref = node.measurements.cstack
+            else:
+                # Safely traverse the single data tree
+                if "measurements" in stable_references_tree and "cstack" in stable_references_tree.measurements:
+                    s_ref = stable_references_tree.measurements.cstack
+
         a = (k, c_ref, s_ref)
         args.append(a)
 
+    # 3. Transpose arguments and pass them to the map function
     args = list(zip(*args))
     map(
         save_single_burst,

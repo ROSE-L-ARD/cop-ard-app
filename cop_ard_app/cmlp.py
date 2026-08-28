@@ -9,6 +9,7 @@ from cop_ard_core.utils import get_normalized_interf
 from cop_ard_app.computation import map
 from cop_ard_app.io import Path, get_storage_options, normpath, read, save_empty_dataset, write
 from cop_ard_app.utils import slice_and_drop_coordinates
+from cop_ard_core.logger import logger
 
 SHORT_DIMS = ["polarization", "azimuth_time", "slant_range_time"]
 DIMS = ["polarization", "acquisition_date", "azimuth_time", "slant_range_time"]
@@ -63,7 +64,6 @@ def stack_cmlp(
     # --- Assemble Results ---
     cmlp_tree = xr.DataTree()
     current_reference_tree = xr.DataTree()
-
     stable_references_tree = xr.DataTree()
 
     # Reconstruct the DataTree from the list of results returned by the workers
@@ -71,14 +71,19 @@ def stack_cmlp(
         multiburst_layer = f"bursts/{burst_id}/" if multiburst else ""
         # Unpack dates and datasets
         for date, ds in cmlp:
-            cmlp_tree[f"{multiburst_layer}cmlp/{date}"] = ds
+            if ds is not None:
+                cmlp_tree[f"{multiburst_layer}cmlp/{date}"] = ds
 
         current_reference_tree[f"{multiburst_layer}measurements/cstack"] = c_ref
 
         if s_ref is not None:
             stable_references_tree[f"{multiburst_layer}measurements/cstack"] = s_ref
 
-    stable_references_tree = stable_references_tree if stable_references_tree.children else None
+    if not stable_references_tree.children:
+        logger.warning("No stable references generated. Creating an empty placeholder for EOPF I/O.")
+        stable_references_tree["status"] = xr.Dataset(
+            attrs={"is_empty": True, "reason": "No valid stable references found in this run."}
+        )
     return (cmlp_tree, current_reference_tree, stable_references_tree)
 
 
@@ -122,6 +127,8 @@ def single_cmlp(
             starting_date = last_reference.attrs["starting_date"]
         except Exception as e:
             raise ValueError(f"Failed to load current reference at {last_reference_path.path}: {e}")
+    else:
+        logger.warning(f"Current reference not found at {last_reference_path.path}. Starting from scratch.")
     stable_reference = None
     past_reference_dates = None
     if stable_reference_path.exists():
@@ -140,6 +147,8 @@ def single_cmlp(
                 raise ValueError(f"No stable reference files found in {stable_reference_path.path}")
         except Exception as e:
             raise ValueError(f"Failed to load stable references from {stable_reference_path.path}: {e}")
+    else:
+        logger.warning(f"Stable reference not found at {stable_reference_path.path}. Starting from scratch.")
     # 3. Calculate Date Milestones
     stable_reference_dates = calculate_stable_dates(
         acquisition_dates,
@@ -216,10 +225,15 @@ def single_cmlp(
     current_reference = write(
         current_reference, f"{data_path}/current_reference", storage_options=get_storage_options(kwargs)
     )
-    cmlp = [
-        (date, read(f"{data_path}/cmlp/{date}", as_type="xr.Dataset", storage_options=get_storage_options(kwargs)))
-        for date in cstack_sel.acquisition_date.values
-    ]
+    cmlp = []
+
+    for date in cstack_sel.acquisition_date.values:
+        c = (
+            read(f"{data_path}/cmlp/{date}", as_type="xr.Dataset", storage_options=get_storage_options(kwargs))
+            if save_metrics
+            else None
+        )
+        cmlp.append((date, c))
 
     if (stable_reference is not None) and (past_reference_dates is not None):
         # 1. Filter out only the dates that actually exist in the dataset
@@ -351,7 +365,7 @@ def _initialize_cmlp_zarr_stores(
 
         coords_rolling["polarization"] = cstack.polarization.values
 
-        for date,date_id in zip(acquisition_dates,acquisition_ids):
+        for date, date_id in zip(acquisition_dates, acquisition_ids):
             data_vars = ["phase", "short_term_coh"]
             dims_coarse = {k: SHORT_DIMS for k in data_vars}
             s0 = [coords_rolling[i].size for i in SHORT_DIMS]

@@ -9,7 +9,7 @@ from cop_ard_core.warp import GRID, coreg_qlt, getLUT, sinc, warp_cslc, warp_daz
 from scipy.constants import speed_of_light
 
 from cop_ard_app.computation import map, map_blocks
-from cop_ard_app.io import get_storage_options, normpath, path_to_dict, read, save_empty_dataset, write
+from cop_ard_app.io import get_storage_options, normpath, path_to_dict, read, save_empty_dataset, write, exists
 from cop_ard_app.model import get_coefficients
 from cop_ard_app.slc import updateETAD, updateOrbits
 from cop_ard_app.utils import get_margin
@@ -45,7 +45,7 @@ def init_single_coreg_stack(
     # --- Write the Empty Structure to Disk ---
     crg = xr.DataTree.from_dict({k: xr.Dataset() for k in ["conditions", "quality"]})
     acquisition_ids = list(slcs.orig.keys())
-    acquisition_dates = [slcs.orig[i].measurements.acquisition_date.values[0] for i in acquisition_ids]
+    acquisition_dates = [str(slcs.orig[i].measurements.acquisition_date.values[0]) for i in acquisition_ids]
     if (recompute is False) and len(acquisition_ids) != 1:
         acquisition_dates = [date for i, date in zip(acquisition_ids, acquisition_dates) if i != ref_id]
         acquisition_ids = [i for i in acquisition_ids if i != ref_id]
@@ -61,7 +61,7 @@ def init_single_coreg_stack(
             raise ValueError(f"For acquisition date {d} got polarizations {p_set}, expected {all_pols}")
 
     slc = slcs.orig[ref_id].measurements.slc
-    ref_date = slc.acquisition_date.values
+    # ref_date = slc.acquisition_date.values
     slc_sec = slcs.orig[acquisition_ids[0]].measurements.slc
     shape = [len(all_pols), len(acquisition_ids), slc.azimuth_time.size, slc.slant_range_time.size]
     measurements_path = os.path.join(wdir_path, "coreg", "measurements")
@@ -92,7 +92,10 @@ def init_single_coreg_stack(
         dtype=dtype,
         data_path=measurements_path,
         coords=coords,
-        attrs={"coregistration_reference_date": ref_date, "coregistration_reference_id": ref_id},
+        attrs={
+            # "coregistration_reference_date": ref_date,
+            "coregistration_reference_id": ref_id,
+        },
         attrs_data_vars={"cstack": slc.attrs},
         skip_read=False,
         compute=True,
@@ -129,9 +132,9 @@ def init_single_coreg_stack(
         crg["measurements/daz"].attrs["recompute"] = recompute_daz_drg
         crg["measurements/daz"].attrs["store_path"] = f"{wdir_path}/daz_drg"
 
-    if ref_date not in acquisition_dates:
+    if ref_id not in acquisition_ids:
         logger.info(f"Removing reference date for burst : {slcs.name}")
-        del slcs.orig[ref_date]
+        del slcs.orig[ref_id]
     # Add the new 'coreg' node to the in-memory DataTree.
     slcs["coreg"] = crg
 
@@ -960,3 +963,66 @@ def updateLut(
     # Convert the final DataArray to a Dataset.
     xLUT = xLUT.to_dataset(name=out_name)
     return xLUT
+
+
+def finalize_coreg(
+    slcs: xr.DataTree,
+    working_directory: str,
+    reference_id: str,
+    do_image_matching: bool = False,
+    do_split_spectrum: bool = False,
+    enable_dask: bool = True,
+    **kwargs,
+) -> xr.DataTree:
+    if not (do_image_matching or do_split_spectrum):
+        logger.info("Image matching and split spectrum disabled. Skipping current_reference loading.")
+        return slcs
+
+    storage_options = get_storage_options(kwargs)
+    multiburst = "bursts" in slcs
+
+    bursts_to_remove = []
+    nodes = slcs.bursts if multiburst else {"data": slcs}
+
+    for k, v in nodes.items():
+        logger.debug(f"node: {k}")
+        path = f"bursts/{k}" if multiburst else f"data/{reference_id}"
+        current_reference_path = normpath(f"{working_directory}/{path}/current_reference")
+
+        if exists(current_reference_path, storage_options=storage_options):
+            coreg_ds = v.coreg.measurements.to_dataset()
+            cr_ds = read(current_reference_path, as_type="xr.Dataset", storage_options=storage_options)
+            r_val = str(
+                cr_ds.acquisition_date.values.item()
+                if cr_ds.acquisition_date.ndim == 0
+                else cr_ds.acquisition_date.values[0]
+            )
+            cr_ds = cr_ds.assign_coords(
+                acquisition_id=("acquisition_id", [reference_id]), acquisition_date=("acquisition_id", [r_val])
+            )
+            c_ids = [str(x) for x in coreg_ds.acquisition_id.values]
+            c_dates = [str(x) for x in coreg_ds.acquisition_date.values]
+            coreg_ds = coreg_ds.assign_coords(
+                acquisition_id=("acquisition_id", c_ids), acquisition_date=("acquisition_id", c_dates)
+            )
+            new_coreg_ds = xr.concat([coreg_ds, cr_ds], dim="acquisition_id").sortby("acquisition_date")
+            logger.debug(f"coreg_ds: {new_coreg_ds}")
+
+            if multiburst:
+                logger.debug(f"MODIFY")
+                slcs[path].coreg.measurements = new_coreg_ds
+                slcs[path].orig[reference_id].measurements["slc"] = cr_ds.cstack
+                logger.debug(f"slcs orig: {slcs[path].orig[reference_id].measurements}")
+                logger.debug(f"slcs coreg: {slcs[path].coreg.measurements}")
+        else:
+            bursts_to_remove.append(k)
+
+    if multiburst:
+        for k in bursts_to_remove:
+            logger.warning(f"Current reference missing for burst {k}. Dropping burst from DataTree.")
+            del slcs.bursts[k]
+    else:
+        if bursts_to_remove:
+            raise ValueError("Current reference missing for the datatake. DataTree might be empty.")
+
+    return slcs
