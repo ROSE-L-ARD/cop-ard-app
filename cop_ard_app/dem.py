@@ -128,6 +128,7 @@ def single_dem(
     working_directory_tmp: str,
     chunks: dict = {"x": 2048, "y": 2048},
     crs: str | None = None,
+    reference_id: str | None = None,
     enable_dask: bool = True,
     border: float = 10.0 / 3600.0,  # Approx. 300m border in degrees
     recompute=False,
@@ -171,7 +172,9 @@ def single_dem(
         A tuple containing the burst_id and the reprojected DEM Dataset.
     """
     # Define the output path for this burst.
-    path = f"bursts/{burst_id}" if multiburst else "data"
+    if (not multiburst) and (reference_id is None):
+        raise ValueError(f"In single burst case, the reference_id is mandatory")
+    path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     data_path = normpath(f"{working_directory_tmp}/{path}")
     simulation_path = f"{working_directory_static}/processed_data/{path}/simulation.ok"
     storage_options_static = get_storage_options(kwargs, key="storage_options_static")
@@ -222,6 +225,7 @@ def stack_dem(
     working_directory_tmp: str,
     chunks: dict = {"x": 2048, "y": 2048},
     crs: str | None = None,
+    reference_id: str | None = None,
     enable_dask: bool = True,
     recompute: bool = False,
     **kwargs,
@@ -288,6 +292,7 @@ def stack_dem(
                 working_directory_tmp=working_directory_tmp,
                 chunks=chunks,
                 crs=crs,
+                reference_id=reference_id,
                 enable_dask=enable_dask,
                 recompute=recompute,
                 **kwargs,

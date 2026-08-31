@@ -253,6 +253,7 @@ def mask_shadow_single_burst(
     threshold: float = 0.3,
     enable_dask: bool = True,
     recompute: bool = False,
+    reference_id: str | None = None,
     **kwargs,
 ) -> None:
     """
@@ -296,8 +297,10 @@ def mask_shadow_single_burst(
     None
         This function saves the shadow mask to disk.
     """
+    if (not multiburst) and (reference_id is None):
+        raise ValueError(f"In single burst case, the reference_id is mandatory")
     # Define the data path based on whether it's multiburst or single data mode
-    path = f"bursts/{burst_id}" if multiburst else "data"
+    path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     data_path = normpath(f"{wdir_path_static}/{path}")
 
     # Define the path for the completion file
@@ -397,7 +400,9 @@ def stack_mask(
     map(
         mask_shadow_single_burst,
         args,
-        kwargs=dict(wdir_path_static=working_directory_static, recompute=recompute, **kwargs),
+        kwargs=dict(
+            wdir_path_static=working_directory_static, recompute=recompute, reference_id=reference_id, **kwargs
+        ),
         combine=False,  # Results are written to disk
         enable_dask=kwargs.get("enable_dask", True),
         Plugin=GeoEnvPlugin(in_proj=in_proj, out_proj="EPSG:4978"),
@@ -675,6 +680,7 @@ def single_burst_geometry(
     wdir_path_tmp: str,
     recompute: bool = False,
     enable_dask: bool = True,
+    reference_id: str | None = None,
     **kwargs,
 ) -> None:
     """
@@ -721,9 +727,10 @@ def single_burst_geometry(
     # Type check for the SLC input
     if not isinstance(slc, xr.DataArray):
         raise Exception(f"Expected xr.DataArray, got {type(slc)}")
-
+    if (not multiburst) and (reference_id is None):
+        raise ValueError(f"In single burst case, the reference_id is mandatory")
     # Define paths based on whether it's multiburst or single data mode
-    path = f"bursts/{burst_id}" if multiburst else "data"
+    path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     data_path_static = normpath(f"{wdir_path_static}/{path}")
     data_path_tmp = normpath(f"{wdir_path_tmp}/{path}")
 
@@ -862,6 +869,7 @@ def stack_geometry(
             wdir_path_tmp=working_directory_tmp,
             recompute=recompute,
             enable_dask=enable_dask,
+            reference_id=reference_id,
             **kwargs,
         ),
         Plugin=GeoEnvPlugin(in_proj=in_proj, out_proj="EPSG:4978"),
