@@ -12,11 +12,11 @@ import numpy as np
 import xarray as xr
 from cop_ard_core.matching import compute_pearson_coefficient, initialize_patches, fix_disparity
 from cop_ard_core.detrend import fit_2d_poly, to_polygrid2d
-from cop_ard_core.utils import get_best_pol
 from scipy.constants import speed_of_light
 
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.model import extract_acquisition_id
+from cop_ard_app.utils import get_best_pol
 
 
 def chunks_optimization(

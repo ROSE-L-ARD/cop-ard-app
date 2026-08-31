@@ -12,7 +12,7 @@ from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.io import get_storage_options, normpath, path_to_dict, read, save_empty_dataset, write, exists
 from cop_ard_app.model import get_coefficients
 from cop_ard_app.slc import updateETAD, updateOrbits
-from cop_ard_app.utils import get_margin
+from cop_ard_app.utils import get_margin, get_best_pol
 
 
 def init_single_coreg_stack(
@@ -933,7 +933,8 @@ def updateLut(
             )
     # --- Set Coordinates and Attributes ---
     # Extract reference point and scaling factors for the coregistered grid.
-    annot_ref = slcs.coreg.measurements.cstack.attrs[pols[0]]
+    best_pol = get_best_pol(pols)
+    annot_ref = slcs.coreg.measurements.cstack.attrs[best_pol]
     try:
         rg0 = slcs.coreg.measurements.isel(
             slant_range_time=annot_ref["ImageData"]["SCPPixel"]["Row"]

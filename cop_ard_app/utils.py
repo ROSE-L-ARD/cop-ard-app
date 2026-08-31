@@ -10,7 +10,7 @@ import scipy.fft
 import xarray as xr
 from cop_ard_core.dem import extract_vertical_crs
 from cop_ard_core.logger import logger, timeit
-from cop_ard_core.utils import get_best_pol, get_phramp_diff
+from cop_ard_core.utils import get_phramp_diff
 from pyproj import CRS, Transformer, datadir
 from pyproj.transformer import TransformerGroup
 from scipy.constants import speed_of_light
@@ -501,3 +501,28 @@ def update_reference_database(current_reference_tree, stable_references_tree, re
         kwargs={"reference_db_path": reference_db_path, "multiburst": multiburst},
         enable_dask=True,
     )
+
+
+def get_best_pol(polarization_values: list) -> str:
+    """
+    Select the preferred polarization based on a priority list.
+
+    Parameters
+    ----------
+    polarization_values : list
+        List of available polarizations.
+
+    Returns
+    -------
+    str
+        The selected polarization.
+    """
+    # select preferred polarization
+    available_pols = {str(i) for i in polarization_values}
+    priorities = ["VV", "HH", "VH", "HV"]
+    pol = next((p for p in priorities if p in available_pols), None)
+    if pol is None:
+        raise Exception(f"No polarization has been found {available_pols}")
+
+    return pol
+

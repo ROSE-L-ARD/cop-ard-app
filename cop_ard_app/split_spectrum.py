@@ -5,14 +5,14 @@ import numpy as np
 import xarray as xr
 from cop_ard_core.logger import logger, timeit
 from cop_ard_core.split_spectrum import fit_ionosphere, joint_unwrap, reconstruct_iono_surface, split_spectrum_core
-from cop_ard_core.utils import get_azimuth_time_raw, get_best_pol
+from cop_ard_core.utils import get_azimuth_time_raw
 
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.esd import estimate, find_global_shift
 from cop_ard_app.interf import get_mosaic_interf
 from cop_ard_app.io import Path, read, write
 from cop_ard_app.model import get_carrier_frequency
-from cop_ard_app.utils import get_bounding_box
+from cop_ard_app.utils import get_bounding_box, get_best_pol
 
 
 @timeit
