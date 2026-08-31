@@ -985,7 +985,6 @@ def finalize_coreg(
     nodes = slcs.bursts if multiburst else {"data": slcs}
 
     for k, v in nodes.items():
-        logger.debug(f"node: {k}")
         path = f"bursts/{k}" if multiburst else f"data"
         current_reference_path = normpath(f"{working_directory}/{path}/current_reference")
 
@@ -1006,20 +1005,13 @@ def finalize_coreg(
                 acquisition_id=("acquisition_id", c_ids), acquisition_date=("acquisition_id", c_dates)
             )
             new_coreg_ds = xr.concat([coreg_ds, cr_ds], dim="acquisition_id").sortby("acquisition_date")
-            logger.debug(f"coreg_ds: {new_coreg_ds}")
 
             if multiburst:
-                logger.debug(f"MODIFY")
                 slcs[path].coreg.measurements = new_coreg_ds
                 slcs[path].orig[reference_id].measurements["slc"] = cr_ds.cstack
-                logger.debug(f"slcs orig: {slcs[path].orig[reference_id].measurements}")
-                logger.debug(f"slcs coreg: {slcs[path].coreg.measurements}")
             else:
-                logger.debug(f"SM MOD")
                 slcs.coreg.measurements = new_coreg_ds
                 slcs.orig[reference_id].measurements["slc"] = cr_ds.cstack
-                logger.debug(f"slcs orig: {slcs.orig[reference_id].measurements}")
-                logger.debug(f"slcs coreg: {slcs.coreg.measurements}")
         else:
             bursts_to_remove.append(k)
 

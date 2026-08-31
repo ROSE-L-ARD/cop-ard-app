@@ -10,7 +10,7 @@ from cop_ard_core.utils import get_azimuth_time_raw, get_best_pol
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.esd import estimate, find_global_shift
 from cop_ard_app.interf import get_mosaic_interf
-from cop_ard_app.io import Path, read, write
+from cop_ard_app.io import Path, read, write, normpath
 from cop_ard_app.model import get_carrier_frequency
 from cop_ard_app.utils import get_bounding_box
 
@@ -29,7 +29,8 @@ def separate_dispersive_spectrum_components(
     multilook: dict | None = None,
     multiburst: bool = True,
     enable_dask: bool = True,
-    force_compute: bool = True,
+    chunks={"azimuth_time": 4096, "slant_range_time": 4096},
+    reference_id: str | None = None,
 ):
 
     # define center band frequencies
@@ -48,7 +49,8 @@ def separate_dispersive_spectrum_components(
         multilook=multilook,
         y_poly=y_poly,
         enable_dask=enable_dask,
-        force_compute=force_compute,
+        multiburst=multiburst,
+        chunks=chunks,
     )
 
     # upper band interferogram
@@ -62,7 +64,8 @@ def separate_dispersive_spectrum_components(
         multilook=multilook,
         y_poly=y_poly,
         enable_dask=enable_dask,
-        force_compute=force_compute,
+        multiburst=multiburst,
+        chunks=chunks,
     )
 
     if wdir_path is not None:
@@ -89,10 +92,8 @@ def separate_dispersive_spectrum_components(
     if wdir_path is not None:
         # save to disk
         phase_iono_path = wdir_path.append("phase_iono")
-        logger.debug(f"save phase_iono to file {phase_iono_path}")
         phase_iono = write(phase_iono, data_path=phase_iono_path, mode="w")
         phase_nd_path = wdir_path.append("phase_nd")
-        logger.debug(f"save phase_nd to file {phase_nd_path}")
         phase_nd = write(phase_nd, data_path=phase_nd_path, mode="w")
 
     return phase_iono, phase_nd
@@ -100,41 +101,52 @@ def separate_dispersive_spectrum_components(
 
 def remove_iono_surface_chunk(
     cstack: xr.DataArray,
-    coeffs: xr.DataArray,
+    poly_corr: xr.DataArray,
     TimeCOAPoly: np.ndarray,
-    CollectStart: np.ndarray,
+    CollectStart: np.datetime64,
     H_iono: xr.DataArray | float,
     H_orb: xr.DataArray | float,
     degree: int = 1,
-) -> tuple[xr.DataArray, xr.DataArray] | None:
+) -> xr.Dataset:
 
     # compute raw  azimuth time
     azimuth_time_raw = get_azimuth_time_raw(cstack, TimeCOAPoly, CollectStart)
 
     surf = reconstruct_iono_surface(
-        cstack.azimuth_time, cstack.slant_range_time, azimuth_time_raw, coeffs, H_iono, H_orb, degree=degree
+        cstack.azimuth_time, cstack.slant_range_time, azimuth_time_raw, poly_corr, H_iono, H_orb, degree=degree
     )
 
     cstack *= np.exp(-1j * surf)
 
-    return xr.Dataset(
-        {"cstack": cstack, "phase_iono": surf.expand_dims({"acquisition_id": cstack.acquisition_id.values})}
+    ds = xr.Dataset(
+        {
+            "cstack": cstack,
+            "phase_iono": surf.expand_dims({"acquisition_id": cstack.acquisition_id.values}),
+        }
     )
+
+    return ds
 
 
 def remove_iono_surface_single_burst(
     burst_id: str,
-    burst: xr.Dataset,
-    coeffs: xr.DataArray,
+    coreg: xr.Dataset,
+    poly_corr: xr.DataArray,
     H_iono: xr.DataArray | float,
     H_orb: xr.DataArray | float,
-    outfolder: Path,
+    wdir_path: Path,
+    multiburst: bool,
     degree: int = 1,
     enable_dask: bool = True,
-) -> tuple[str, xr.DataTree] | None:
+    reference_id: str | None = None,
+) -> tuple[str, xr.Dataset]:
 
+    if (not multiburst) and (reference_id is None):
+        raise ValueError(f"In single burst case, the reference_id is mandatory")
+    path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
+    data_path = wdir_path.append(path).append("coreg_ss/measurements")
     # recontruct the surface over all points
-    cstack = burst.cstack
+    cstack = coreg.cstack
 
     # select preferred polarization
     pol = get_best_pol(cstack.polarization.values)
@@ -144,13 +156,13 @@ def remove_iono_surface_single_burst(
     CollectStart = np.datetime64(annot_pol["Timeline"]["CollectStart"].rstrip("Z|z"), "ns")
 
     # init output file structure
-    burst["phase_iono"] = xr.zeros_like(burst["cstack"].isel(polarization=0), dtype="float32")
-    write(burst, outfolder.append(f"bursts/{burst_id}/coreg/measurements"), skip_read=True)
+    coreg_ss = xr.Dataset({"cstack": cstack})
+    coreg_ss["phase_iono"] = xr.zeros_like(cstack.isel(polarization=0), dtype="float32")
+    write(coreg_ss, data_path, skip_read=True)
 
     store_mapping = {
         0: {
-            "data_path": outfolder.append(f"bursts/{burst_id}/coreg/measurements"),
-            # "dims": ["acquisition_date", "azimuth_time", "slant_range_time"],
+            "data_path": f"{wdir_path}/{path}/coreg_ss/measurements",
             "save_options": {
                 "skip_read": True,
                 "consolidated": False,
@@ -161,54 +173,63 @@ def remove_iono_surface_single_burst(
     map_blocks(
         remove_iono_surface_chunk,
         cstack,
-        args=(coeffs, TimeCOAPoly, CollectStart, H_iono, H_orb, degree),
-        enable_dask=enable_dask,
+        args=(poly_corr, TimeCOAPoly, CollectStart, H_iono, H_orb, degree),
         combine=False,
-        store_mapping=store_mapping,  # store_directory=outfolder.append(f"bursts/{burst_id}/coreg/measurements"),
+        store_mapping=store_mapping,
+        enable_dask=enable_dask,
     )
 
-    return
+    coreg_ss = read(data_path, as_type="xr.Dataset")
+
+    return (burst_id, coreg_ss)
 
 
 @timeit
 def remove_iono_surface(
     slcs: xr.DataTree,
-    coeffs: xr.DataArray,
+    poly_corr: xr.DataArray,
     H_iono: float,
     H_orb: float,
-    outfolder: Path,
+    wdir_path: Path,
+    multiburst: bool,
     degree: int = 1,
     enable_dask: bool = True,
+    reference_id: str | None = None,
 ) -> xr.DataTree:
 
-    # init out datatree
-    outdatatree = xr.DataTree()
-    for burst_id in slcs.bursts.keys():
-        outdatatree[f"bursts/{burst_id}/coreg/measurements"] = xr.DataTree()
-    logger.debug(outfolder)
-    write(outdatatree, data_path=outfolder, skip_read=True)
-
-    args = [(burst_id, slc.coreg.measurements.to_dataset()) for burst_id, slc in slcs.bursts.items()]
+    args = [
+        (burst_id, slc.coreg.measurements.to_dataset())
+        for burst_id, slc in (slcs.bursts if multiburst else {"data": slcs}).items()
+    ]
     args = list(zip(*args))
 
     # update all bursts
-
-    map(
+    results = map(
         remove_iono_surface_single_burst,
         args=args,
         kwargs={
-            "coeffs": coeffs,
+            "poly_corr": poly_corr,
             "H_iono": H_iono,
             "H_orb": H_orb,
             "degree": degree,
-            "outfolder": outfolder,
+            "wdir_path": wdir_path,
             "enable_dask": enable_dask,
+            "multiburst": multiburst,
+            "reference_id": reference_id,
         },
         enable_dask=enable_dask,
         combine=False,
     )
 
-    return read(data_path=outfolder, consolidate_metadata=True)
+    for k, v in results:
+        if multiburst:
+            slcs.bursts[k].coreg.measurements["cstack"] = v.cstack
+            slcs.bursts[k].coreg.measurements["phase_iono"] = v.phase_iono
+        else:
+            slcs.coreg.measurements["cstack"] = v.cstack
+            slcs.coreg.measurements["phase_iono"] = v.phase_iono
+
+    return slcs
 
 
 def split_spectrum(
@@ -220,15 +241,16 @@ def split_spectrum(
     cohe_th: float,
     H_iono: float,
     H_orb: float,
-    wdir_path: Path,
-    multiburst: bool=True,
+    wdir_path: str,
+    multiburst: bool,
     esd_poly_degree: int = 2,
     split_spectrum_poly_degree: int = 2,
     norm: int = 1,
     enable_dask: bool = True,
-    force_compute: bool = True,
+    reference_id: str | None = None,
 ):
 
+    wdir_path = Path(wdir_path)
     # evaluate bounding box
     bbox = tuple(get_bounding_box(reference_slcs, "coreg/measurements", multiburst=multiburst))
 
@@ -239,9 +261,7 @@ def split_spectrum(
             secondary_slcs,
             poly_degree=esd_poly_degree,
             enable_dask=enable_dask,
-            force_compute=force_compute,
         )
-        logger.debug(f"esd: {esd}")
 
         # fit polynomial function to ESD and remove it from the interferogram
         y_poly = find_global_shift(esd, poly_degree=esd_poly_degree)
@@ -262,14 +282,13 @@ def split_spectrum(
         y_poly=y_poly,
         multilook=multilook,
         wdir_path=wdir_path,
+        reference_id=reference_id,
         multiburst=multiburst,
         enable_dask=enable_dask,
-        force_compute=force_compute,
     )
-
     # fit surface at ionospheric height
     logger.debug("fit surface at ionospheric height")
-    coeffs = fit_ionosphere(
+    poly_corr = fit_ionosphere(
         phase_iono.phase,
         phase_iono.azimuth_time_raw,
         H_iono,
@@ -281,14 +300,16 @@ def split_spectrum(
 
     # remove ionosphere from cslc and update structure
     logger.debug("remove ionosphere from cslc and update structure")
-    secondary_slcs_filt = remove_iono_surface(
+    slcs = remove_iono_surface(
         secondary_slcs,
-        coeffs,
+        poly_corr,
         H_iono,
         H_orb,
         degree=split_spectrum_poly_degree,
-        outfolder=Path(os.path.join(str(wdir_path), "slc_filt")),
+        wdir_path=wdir_path,
+        multiburst=multiburst,
         enable_dask=enable_dask,
+        reference_id=reference_id,
     )
 
-    return secondary_slcs_filt
+    return slcs

@@ -19,7 +19,6 @@ def esd_single_burst(
     multilook: dict = {"azimuth_pixel": 4, "slant_range_time": 16},
     coherence_threshold: float = 0.7,
     enable_dask: bool = True,
-    force_compute: bool = True,
     **kwargs,
 ) -> xr.Dataset:
     """
@@ -97,7 +96,7 @@ def esd_single_burst(
         },
         chunksizes={"acquisition_id": 100},
         enable_dask=enable_dask,
-        force_compute=force_compute,
+        force_compute=True,
     )
 
     esd = esd.expand_dims({"id": [burst_id]}).assign_coords(coords)
@@ -116,7 +115,6 @@ def estimate(
     secondary_slcs: xr.DataTree,
     poly_degree: int = 0,
     enable_dask: bool = True,
-    force_compute: bool = True,
     **kwargs,
 ):
 
@@ -141,10 +139,10 @@ def estimate(
         map(
             esd_single_burst,
             args=args,
-            kwargs={"enable_dask": enable_dask, "force_compute": force_compute},
+            kwargs={"enable_dask": enable_dask},
             combine=False,
             enable_dask=enable_dask,
-            force_compute=force_compute,
+            force_compute=True,
             **kwargs,
         ),
     )
