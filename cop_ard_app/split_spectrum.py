@@ -27,12 +27,13 @@ def separate_dispersive_spectrum_components(
     y_poly: xr.Dataset,
     wdir_path: Path,
     multilook: dict | None = None,
+    multiburst: bool = True,
     enable_dask: bool = True,
     force_compute: bool = True,
 ):
 
     # define center band frequencies
-    f0 = get_carrier_frequency(reference_slcs.bursts, "coreg/measurements/cstack")
+    f0 = get_carrier_frequency(reference_slcs, "coreg/measurements/cstack", multiburst=multiburst)
     f_l_tot = f0 - frequency_offset
     f_h_tot = f0 + frequency_offset
 
@@ -140,7 +141,7 @@ def remove_iono_surface_single_burst(
     annot_pol = cstack.attrs[pol]
 
     TimeCOAPoly = annot_pol["Grid"]["TimeCOAPoly"]["Coefs"]
-    CollectStart = np.datetime64(annot_pol["Timeline"]["CollectStart"][:-1], "ns")
+    CollectStart = np.datetime64(annot_pol["Timeline"]["CollectStart"].rstrip("Z|z"), "ns")
 
     # init output file structure
     burst["phase_iono"] = xr.zeros_like(burst["cstack"].isel(polarization=0), dtype="float32")
@@ -220,6 +221,7 @@ def split_spectrum(
     H_iono: float,
     H_orb: float,
     wdir_path: Path,
+    multiburst: bool=True,
     esd_poly_degree: int = 2,
     split_spectrum_poly_degree: int = 2,
     norm: int = 1,
@@ -228,24 +230,27 @@ def split_spectrum(
 ):
 
     # evaluate bounding box
-    bbox = tuple(get_bounding_box(reference_slcs.bursts, "coreg/measurements"))
+    bbox = tuple(get_bounding_box(reference_slcs, "coreg/measurements", multiburst=multiburst))
 
     # estimate ESD at full-band
+    if multiburst:
+        esd = estimate(
+            reference_slcs,
+            secondary_slcs,
+            poly_degree=esd_poly_degree,
+            enable_dask=enable_dask,
+            force_compute=force_compute,
+        )
+        logger.debug(f"esd: {esd}")
 
-    esd = estimate(
-        reference_slcs,
-        secondary_slcs,
-        poly_degree=esd_poly_degree,
-        enable_dask=enable_dask,
-        force_compute=force_compute,
-    )
-    logger.debug(f"esd: {esd}")
+        # fit polynomial function to ESD and remove it from the interferogram
+        y_poly = find_global_shift(esd, poly_degree=esd_poly_degree)
+        # y_poly = None
+        # separate dispersive and non-dispersive components
+        logger.debug("separate dispersive and non-dispersive components")
+    else:
+        y_poly = None
 
-    # fit polynomial function to ESD and remove it from the interferogram
-    y_poly = find_global_shift(esd, poly_degree=esd_poly_degree)
-    # y_poly = None
-    # separate dispersive and non-dispersive components
-    logger.debug("separate dispersive and non-dispersive components")
     phase_iono, phase_nd = separate_dispersive_spectrum_components(
         reference_slcs,
         secondary_slcs,
@@ -257,6 +262,7 @@ def split_spectrum(
         y_poly=y_poly,
         multilook=multilook,
         wdir_path=wdir_path,
+        multiburst=multiburst,
         enable_dask=enable_dask,
         force_compute=force_compute,
     )
