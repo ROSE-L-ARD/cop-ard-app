@@ -229,6 +229,7 @@ def single_simulation(
     working_directory: str,
     master_image: bool = False,
     chunks: dict = {"x": 1024, "y": 1024, "acquisition_id": 1},
+    reference_id: str | None = None,
     recompute: bool = False,
     enable_dask: bool = True,
     **kwargs,
@@ -270,7 +271,9 @@ def single_simulation(
         A tuple containing the burst_id (str) and the resulting simulation Dataset (xr.Dataset).
     """
     # Define the relative path for this burst's data.
-    path = f"bursts/{burst_id}" if multiburst else "data"
+    if (not multiburst) and (reference_id is None):
+        raise ValueError(f"In single burst case, the reference_id is mandatory")
+    path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     data_path = normpath(f"{working_directory}/{path}")
     # Define a path for a "done" file to check for completion.
     simulation_path = f"{working_directory}/processed_data/{path}/simulation.ok"
@@ -323,6 +326,7 @@ def stack_simulation(
     orbits: xr.DataArray,
     multiburst: bool,
     working_directory: str,
+    reference_id: str | None = None,
     chunks: dict = {"x": 1024, "y": 1024, "acquisition_id": 1},
     master_image: bool = False,
     recompute: bool = False,
@@ -377,6 +381,7 @@ def stack_simulation(
                 working_directory=working_directory,
                 master_image=master_image,
                 chunks=chunks,
+                reference_id=reference_id,
                 recompute=recompute,
                 **kwargs,
             ),
@@ -629,7 +634,9 @@ def single_simulation_ml(
         multilooked datasets.
     """
     # Define the relative path for this burst's data.
-    path = f"bursts/{burst_id}" if multiburst else "data"
+    if (not multiburst) and (reference_id is None):
+        raise ValueError(f"In single burst case, the reference_id is mandatory")
+    path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     data_path = normpath(f"{working_directory}/{path}")
     # Define a path for a "done" file to check for completion.
     simulation_ml_path = f"{working_directory}/processed_data/{path}/simulation_ml.ok"

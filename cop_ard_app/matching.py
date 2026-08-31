@@ -165,7 +165,7 @@ def get_polynomial_correction(acquisition_ids, results, dim: str, degree: int, n
 
 def stack_disparity(
     slcs: xr.DataTree,
-    reference_date: str,
+    reference_id: str,
     wsize: Sequence[int] = [256, 256],
     wstep: Sequence[int] = [256, 256],
     wsearch: Sequence[int] = [5, 5],
@@ -188,7 +188,7 @@ def stack_disparity(
         compute_stack_pearson_coefficient,
         args,
         kwargs=dict(
-            reference_date=reference_date,
+            reference_id=reference_id,
             wsize=wsize,
             wstep=wstep,
             wsearch=wsearch,
@@ -213,7 +213,7 @@ def stack_disparity(
 def compute_stack_pearson_coefficient(
     burst_id: str,
     stack: xr.DataArray,
-    reference_date: str,
+    reference_id: str,
     wsize: Sequence[int],
     wstep: Sequence[int],
     wsearch: Sequence[int],
@@ -234,8 +234,8 @@ def compute_stack_pearson_coefficient(
 
     """
     # Check if the master date is in the input stack
-    if reference_date not in stack.acquisition_id:
-        raise Exception(f"Unable to find the master date {reference_date} in stack {stack.acquisition_id.values}")
+    if reference_id not in stack.acquisition_id:
+        raise Exception(f"Unable to find the master date {reference_id} in stack {stack.acquisition_id.values}")
 
     best_pol = get_best_pol(stack.polarization.values)
     # x and y coordinates must be added and used here as dimensions replacing slant_range_time, azimuth_time
@@ -278,7 +278,7 @@ def compute_stack_pearson_coefficient(
     # Cross-Correlation computation via map_blocks
     results = map_blocks(
         blockwise_pearson_coefficient,
-        (xyz_stack, xyz_stack.sel(z=reference_date)),
+        (xyz_stack, xyz_stack.sel(z=reference_id)),
         args=args,
         chunks=chunks_opt,
         combine=False,

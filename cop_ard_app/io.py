@@ -114,7 +114,13 @@ def sarpy_open(in_path: str | xr.DataTree, allowed_partial_open: bool = False, s
     return ds
 
 
-def read_slc_static(burst_id: str, acquisition_ids: list[str], working_directory: str, **kwargs):
+def read_slc_static(
+    burst_id: str,
+    acquisition_ids: list[str],
+    working_directory: str,
+    reference_id: str | None = None,
+    **kwargs,
+):
     """
     Check the static directory for a reference SLC.
 
@@ -146,9 +152,10 @@ def read_slc_static(burst_id: str, acquisition_ids: list[str], working_directory
         and already loaded in `slc.orig`. Otherwise, returns the loaded
         `xr.Datatree` itself.
     """
-    path = f"bursts/{burst_id}" if burst_id != "data" else burst_id
+    path = f"bursts/{burst_id}" if burst_id != "data" else f"{burst_id}/{reference_id}"
+    path_ok = burst_id if burst_id != "data" else f"{burst_id}/{reference_id}"
     storage_opts = get_storage_options(kwargs)
-    slc_path = f"{working_directory}/processed_data/{burst_id}/slc.ok"
+    slc_path = f"{working_directory}/processed_data/{path_ok}/slc.ok"
     acquisition_id = None
 
     if not exists(slc_path, storage_options=storage_opts):
@@ -158,7 +165,7 @@ def read_slc_static(burst_id: str, acquisition_ids: list[str], working_directory
         ds = cast(
             xr.DataTree,
             read(
-                f"{working_directory}/{path}/reference",
+                normpath(f"{working_directory}/{path}/reference"),
                 storage_options=storage_opts,
             ),
         )
@@ -181,7 +188,7 @@ def read_slc_static(burst_id: str, acquisition_ids: list[str], working_directory
     return (burst_id, acquisition_id, ds)
 
 
-def save_slc_static(burst_id: str, slc: xr.DataTree, working_directory: str, **kwargs):
+def save_slc_static(burst_id: str, slc: xr.DataTree, working_directory: str, reference_id: str | None = None, **kwargs):
     """
     Save a single reference SLC DataTree to the static working directory.
 
@@ -207,9 +214,11 @@ def save_slc_static(burst_id: str, slc: xr.DataTree, working_directory: str, **k
     -------
     None
     """
-    path = f"bursts/{burst_id}" if burst_id != "data" else burst_id
+    path = f"bursts/{burst_id}" if burst_id != "data" else f"{burst_id}/{reference_id}"
+    path_ok = burst_id if burst_id != "data" else f"{burst_id}/{reference_id}"
     # Select the specific reference date DataArray from the burst's 'orig' group
-    slc_path = f"{working_directory}/processed_data/{burst_id}/slc.ok"
+    dirname = normpath(f"{working_directory}/processed_data/{path_ok}")
+    slc_path = f"{dirname}/slc.ok"
     # Write the DataArray to the static working directory in overwrite mode ('w')
     write(
         slc,
@@ -220,7 +229,7 @@ def save_slc_static(burst_id: str, slc: xr.DataTree, working_directory: str, **k
     )
     # No explicit return value is needed
     makedirs(
-        normpath(f"{working_directory}/processed_data/{burst_id}"),
+        dirname,
         exist_ok=True,
         **kwargs,
     )

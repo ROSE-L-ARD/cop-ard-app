@@ -278,7 +278,7 @@ def coreg_single_burst(
         A tuple containing the burst_id and the resulting `coreg` DataTree node.
     """
     # Define the output path for this burst.
-    path = f"bursts/{burst_id}" if multiburst else "data"
+    path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
 
     # --- Step 1: Initialize Output Structure ---
     # Create the empty 'coreg' group on disk.

@@ -28,6 +28,7 @@ def stack_cmlp(
     reference_database_path: Path | None = None,
     enable_dask: bool = True,
     save_metrics: bool = True,
+    reference_id: str | None = None,
     **kwargs,
 ):
     multiburst = "bursts" in slcs
@@ -55,6 +56,7 @@ def stack_cmlp(
                 stable_interval_days=stable_interval_days,
                 max_past_stable_history=max_past_stable_history,
                 save_metrics=save_metrics,
+                reference_id=reference_id,
                 **kwargs,
             ),
             enable_dask=enable_dask,
@@ -99,14 +101,17 @@ def single_cmlp(
     stable_interval_days: int = 365,
     max_past_stable_history: int = 100,
     save_metrics: bool = True,
+    reference_id: str | None = None,
     **kwargs,
 ):
     # 1. Setup paths and validation
     expected = set(DIMS[2:])
     if set(posting) != expected:
         raise ValueError(f"Wrong keys: {set(posting)}. Expected {expected}")
+    if (not multiburst) and (reference_id is None):
+        raise ValueError(f"In single burst case, the reference_id is mandatory")
 
-    path = f"bursts/{burst_id}" if multiburst else burst_id
+    path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     last_reference_path = reference_database_path.append(f"{path}/current_reference")
     stable_reference_path = reference_database_path.append(f"{path}/stable_reference")
     data_path = normpath(f"{working_directory}/{path}")

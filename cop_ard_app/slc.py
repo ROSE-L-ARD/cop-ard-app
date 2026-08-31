@@ -627,56 +627,51 @@ def finalize_import(
 
     if multiburst:
         # Check if the DataTree is organized by bursts and needs a reference date
-        if acquisition_id is None:
-            acquisition_ids = extract_acquisition_id(slcs, multiburst=True)
-            if recompute:
-                if len(acquisition_ids) != 1:
-                    raise ValueError(f"Expected exactly one acquisition id, got {len(acquisition_ids)}")
+        acquisition_ids = extract_acquisition_id(slcs, multiburst=True)
+        if recompute:
+            if len(acquisition_ids) != 1:
+                raise ValueError(f"Expected exactly one acquisition id, got {len(acquisition_ids)}")
 
-                acquisition_id = next(iter(acquisition_ids))
-                logger.info("Saving reference SLC structure to static working directory.")
+            acquisition_id = next(iter(acquisition_ids))
+            logger.info("Saving reference SLC structure to static working directory.")
 
-                # Unzip dictionary items into two lists for mapping: (burst_ids, slc_objects)
-                args = [(burst_id, slc.orig[acquisition_id]) for burst_id, slc in slcs.bursts.items()]
-                args = list(zip(*args))
-                # Use a parallel map to save each burst's reference SLC
-                map(
-                    save_slc_static,
-                    args=args,
-                    kwargs=dict(working_directory=working_directory, **kwargs),
-                    enable_dask=enable_dask,
-                )
-            else:
-                args = [(burst_id, list(slc.orig)) for burst_id, slc in slcs.bursts.items()]
-                args = list(zip(*args))
-                static_slcs = map(
-                    read_slc_static,
-                    args=args,
-                    kwargs=dict(working_directory=working_directory, **kwargs),
-                    enable_dask=enable_dask,
-                )
-                if not isinstance(static_slcs, list):
-                    raise TypeError(f"Expected a list from computation.map, got {type(static_slcs).__name__}")
-
-                for burst_id, acq_id, status_or_data in static_slcs:
-                    if acq_id is not None:
-                        acquisition_id = acq_id
-                    if isinstance(status_or_data, int):
-                        if status_or_data == 0:
-                            logger.warning(f"No reference image found for burst {burst_id}. Removing from datatree.")
-                            del slcs.bursts[burst_id]
-                        elif status_or_data == 1:
-                            logger.info(f"Reference image already in stack for burst {burst_id}.")
-                    else:
-                        logger.info(f"Adding reference data for burst {burst_id}.")
-                        slcs[f"bursts/{burst_id}/orig/{acq_id}"] = status_or_data
-
-                if len(slcs.bursts) == 0:
-                    raise RuntimeError("No reference image found for any bursts. DataTree is empty.")
+            # Unzip dictionary items into two lists for mapping: (burst_ids, slc_objects)
+            args = [(burst_id, slc.orig[acquisition_id]) for burst_id, slc in slcs.bursts.items()]
+            args = list(zip(*args))
+            # Use a parallel map to save each burst's reference SLC
+            map(
+                save_slc_static,
+                args=args,
+                kwargs=dict(working_directory=working_directory, **kwargs),
+                enable_dask=enable_dask,
+            )
         else:
-            if any(acquisition_id not in burst.orig for burst in slcs.bursts.values()):
-                raise ValueError("Reference image not found in one or more bursts in the SLC stack.")
+            args = [(burst_id, list(slc.orig)) for burst_id, slc in slcs.bursts.items()]
+            args = list(zip(*args))
+            static_slcs = map(
+                read_slc_static,
+                args=args,
+                kwargs=dict(working_directory=working_directory, **kwargs),
+                enable_dask=enable_dask,
+            )
+            if not isinstance(static_slcs, list):
+                raise TypeError(f"Expected a list from computation.map, got {type(static_slcs).__name__}")
 
+            for burst_id, acq_id, status_or_data in static_slcs:
+                if acq_id is not None:
+                    acquisition_id = acq_id
+                if isinstance(status_or_data, int):
+                    if status_or_data == 0:
+                        logger.warning(f"No reference image found for burst {burst_id}. Removing from datatree.")
+                        del slcs.bursts[burst_id]
+                    elif status_or_data == 1:
+                        logger.info(f"Reference image already in stack for burst {burst_id}.")
+                else:
+                    logger.info(f"Adding reference data for burst {burst_id}.")
+                    slcs[f"bursts/{burst_id}/orig/{acq_id}"] = status_or_data
+
+            if len(slcs.bursts) == 0:
+                raise RuntimeError("No reference image found for any bursts. DataTree is empty.")
     else:
         if recompute:
             acquisition_ids = list(slcs.orig.keys())
@@ -685,38 +680,36 @@ def finalize_import(
 
             acquisition_id = acquisition_ids[0]
             logger.info(f"Saving reference SLC {acquisition_id} to static working directory (non-multiburst).")
-            save_slc_static("data", slcs.orig[acquisition_id], working_directory=working_directory, **kwargs)
+            save_slc_static(
+                "data",
+                slcs.orig[acquisition_id],
+                working_directory=working_directory,
+                reference_id=acquisition_id,
+                **kwargs,
+            )
         else:
-            # 2. Processamento standard: l'id di riferimento deve essere fornito
             if acquisition_id is None:
                 raise ValueError(
                     "`acquisition_id` must be provided when data is not organized by bursts and recompute=False."
                 )
-
-            # Se l'acquisizione non è già nell'albero in memoria, proviamo a leggerla dal disco
             if acquisition_id not in slcs.orig:
                 logger.info(f"Reading reference data for {acquisition_id} from static directory.")
                 current_ids = list(slcs.orig.keys())
-
-                # Chiamata diretta alla lettura
                 _, acq_id, status_or_data = read_slc_static(
                     "data", current_ids, working_directory=working_directory, **kwargs
                 )
 
                 if isinstance(status_or_data, int):
                     if status_or_data == 0:
-                        # La cartella non esiste o l'immagine non è presente -> ERRORE FATALE
                         raise ValueError(
                             f"Static reference folder/data for {acquisition_id} does not exist in {working_directory}."
                         )
                     elif status_or_data == 1:
                         logger.info("Reference image already in stack.")
                 else:
-                    # Trovato! Lo aggiungiamo all'albero
                     logger.info(f"Successfully added reference data for {acquisition_id} to DataTree.")
                     slcs.orig[acquisition_id] = status_or_data
 
-    # Controllo finale sul tipo
     if not isinstance(acquisition_id, str):
         raise TypeError(f"Expected `acquisition_id` to be a string, got {type(acquisition_id).__name__}")
 
