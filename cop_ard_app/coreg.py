@@ -665,7 +665,7 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
     if any(coeff is None for coeff in coreg_arp_coeffs.values()):
         raise ValueError("Missing ARP polynomial coefficients in metadata.")
     coreg_arp_coeffs = cast(dict[str, np.ndarray], coreg_arp_coeffs)
-    t0 = np.datetime64(annot["Timeline"]["CollectStart"], "ns")
+    t0 = np.datetime64(annot["Timeline"]["CollectStart"].rstrip("Z|z"), "ns")
     acquisition_date_arp_coeffs = {}
     acquisition_date_t0 = {}
     acquisition_date_orbit_type = {}
@@ -675,7 +675,7 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
         acquisition_date_arp_coeffs[acquisition_date] = {
             e: get_coefficients(f"Position.ARPPoly.{e}.Coefs", acquisition_date_annot) for e in ["X", "Y", "Z"]
         }
-        acquisition_date_t0[acquisition_date] = np.datetime64(annot["Timeline"]["CollectStart"], "ns")
+        acquisition_date_t0[acquisition_date] = np.datetime64(annot["Timeline"]["CollectStart"].rstrip("Z|z"), "ns")
         if any(coeff is None for coeff in acquisition_date_arp_coeffs[acquisition_date].values()):
             raise ValueError("Missing ARP polynomial coefficients in metadata.")
         # Determine the type of orbit data used for this acquisition.
