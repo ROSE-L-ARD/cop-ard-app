@@ -189,7 +189,7 @@ def extract_subband(cslc: xr.DataArray, bw: float, f0: float, dim_transf: str = 
     )
 
 
-def get_bounding_box(slcs: xr.DataTree, path: str) -> list:
+def get_bounding_box(slcs: xr.DataTree, path: str, multiburst: bool=True) -> list:
     """
     Compute the bounding box of a burst stack in azimuth time and slant range time.
 
@@ -209,8 +209,7 @@ def get_bounding_box(slcs: xr.DataTree, path: str) -> list:
         in azimuth time and slant range time.
     """
     azimuth_time, slant_range_time = [], []
-
-    for burst in slcs.values():
+    for burst in (slcs.bursts if multiburst else {"data": slcs}).values():
         if burst[path].azimuth_time.size > 0:
             azimuth_time += [
                 burst[path].azimuth_time.min().values,
