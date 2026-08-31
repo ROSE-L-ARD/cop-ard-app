@@ -106,14 +106,13 @@ def remove_iono_surface_chunk(
     CollectStart: np.datetime64,
     H_iono: xr.DataArray | float,
     H_orb: xr.DataArray | float,
-    degree: int = 1,
 ) -> xr.Dataset:
 
     # compute raw  azimuth time
     azimuth_time_raw = get_azimuth_time_raw(cstack, TimeCOAPoly, CollectStart)
 
     surf = reconstruct_iono_surface(
-        cstack.azimuth_time, cstack.slant_range_time, azimuth_time_raw, poly_corr, H_iono, H_orb, degree=degree
+        cstack.azimuth_time, cstack.slant_range_time, azimuth_time_raw, poly_corr, H_iono, H_orb
     )
 
     cstack *= np.exp(-1j * surf)
@@ -136,7 +135,6 @@ def remove_iono_surface_single_burst(
     H_orb: xr.DataArray | float,
     wdir_path: Path,
     multiburst: bool,
-    degree: int = 1,
     enable_dask: bool = True,
     reference_id: str | None = None,
 ) -> tuple[str, xr.Dataset]:
@@ -173,7 +171,7 @@ def remove_iono_surface_single_burst(
     map_blocks(
         remove_iono_surface_chunk,
         cstack,
-        args=(poly_corr, TimeCOAPoly, CollectStart, H_iono, H_orb, degree),
+        args=(poly_corr, TimeCOAPoly, CollectStart, H_iono, H_orb),
         combine=False,
         store_mapping=store_mapping,
         enable_dask=enable_dask,
@@ -192,7 +190,6 @@ def remove_iono_surface(
     H_orb: float,
     wdir_path: Path,
     multiburst: bool,
-    degree: int = 1,
     enable_dask: bool = True,
     reference_id: str | None = None,
 ) -> xr.DataTree:
@@ -211,7 +208,6 @@ def remove_iono_surface(
             "poly_corr": poly_corr,
             "H_iono": H_iono,
             "H_orb": H_orb,
-            "degree": degree,
             "wdir_path": wdir_path,
             "enable_dask": enable_dask,
             "multiburst": multiburst,
@@ -305,7 +301,6 @@ def split_spectrum(
         poly_corr,
         H_iono,
         H_orb,
-        degree=split_spectrum_poly_degree,
         wdir_path=wdir_path,
         multiburst=multiburst,
         enable_dask=enable_dask,
