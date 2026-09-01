@@ -137,19 +137,21 @@ def get_polynomial_correction(acquisition_ids, results, dim: str, degree: int, n
     for id in acquisition_ids:
         to_merge = [ds for _, acquisition_id, ds in results if acquisition_id == id]
         ds_tot = xr.concat(to_merge, dim="point")
+        off_y = ds_tot.m1_y.min().values
+        
         (
             coeffs,
             x_sc,
             x_0,
         ) = fit_2d_poly(
             ds_tot.m1_x.values,
-            ds_tot.m1_y.values,
+            (ds_tot.m1_y-off_y).astype(float).values,
             ds_tot[dim].values,
             degree=degree,
             norm=norm,
             weights=ds_tot.coherence.values,
         )
-        attrs = {"deg": degree, "offset": x_0, "scale_fact": x_sc}
+        attrs = {"deg": degree, "offset": x_0, "scale_fact": x_sc, "off_y": str(off_y)}
 
         # costruct dataarray with fit coefficients and attributes for rescaling and centering the coordinates
         poly_corr[id] = xr.DataArray(
