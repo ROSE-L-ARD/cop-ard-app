@@ -264,7 +264,7 @@ def to_dataset_1D(X, acquisition_date, t0, r0, s_y, s_x):
             data=_to_polygrid(X),
             dims=["i", "j"],
             coords={"i": axis, "j": axis},
-            attrs={"deg": deg, "offset": (t0, r0), "scale_fact": (s_y, s_x)},
+            attrs={"deg": deg, "offset": (0., r0), "scale_fact": (s_y, s_x), "off_y": str(t0)},
         )
         for i, dd in enumerate(acquisition_date.values)
     ]
