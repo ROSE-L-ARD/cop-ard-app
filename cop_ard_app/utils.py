@@ -175,7 +175,7 @@ def extract_subband(cslc: xr.DataArray, bw: float, f0: float, dim_transf: str = 
     }
 
     frange = xr.DataArray(
-        scipy.fft.fftshift(scipy.fft.fft(cslc.values, norm="ortho", axis=axis), axes=(axis,)),
+        scipy.fft.fftshift(scipy.fft.fft(cslc.fillna(0j).values, norm="ortho", axis=axis), axes=(axis,)),
         dims=freq_dim,
         coords=freq_coords,
     )
@@ -281,7 +281,7 @@ def get_poly(poly, poly_type: str, dd: str):
     return poly
 
 
-@timeit
+# @timeit
 def get_stack_phramp_diff(
     acquisition_id: xr.DataArray,
     azimuth_time: xr.DataArray,
