@@ -148,8 +148,9 @@ def estimate(
     )
 
     # Structure re-formatting in order to solve the global problem
+    to_merge = [e.drop_vars("acquisition_date", errors='ignore') for e in esd if e is not None and len(e) > 0]
     esd = xr.merge(
-        [e for e in esd if e is not None and len(e) > 0],
+        to_merge,
         compat="no_conflicts",
         combine_attrs="drop",
         join="outer",
@@ -213,7 +214,7 @@ def find_global_shift(esd: xr.Dataset, poly_degree: int = 0, norm: int = 1):
     return to_dataset_1D(coeffs, esd.acquisition_id, t0, r0, s_y, s_x)
 
 
-def to_dataset(X, acquisition_date, t0, r0, s_y, s_x):
+def to_dataset(X, acquisition_id, t0, r0, s_y, s_x):
 
     n = len(X)
     deg = int(round((-3 + np.sqrt(1 + 8 * n)) / 2))
@@ -240,12 +241,12 @@ def to_dataset(X, acquisition_date, t0, r0, s_y, s_x):
             coords={"i": axis, "j": axis},
             attrs={"deg": deg, "offset": (t0, r0), "scale_fact": (s_y, s_x)},
         )
-        for i, dd in enumerate(acquisition_date.values)
+        for i, dd in enumerate(acquisition_id.values)
     ]
     return xr.Dataset({e.name: e for e in da})
 
 
-def to_dataset_1D(X, acquisition_date, t0, r0, s_y, s_x):
+def to_dataset_1D(X, acquisition_id, t0, r0, s_y, s_x):
 
     deg = len(X) - 1
 
@@ -266,6 +267,6 @@ def to_dataset_1D(X, acquisition_date, t0, r0, s_y, s_x):
             coords={"i": axis, "j": axis},
             attrs={"deg": deg, "offset": (0., r0), "scale_fact": (s_y, s_x), "off_y": str(t0)},
         )
-        for i, dd in enumerate(acquisition_date.values)
+        for i, dd in enumerate(acquisition_id.values)
     ]
     return xr.Dataset({e.name: e for e in da})
