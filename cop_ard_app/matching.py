@@ -112,7 +112,7 @@ def estimate_poly_matching(
         measurements = v.coreg.measurements
         for id in measurements.acquisition_id.values:
             m = measurements.sel(acquisition_id=id)
-            d = (disparity_map.bursts[k] if multiburst else disparity_map["data"]).sel(acquisition_id=id)
+            d = (disparity_map.bursts[k].to_dataset() if multiburst else disparity_map["data"]).sel(acquisition_id=id).to_dataset()
             a = (k, id, d, m.drg, m.daz)
             args.append(a)
 
@@ -135,7 +135,7 @@ def estimate_poly_matching(
 def get_polynomial_correction(acquisition_ids, results, dim: str, degree: int, norm: int):
     poly_corr = {}
     for id in acquisition_ids:
-        to_merge = [ds for _, acquisition_id, ds in results if acquisition_id == id]
+        to_merge = [ds.drop_vars("point", errors='ignore') for _, acquisition_id, ds in results if (acquisition_id == id) and (ds is not None) and (dim in ds.data_vars)]
         ds_tot = xr.concat(to_merge, dim="point")
         off_y = ds_tot.m1_y.min().values
         
@@ -201,13 +201,18 @@ def stack_disparity(
         enable_dask=enable_dask,
         combine=False,
     )
+
+    # Construct disparity datatree for all bursts or for the single slice
     disparity_map = xr.DataTree()
     if multiburst:
+        disparity_map['bursts'] = xr.DataTree()
         for k, v in results:
-            disparity_map[f"bursts/{k}"] = v
+            if k in disparity_map.bursts:
+                raise ValueError(f"Duplicate burst ID {k} found in results. Each burst ID should be unique.")
+            disparity_map[f"bursts/{k}"] = v.to_dataset(dim="variable")
     else:
         for k, v in results:
-            disparity_map["data"] = v
+            disparity_map["data"] = v.to_dataset(dim="variable")
 
     return disparity_map
 
