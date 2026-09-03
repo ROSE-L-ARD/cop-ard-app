@@ -152,8 +152,10 @@ def read_slc_static(
         and already loaded in `slc.orig`. Otherwise, returns the loaded
         `xr.Datatree` itself.
     """
-    path = f"bursts/{burst_id}" if burst_id != "data" else f"{burst_id}/{reference_id}"
-    path_ok = burst_id if burst_id != "data" else f"{burst_id}/{reference_id}"
+    if (burst_id == "data") and (reference_id is None):
+        raise ValueError(f"In single burst case, the reference_id is mandatory")
+    path = f"bursts/{burst_id}" if burst_id != "data" else f"data/{reference_id}"
+    path_ok = burst_id if burst_id != "data" else f"data/{reference_id}"
     storage_opts = get_storage_options(kwargs)
     slc_path = f"{working_directory}/processed_data/{path_ok}/slc.ok"
     acquisition_id = None
@@ -1352,7 +1354,6 @@ def get_duration(attrs):
 
 def get_id_product(stac, burst_id: str | None = None, tile_name: str | None = None):
     import copy
-
     attrs = copy.deepcopy(stac)
     attrs["properties"].pop("created", None)
     attrs["properties"].pop("processing:datetime", None)
@@ -1363,7 +1364,11 @@ def get_id_product(stac, burst_id: str | None = None, tile_name: str | None = No
     relative_orbit = str(attrs["properties"]["sat:relative_orbit"]).rjust(3, "0")
     aux = "S"
     crc = get_crc(attrs)
-    hexadecimal = hex(int(attrs["properties"]["eopf:datatake_id"]))[2:].upper().rjust(6, "0")
+    try:
+        datatake_id_int = int(attrs["properties"]["eopf:datatake_id"])
+        hexadecimal = hex(datatake_id_int)[2:].upper().rjust(6, "0")
+    except (ValueError, TypeError, KeyError):
+        hexadecimal = "000000"
     polarization = get_polarization_code(attrs["properties"]["sar:polarizations"], True)
     id = f"{product_type}_{start_time}_{duration}_{platform}{relative_orbit}_{aux}{crc}_{hexadecimal}_{polarization}"
     if (burst_id is not None) and (burst_id != "data"):

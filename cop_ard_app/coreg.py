@@ -399,7 +399,6 @@ def coreg_single_burst(
 
     daz_drg = read(
         daz_drg_store_path,
-        consolidate_metadata=False,
         storage_options=get_storage_options(kwargs),
         as_type="xr.Dataset",
     )
@@ -454,10 +453,14 @@ def coreg_single_burst(
 
     measurements = read(
         measurements.store_path,
+        as_type="xr.Dataset",
         storage_options=get_storage_options(kwargs),
     )
+    if daz_drg is not None:
+        measurements["daz"] = daz_drg["daz"]
+        measurements["drg"] = daz_drg["drg"]
     # Update the 'conditions' group (orbits, ETAD, LUTs) and write to disk.
-    conditions = update_conditions(slc, LUT_daz_drg, conditions)
+    conditions = update_conditions(slc, measurements, LUT_daz_drg, conditions)
     conditions = write(
         conditions,
         normpath(f"{working_directory}/{path}/coreg/conditions"),
@@ -472,10 +475,6 @@ def coreg_single_burst(
         mode="w",
         storage_options=get_storage_options(kwargs),
     )
-
-    if daz_drg is not None:
-        measurements["daz"] = daz_drg["daz"]
-        measurements["drg"] = daz_drg["drg"]
 
     coreg = xr.DataTree.from_dict({"measurements": measurements, "conditions": conditions, "quality": quality})
     return (burst_id, coreg)
@@ -590,7 +589,12 @@ def stack_coregistration(
     return slcs
 
 
-def update_conditions(slc: xr.DataTree, daz_drg: xr.Dataset, conditions: xr.DataTree) -> xr.DataTree:
+def update_conditions(
+    slc: xr.DataTree,
+    measurements: xr.Dataset,
+    daz_drg_LUT: xr.Dataset,
+    conditions: xr.DataTree,
+) -> xr.DataTree:
     """
     Update and populate the 'conditions' group of the coregistered stack.
 
@@ -616,9 +620,9 @@ def update_conditions(slc: xr.DataTree, daz_drg: xr.Dataset, conditions: xr.Data
     conditions["orbit"] = updateOrbits(slc)
     # Consolidate and update ETAD information if available.
     if all(("conditions" in v) and ("ETAD" in v.conditions) for _, v in slc.orig.items()):
-        conditions["ETAD"] = updateETAD(slc)
+        conditions["ETAD"] = updateETAD(slc, measurements)
     # Generate the updated Doppler (phase_demod) LUT for the coregistered grid.
-    xLUT = updateLut(slc, daz_drg, "Grid.Col.DeltaKCOAPoly.Coefs", "phase_demod")
+    xLUT = updateLut(slc, daz_drg_LUT, "Grid.Col.DeltaKCOAPoly.Coefs", "phase_demod")
     conditions["phase_demod"] = xLUT
     return conditions
 
@@ -985,7 +989,7 @@ def finalize_coreg(
     nodes = slcs.bursts if multiburst else {"data": slcs}
 
     for k, v in nodes.items():
-        path = f"bursts/{k}" if multiburst else f"data"
+        path = f"bursts/{k}" if multiburst else f"data/{reference_id}"
         current_reference_path = normpath(f"{working_directory}/{path}/current_reference")
 
         if exists(current_reference_path, storage_options=storage_options):

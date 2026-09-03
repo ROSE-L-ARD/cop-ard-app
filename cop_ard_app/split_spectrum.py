@@ -12,7 +12,12 @@ from cop_ard_app.esd import estimate, find_global_shift
 from cop_ard_app.interf import get_mosaic_interf
 from cop_ard_app.io import Path, read, write, normpath
 from cop_ard_app.model import get_carrier_frequency
-from cop_ard_app.utils import get_bounding_box
+from cop_ard_app.utils import (
+    get_bounding_box,
+    split_slc_datatrees,
+    compute_iono_and_orb_height,
+    recompose_slc_datatrees,
+)
 
 
 @timeit
@@ -229,24 +234,33 @@ def remove_iono_surface(
 
 
 def split_spectrum(
-    reference_slcs: xr.DataTree,
-    secondary_slcs: xr.DataTree,
+    slcs: xr.DataTree,
     multilook: dict,
     frequency_offset: float,
     bandwidth: float,
     cohe_th: float,
-    H_iono: float,
-    H_orb: float,
     wdir_path: str,
     multiburst: bool,
+    reference_id: str,
     esd_poly_degree: int = 2,
     split_spectrum_poly_degree: int = 2,
-    norm: int = 1,
+    h_iono: float | None = None,
     enable_dask: bool = True,
-    reference_id: str | None = None,
 ):
-
     wdir_path = Path(wdir_path)
+    reference_slcs, secondary_slcs = split_slc_datatrees(
+        slcs=slcs,
+        reference_id=reference_id,
+        multiburst=multiburst,
+    )
+    h_orb, h_iono = compute_iono_and_orb_height(
+        reference_slcs=reference_slcs,
+        secondary_slcs=secondary_slcs,
+        wdir_path_tmp=wdir_path,
+        acquisition_id=reference_id,
+        iono_height_input=h_iono,
+    )
+
     # evaluate bounding box
     bbox = tuple(get_bounding_box(reference_slcs, "coreg/measurements", multiburst=multiburst))
 
@@ -287,24 +301,27 @@ def split_spectrum(
     poly_corr = fit_ionosphere(
         phase_iono.phase,
         phase_iono.azimuth_time_raw,
-        H_iono,
-        H_orb,
+        h_iono,
+        h_orb,
         degree=split_spectrum_poly_degree,
-        norm=norm,
         weights=phase_iono.coherence,
     )
 
     # remove ionosphere from cslc and update structure
     logger.debug("remove ionosphere from cslc and update structure")
-    slcs = remove_iono_surface(
+    secondary_slcs = remove_iono_surface(
         secondary_slcs,
         poly_corr,
-        H_iono,
-        H_orb,
+        h_iono,
+        h_orb,
         wdir_path=wdir_path,
         multiburst=multiburst,
         enable_dask=enable_dask,
         reference_id=reference_id,
     )
-
+    slcs = recompose_slc_datatrees(
+        reference_slcs,
+        secondary_slcs,
+        multiburst=multiburst,
+    )
     return slcs

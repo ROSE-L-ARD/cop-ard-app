@@ -83,7 +83,6 @@ def estimate_poly_matching(
     disparity_map: xr.DataTree,
     degree: int = 2,
     cohe_th: float = 0.3,
-    norm: int = 1,
     kernel_shape: list = [15, 15],
     enable_dask: bool = True,
 ) -> xr.DataTree:
@@ -126,13 +125,13 @@ def estimate_poly_matching(
         enable_dask=enable_dask,
     )
 
-    x_poly = get_polynomial_correction(acquisition_ids, results, "dx", degree=degree, norm=norm)
-    y_poly = get_polynomial_correction(acquisition_ids, results, "dy", degree=degree, norm=norm)
+    x_poly = get_polynomial_correction(acquisition_ids, results, "dx", degree=degree)
+    y_poly = get_polynomial_correction(acquisition_ids, results, "dy", degree=degree)
 
     return x_poly, y_poly
 
 
-def get_polynomial_correction(acquisition_ids, results, dim: str, degree: int, norm: int):
+def get_polynomial_correction(acquisition_ids, results, dim: str, degree: int, norm: int = 1):
     poly_corr = {}
     for id in acquisition_ids:
         to_merge = [ds for _, acquisition_id, ds in results if acquisition_id == id]
