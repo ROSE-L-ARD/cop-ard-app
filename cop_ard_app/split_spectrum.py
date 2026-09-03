@@ -4,7 +4,7 @@ from typing import cast
 import numpy as np
 import xarray as xr
 from cop_ard_core.logger import logger, timeit
-from cop_ard_core.split_spectrum import fit_ionosphere, joint_unwrap, reconstruct_iono_surface, split_spectrum_core
+from cop_ard_core.split_spectrum import fit_ionosphere, joint_unwrap, joint_unwrap_delta_mean, reconstruct_iono_surface, split_spectrum_core, split_spectrum_core_delta_mean
 from cop_ard_core.utils import get_azimuth_time_raw, get_best_pol
 
 from cop_ard_app.computation import map, map_blocks
@@ -14,6 +14,16 @@ from cop_ard_app.io import Path, read, write, normpath
 from cop_ard_app.model import get_carrier_frequency
 from cop_ard_app.utils import get_bounding_box
 
+def get_phase_corr_from_x_poly(azimuth_time: xr.DataArray, slant_range_time: xr.DataArray, x_poly: xr.Dataset, freq: float) -> xr.DataArray:
+    from numpy.polynomial.polynomial import polygrid2d
+
+    out_coords = {'azimuth_time': azimuth_time.values, 'slant_range_time': slant_range_time.values}
+
+    az_sc = ((azimuth_time - np.datetime64(x_poly.attrs['off_y'], 'ns')).astype(float) -  x_poly.offset[0]) / x_poly.scale_fact[0]
+    rg_sc = (slant_range_time -  x_poly.offset[1]) / x_poly.scale_fact[1]
+
+    rg_corr = xr.DataArray(polygrid2d(az_sc.values, rg_sc.values, x_poly.values), dims=['azimuth_time', 'slant_range_time'], coords=out_coords)
+    return 2 * np.pi * freq * rg_corr
 
 @timeit
 def separate_dispersive_spectrum_components(
@@ -24,6 +34,7 @@ def separate_dispersive_spectrum_components(
     cohe_th: float,
     a_min: float,
     r_min: float,
+    x_poly: xr.Dataset,
     y_poly: xr.Dataset,
     wdir_path: Path,
     multilook: dict | None = None,
@@ -37,7 +48,7 @@ def separate_dispersive_spectrum_components(
     f0 = get_carrier_frequency(reference_slcs, "coreg/measurements/cstack", multiburst=multiburst)
     f_l_tot = f0 - frequency_offset
     f_h_tot = f0 + frequency_offset
-
+    
     # lower band interferogram
     mosaic_l = get_mosaic_interf(
         reference_slcs,
@@ -53,6 +64,15 @@ def separate_dispersive_spectrum_components(
         chunks=chunks,
     )
 
+    if x_poly is not None:
+        # compute phase correction to be applied to each subband
+        ph_corr = get_phase_corr_from_x_poly(mosaic_l.azimuth_time, mosaic_l.slant_range_time, x_poly[mosaic_l.acquisition_id.values[0]], frequency_offset)
+        print(f"APPLY CORRECTIONS {ph_corr.min().values, ph_corr.max().values}")
+    else:
+        ph_corr = 0.
+
+    mosaic_l['phase'] = mosaic_l['phase'] + ph_corr
+
     # upper band interferogram
     mosaic_h = get_mosaic_interf(
         reference_slcs,
@@ -67,6 +87,7 @@ def separate_dispersive_spectrum_components(
         multiburst=multiburst,
         chunks=chunks,
     )
+    mosaic_h['phase'] = mosaic_h['phase'] - ph_corr
 
     if wdir_path is not None:
         # save to disk
@@ -84,6 +105,101 @@ def separate_dispersive_spectrum_components(
 
     # separate dispersive and non-dispersive components
     phase_iono, phase_nd = split_spectrum_core(phase_tot_l, phase_tot_h, f0, f_l_tot, f_h_tot)
+    phase_iono = phase_iono.to_dataset(name="phase")
+    # assign azimuth time of raw image in order to enable interpolation
+    phase_iono["azimuth_time_raw"] = mosaic_l["azimuth_time_raw"]
+    phase_iono["coherence"] = coherence
+
+    if wdir_path is not None:
+        # save to disk
+        phase_iono_path = wdir_path.append("phase_iono")
+        phase_iono = write(phase_iono, data_path=phase_iono_path, mode="w")
+        phase_nd_path = wdir_path.append("phase_nd")
+        phase_nd = write(phase_nd, data_path=phase_nd_path, mode="w")
+
+    return phase_iono, phase_nd
+
+
+@timeit
+def separate_dispersive_spectrum_components_delta_mean(
+    reference_slcs: xr.DataTree,
+    secondary_slcs: xr.DataTree,
+    frequency_offset: float,
+    bandwidth: float,
+    cohe_th: float,
+    a_min: float,
+    r_min: float,
+    x_poly: xr.Dataset,
+    y_poly: xr.Dataset,
+    wdir_path: Path,
+    multilook: dict | None = None,
+    multiburst: bool = True,
+    enable_dask: bool = True,
+    chunks={"azimuth_time": 4096, "slant_range_time": 4096},
+    reference_id: str | None = None,
+):
+
+    # define center band frequencies
+    f0 = get_carrier_frequency(reference_slcs, "coreg/measurements/cstack", multiburst=multiburst)
+    f_l_tot = f0 - frequency_offset
+    f_h_tot = f0 + frequency_offset
+    
+    # lower band interferogram
+    mosaic_l = get_mosaic_interf(
+        reference_slcs,
+        secondary_slcs,
+        f0=-frequency_offset,
+        bw=bandwidth,
+        a_min=a_min,
+        r_min=r_min,
+        multilook=multilook,
+        y_poly=y_poly,
+        enable_dask=enable_dask,
+        multiburst=multiburst,
+        chunks=chunks,
+    )
+
+    if x_poly is not None:
+        # compute phase correction to be applied to each subband
+        ph_corr = get_phase_corr_from_x_poly(mosaic_l.azimuth_time, mosaic_l.slant_range_time, x_poly[mosaic_l.acquisition_id.values[0]], frequency_offset)
+        print(f"APPLY CORRECTIONS {ph_corr.min().values, ph_corr.max().values}")
+    else:
+        ph_corr = 0.
+
+    mosaic_l['phase'] = mosaic_l['phase'] + ph_corr
+
+    # upper band interferogram
+    mosaic_h = get_mosaic_interf(
+        reference_slcs,
+        secondary_slcs,
+        f0=frequency_offset,
+        bw=bandwidth,
+        a_min=a_min,
+        r_min=r_min,
+        multilook=multilook,
+        y_poly=y_poly,
+        enable_dask=enable_dask,
+        multiburst=multiburst,
+        chunks=chunks,
+    )
+    mosaic_h['phase'] = mosaic_h['phase'] - ph_corr
+
+    if wdir_path is not None:
+        # save to disk
+        mosaic_l_path = wdir_path.append("mosaic_l")
+        mosaic_l = cast(xr.Dataset, write(mosaic_l, data_path=mosaic_l_path, mode="w"))
+        mosaic_h_path = wdir_path.append("mosaic_h")
+        mosaic_h = cast(xr.Dataset, write(mosaic_h, data_path=mosaic_h_path, mode="w"))
+
+    # joint interferogram phase unwrapping
+    phase_delta, phase_mean, coherence = joint_unwrap_delta_mean(
+        mosaic_l.coherence, mosaic_h.coherence, mosaic_l.phase, mosaic_h.phase, cohe_th=cohe_th
+    )
+    if "phase_ramp" in mosaic_l.data_vars:
+        phase_mean = phase_mean + mosaic_l.phase_ramp
+
+    # separate dispersive and non-dispersive components
+    phase_iono, phase_nd = split_spectrum_core_delta_mean(phase_delta, phase_mean, f0, f_l_tot, f_h_tot)
     phase_iono = phase_iono.to_dataset(name="phase")
     # assign azimuth time of raw image in order to enable interpolation
     phase_iono["azimuth_time_raw"] = mosaic_l["azimuth_time_raw"]
@@ -244,6 +360,7 @@ def split_spectrum(
     norm: int = 1,
     enable_dask: bool = True,
     reference_id: str | None = None,
+    x_poly: xr.Dataset | None = None,
 ):
 
     wdir_path = Path(wdir_path)
@@ -263,9 +380,14 @@ def split_spectrum(
         y_poly = find_global_shift(esd, poly_degree=esd_poly_degree)
         # y_poly = None
         # separate dispersive and non-dispersive components
-        logger.debug("separate dispersive and non-dispersive components")
     else:
         y_poly = None
+
+    logger.debug("separate dispersive and non-dispersive components")
+    if y_poly is not None:
+        for id in y_poly.data_vars:
+            print(f"ESD {id}: {y_poly[id].values}")
+    # y_poly = None
 
     phase_iono, phase_nd = separate_dispersive_spectrum_components(
         reference_slcs,
@@ -275,6 +397,7 @@ def split_spectrum(
         cohe_th=cohe_th,
         a_min=bbox[0],
         r_min=bbox[2],
+        x_poly=x_poly,
         y_poly=y_poly,
         multilook=multilook,
         wdir_path=wdir_path,
