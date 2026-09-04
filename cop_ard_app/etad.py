@@ -115,8 +115,8 @@ def discover_etaddate_slcsdate(slcs: xr.DataTree, etad: xr.DataTree, multiburst:
         SLCs that correspond to the provided ETAD data.
     """
     # Extract the start and end azimuth times of the ETAD correction's validity from its attributes.
-    tstart = np.datetime64(etad.attrs["azimuthTimeMin"], "ns")
-    tend = np.datetime64(etad.attrs["azimuthTimeMax"], "ns")
+    tstart = np.datetime64(etad.attrs["azimuthTimeMin"].rstrip("Z|z"), "ns")
+    tend = np.datetime64(etad.attrs["azimuthTimeMax"].rstrip("Z|z"), "ns")
 
     # Initialize a set to store the unique matching acquisition date IDs.
     dateid = set()

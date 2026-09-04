@@ -175,7 +175,7 @@ def extract_subband(cslc: xr.DataArray, bw: float, f0: float, dim_transf: str = 
     }
 
     frange = xr.DataArray(
-        scipy.fft.fftshift(scipy.fft.fft(cslc.values, norm="ortho", axis=axis), axes=(axis,)),
+        scipy.fft.fftshift(scipy.fft.fft(cslc.fillna(0j).values, norm="ortho", axis=axis), axes=(axis,)),
         dims=freq_dim,
         coords=freq_coords,
     )
@@ -189,7 +189,7 @@ def extract_subband(cslc: xr.DataArray, bw: float, f0: float, dim_transf: str = 
     )
 
 
-def get_bounding_box(slcs: xr.DataTree, path: str) -> list:
+def get_bounding_box(slcs: xr.DataTree, path: str, multiburst: bool=True) -> list:
     """
     Compute the bounding box of a burst stack in azimuth time and slant range time.
 
@@ -209,8 +209,7 @@ def get_bounding_box(slcs: xr.DataTree, path: str) -> list:
         in azimuth time and slant range time.
     """
     azimuth_time, slant_range_time = [], []
-
-    for burst in slcs.values():
+    for burst in (slcs.bursts if multiburst else {"data": slcs}).values():
         if burst[path].azimuth_time.size > 0:
             azimuth_time += [
                 burst[path].azimuth_time.min().values,
@@ -282,7 +281,7 @@ def get_poly(poly, poly_type: str, dd: str):
     return poly
 
 
-@timeit
+# @timeit
 def get_stack_phramp_diff(
     acquisition_id: xr.DataArray,
     azimuth_time: xr.DataArray,

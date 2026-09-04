@@ -1172,7 +1172,7 @@ def decode_poly(v_poly: xr.Dataset, name: str, stack: xr.Dataset) -> xr.Dataset:
     return decoded_ds
 
 
-def get_carrier_frequency(slcs: xr.DataTree, path: str) -> float:
+def get_carrier_frequency(slcs: xr.DataTree, path: str, multiburst: bool=True) -> float:
     """
     Compute the mean carrier frequency of the bursts.
 
@@ -1189,8 +1189,7 @@ def get_carrier_frequency(slcs: xr.DataTree, path: str) -> float:
         Average carrier frequency.
     """
     f0 = []
-
-    for burst in slcs.values():
+    for burst in (slcs.bursts if multiburst else {"data": slcs}).values():
         _, annot = next(iter(burst[path].attrs.items()))
         f0.append((annot["RadarCollection"]["TxFrequency"]["Max"] + annot["RadarCollection"]["TxFrequency"]["Min"]) / 2)
 
