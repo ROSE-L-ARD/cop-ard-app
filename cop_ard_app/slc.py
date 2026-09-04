@@ -43,6 +43,7 @@ from cop_ard_app.model import (
     get_coefficients,
     get_footprint,
 )
+from cop_ard_app.utils import get_best_pol
 
 cop_ard_app.readers.__file__
 
@@ -170,14 +171,15 @@ def import_image(
     annot = sync_sicd_metadata(annot)
 
     # Compute the coordinate arrays (azimuth/range in meters and time).
-    azimuth_m, slant_range_m = get_az_rg_meters(annot[pols[0]])
-    azimuth_time, slant_range_time = get_az_rg_times(annot[pols[0]])
+    best_pol = get_best_pol(pols)
+    azimuth_m, slant_range_m = get_az_rg_meters(annot[best_pol])
+    azimuth_time, slant_range_time = get_az_rg_times(annot[best_pol])
 
     # Get the acquisition date from the metadata.
-    collector_name = str(path_to_dict(annot[pols[0]], "CollectionInfo.CollectorName"))
-    acquisition_date = str(path_to_dict(annot[pols[0]], "Timeline.CollectStart")).replace("Z", "")
+    collector_name = str(path_to_dict(annot[best_pol], "CollectionInfo.CollectorName"))
+    acquisition_date = str(path_to_dict(annot[best_pol], "Timeline.CollectStart")).replace("Z", "")
     if multiburst:
-        absolute_number = str(path_to_dict(annot[pols[0]], "CollectionInfo.Parameters.ABSOLUTE_ORBIT"))
+        absolute_number = str(path_to_dict(annot[best_pol], "CollectionInfo.Parameters.ABSOLUTE_ORBIT"))
     else:
         absolute_number = acquisition_date
 
@@ -202,11 +204,11 @@ def import_image(
     chunks_ = chunks.copy()
     if do_import:
         dims = ["polarization", "acquisition_id", "azimuth_time", "slant_range_time"]
-        shape = [len(pols), 1, annot[pols[0]]["ImageData"]["NumCols"], annot[pols[0]]["ImageData"]["NumRows"]]
+        shape = [len(pols), 1, annot[best_pol]["ImageData"]["NumCols"], annot[best_pol]["ImageData"]["NumRows"]]
         coords["polarization"] = ("polarization", pols)
     else:
         dims = ["azimuth_time", "slant_range_time"]
-        shape = [annot[pols[0]]["ImageData"]["NumCols"], annot[pols[0]]["ImageData"]["NumRows"]]
+        shape = [annot[best_pol]["ImageData"]["NumCols"], annot[best_pol]["ImageData"]["NumRows"]]
         chunks_.pop("polarization", None)
         chunks_.pop("acquisition_id", None)
 

@@ -4,10 +4,10 @@ from typing import cast
 import numpy as np
 import xarray as xr
 from cop_ard_core.esd import compute_azimuth_shifts, optimize_curvature
-from cop_ard_core.utils import get_best_pol
+from cop_ard_core import detrend
 
 from cop_ard_app.computation import map, map_blocks
-from cop_ard_core import detrend
+from cop_ard_app.utils import get_best_pol
 
 
 def esd_single_burst(

@@ -4,17 +4,13 @@ from typing import cast
 import numpy as np
 import xarray as xr
 from cop_ard_core.logger import timeit
-from cop_ard_core.utils import compute_interf_norm, time_to_pixel, wrap
+from cop_ard_core.utils import compute_interf_norm, time_to_pixel, wrap, get_azimuth_time_raw
 
 from cop_ard_app.computation import map
 from cop_ard_app.utils import (
     extract_subband,
-    get_stack_phramp_diff,
-)
-
-from cop_ard_core.utils import (
     get_best_pol,
-    get_azimuth_time_raw,
+    get_stack_phramp_diff,
 )
 
 

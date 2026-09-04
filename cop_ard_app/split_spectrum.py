@@ -12,7 +12,7 @@ from cop_ard_app.esd import estimate, find_global_shift
 from cop_ard_app.interf import get_mosaic_interf
 from cop_ard_app.io import Path, read, write, normpath
 from cop_ard_app.model import get_carrier_frequency
-from cop_ard_app.utils import get_bounding_box
+from cop_ard_app.utils import get_bounding_box, get_best_pol
 
 def get_phase_corr_from_x_poly(azimuth_time: xr.DataArray, slant_range_time: xr.DataArray, x_poly: xr.Dataset, freq: float) -> xr.DataArray:
     from numpy.polynomial.polynomial import polygrid2d
