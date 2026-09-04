@@ -219,7 +219,7 @@ def update_orbit(
 @timeit
 def import_ORBIT(
     slcs: xr.DataTree,
-    acquisition_dates: list[np.datetime64],
+    acquisition_ids: list[str],
     orbit_files: list[Path],
     wdir_path: str,
     multiburst: bool = False,
@@ -255,10 +255,10 @@ def import_ORBIT(
     orbit_paths = []
     # --- Find Relevant Orbit Files ---
     # For each acquisition date, determine the total time span covered by all its bursts.
-    for acquisition_date in acquisition_dates:
+    for acquisition_id in acquisition_ids:
         for counter, (k, slc) in enumerate((slcs.bursts if multiburst else {"data": slcs}).items()):
-            if acquisition_date in list(slc.orig.keys()):
-                az = slc.orig[acquisition_date].measurements.azimuth_time
+            if acquisition_id in list(slc.orig.keys()):
+                az = slc.orig[acquisition_id].measurements.azimuth_time
                 s, e = az.min().values, az.max().values
                 if counter == 0:
                     start_time = s

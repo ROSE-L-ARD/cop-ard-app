@@ -548,12 +548,12 @@ def split_slc_datatrees(
         # Populate reference tree
         ref_path = f"{prefix}coreg"
         reference_slcs[ref_path] = v.coreg
-        reference_slcs[ref_path]["measurements"] = v.coreg.measurements.sel(acquisition_id=[reference_id])
+        reference_slcs[ref_path]["measurements"] = v.coreg.measurements.to_dataset().sel(acquisition_id=[reference_id])
         reference_slcs[f"{prefix}orig"] = v.orig
 
         # Populate secondary tree
         sec_path = f"{prefix}coreg/measurements"
-        secondary_slcs[sec_path] = v.coreg.measurements.drop_sel(acquisition_id=reference_id)
+        secondary_slcs[sec_path] = v.coreg.measurements.to_dataset().drop_sel(acquisition_id=reference_id)
 
     return reference_slcs, secondary_slcs
 
@@ -683,6 +683,3 @@ def sanitize_coordinates(ds: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataA
             clean_coords[coord_name] = (coord_var.dims, coord_var.values)
 
     return ds.assign_coords(clean_coords)
-
-
-

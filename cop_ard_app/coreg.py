@@ -11,7 +11,7 @@ from scipy.constants import speed_of_light
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.io import get_storage_options, normpath, path_to_dict, read, save_empty_dataset, write, exists
 from cop_ard_app.model import get_coefficients
-from cop_ard_app.slc import updateETAD, updateOrbits
+from cop_ard_app.slc import updateETAD, updateOrbits, updateLookVector
 from cop_ard_app.utils import get_margin
 
 
@@ -460,7 +460,7 @@ def coreg_single_burst(
         measurements["daz"] = daz_drg["daz"]
         measurements["drg"] = daz_drg["drg"]
     # Update the 'conditions' group (orbits, ETAD, LUTs) and write to disk.
-    conditions = update_conditions(slc, measurements, LUT_daz_drg, conditions)
+    conditions = update_conditions(slc, measurements, simulation_reference, LUT_daz_drg, conditions)
     conditions = write(
         conditions,
         normpath(f"{working_directory}/{path}/coreg/conditions"),
@@ -592,6 +592,7 @@ def stack_coregistration(
 def update_conditions(
     slc: xr.DataTree,
     measurements: xr.Dataset,
+    simulation: xr.Dataset,
     daz_drg_LUT: xr.Dataset,
     conditions: xr.DataTree,
 ) -> xr.DataTree:
@@ -621,6 +622,8 @@ def update_conditions(
     # Consolidate and update ETAD information if available.
     if all(("conditions" in v) and ("ETAD" in v.conditions) for _, v in slc.orig.items()):
         conditions["ETAD"] = updateETAD(slc, measurements)
+
+    conditions["look_vector"] = updateLookVector(measurements, simulation)
     # Generate the updated Doppler (phase_demod) LUT for the coregistered grid.
     xLUT = updateLut(slc, daz_drg_LUT, "Grid.Col.DeltaKCOAPoly.Coefs", "phase_demod")
     conditions["phase_demod"] = xLUT

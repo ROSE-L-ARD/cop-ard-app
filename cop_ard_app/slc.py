@@ -958,13 +958,6 @@ def updateETAD(
                 method="cubic",
             )
 
-            # Convert time delays (seconds) to interferometric phase (radians)
-            # if "tropocorr" in etad_interp:
-            #     etad_interp["tropocorr"] = -2 * np.pi * center_frequency * etad_interp["tropocorr"]
-            #
-            # if "lowrescorr" in etad_interp:
-            #     etad_interp["lowrescorr"] = -2 * np.pi * center_frequency * etad_interp["lowrescorr"]
-
             # Assign acquisition coordinate and stack dimension
             etad_interp = etad_interp.assign_coords(acquisition_id=k).expand_dims("acquisition_id")
             etads.append(etad_interp)
@@ -982,3 +975,51 @@ def updateETAD(
         return consolidated_etad
 
     return None
+
+
+def updateLookVector(
+    measurements: xr.Dataset,
+    simulation: xr.Dataset,
+    grid_size: Sequence[int] = (200, 200),
+) -> xr.Dataset | None:
+
+    logger.debug("LOOK VECTOR INTERPOLATION")
+    dem_distance = simulation.dem_distance.squeeze()
+    norm = np.linalg.norm(dem_distance.values, ord=2, axis=-1, keepdims=True)
+    look_vector_arr = dem_distance.values / norm
+    look_vector_arr = np.moveaxis(look_vector_arr, -1, 0)
+
+    ds_look = xr.Dataset(data_vars={"look_vector": (("axis", "y", "x"), look_vector_arr)}, coords={"axis": [0, 1, 2]})
+
+    az_min, az_max = float(simulation.azimuth_time.min()), float(simulation.azimuth_time.max())
+    rg_min, rg_max = float(simulation.slant_range_time.min()), float(simulation.slant_range_time.max())
+
+    az_points = np.linspace(az_min, az_max, simulation.sizes["y"])
+    rg_points = np.linspace(rg_min, rg_max, simulation.sizes["x"])
+
+    points = (az_points, rg_points)
+
+    azimuth_time = measurements.azimuth_time.values
+    slant_range_time = measurements.slant_range_time.values
+
+    idx_az = np.linspace(0, len(azimuth_time) - 1, grid_size[0], dtype=int)
+    idx_rg = np.linspace(0, len(slant_range_time) - 1, grid_size[1], dtype=int)
+    az_sampled = azimuth_time[idx_az]
+    rg_sampled = slant_range_time[idx_rg]
+
+    az_grid, rg_grid = np.meshgrid(az_sampled, rg_sampled, indexing="ij")
+    xi = (az_grid, rg_grid)
+
+    target_coords = {"azimuth_time": az_sampled, "slant_range_time": rg_sampled}
+
+    ds_interp = interp_dataset_scaled(
+        data=ds_look,
+        xi=xi,
+        common_dims=("y", "x"),
+        points=points,
+        rename={"y": "azimuth_time", "x": "slant_range_time"},
+        target_coords=target_coords,
+        method="cubic",
+    )
+
+    return ds_interp

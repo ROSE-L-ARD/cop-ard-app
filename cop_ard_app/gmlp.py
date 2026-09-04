@@ -88,10 +88,10 @@ def stack_gmlp(
     for k, v in (cmlp_tree.bursts if multiburst else {"data": cmlp_tree}).items():
         s = (simulation_tree.bursts[k] if multiburst else simulation_tree).to_dataset()
         s_ml = simulation_ml_tree["bursts"][k] if multiburst else simulation_ml_tree
-        for date,cmlp in v.cmlp.items():
-            a = (k, date,cmlp, s, s_ml)
+        for date, cmlp in v.cmlp.items():
+            a = (k, date, cmlp, s, s_ml)
             args.append(a)
-        
+
     # Transpose the list of tuples for the map function.
     args = list(zip(*args))
 
@@ -118,7 +118,7 @@ def stack_gmlp(
     # --- Assemble Results ---
     gmlp_tree = xr.DataTree()
     # Reconstruct the DataTree from the list of results returned by the workers.
-    for (burst_id,date,gmlp) in results:
+    for burst_id, date, gmlp in results:
         if multiburst:
             gmlp_tree[f"bursts/{burst_id}/{date}"] = gmlp
         else:
@@ -187,6 +187,8 @@ def single_gmlp(
     # Get warp parameters from kwargs or use default values.
     ov_fact = kwargs.get("warp_ov_fact", 100_000)
     kernel_shape = kwargs.get("warp_kernel_shape", np.array([11, 11]))
+    if not (isinstance(kernel_shape, np.ndarray)):
+        kernel_shape = np.array(kernel_shape)
     kaiser_beta = kwargs.get("warp_kaiser_beta", 6)
 
     # Pre-compute the sinc kernels for x and y directions.
@@ -223,8 +225,8 @@ def single_gmlp(
 
 
 def map_geocoding_cmlp(
-    burst_id:str,
-    date:str,
+    burst_id: str,
+    date: str,
     cmlp: xr.DataTree,
     simulation: xr.Dataset,
     simulation_ml: dict,
@@ -235,7 +237,7 @@ def map_geocoding_cmlp(
     enable_dask: bool = True,
     border: int = 10,
     **kwargs,
-    ) -> tuple[str,str,xr.Dataset]:
+) -> tuple[str, str, xr.Dataset]:
     """
     Orchestrate the block-wise geocoding of a single coregistered SLC.
 
@@ -328,9 +330,9 @@ def map_geocoding_cmlp(
         crs=selection.rio.crs.to_string(),
         data_path=normpath(f"{data_path_tmp}/gmlp/{date}"),
         storage_options=get_storage_options(kwargs, key="storage_options_dynamic"),
-        skip_read=False
+        skip_read=False,
     )
-    
+
     image = image.phase.isel({k: 0 for k in image.phase.dims if k not in ["y", "x"]})
     # --- Map the Geocoding Worker Function ---
     # This call applies the `warp_cmlp` function to each block of the simulation grid.
@@ -346,7 +348,7 @@ def map_geocoding_cmlp(
     map_blocks(
         blockwise_warp_cmlp,
         image,
-        args=(selection, data,  kernel),
+        args=(selection, data, kernel),
         kwargs=kwargs
         | {
             "dtaz": radar_spacing["azimuth_time"].astype(float),
@@ -359,10 +361,10 @@ def map_geocoding_cmlp(
     gmlp = read(
         normpath(f"{data_path_tmp}/gmlp/{date}"),
         storage_options=get_storage_options(kwargs, key="storage_options_dynamic"),
-        as_type="xr.Dataset"
+        as_type="xr.Dataset",
     )
 
-    return (burst_id,date,gmlp)
+    return (burst_id, date, gmlp)
 
 
 def blockwise_warp_cmlp(
@@ -376,7 +378,7 @@ def blockwise_warp_cmlp(
     method: str = "linear",
     chunk: dict = {},
     **kwargs,
-    ) -> xr.Dataset:
+) -> xr.Dataset:
     """
     Warp coregistered SLC data to a ground-projected grid (Geocoded SLC).
 
