@@ -370,8 +370,8 @@ def coreg_single_burst(
     )
     range_grid_spacing = 2 * single_pol_annotation["Grid"]["Row"]["SS"] / speed_of_light
     chunksizes = {
-        "azimuth_time": measurements.unify_chunks().chunksizes["azimuth_time"][0],
-        "slant_range_time": measurements.unify_chunks().chunksizes["slant_range_time"][0],
+        "azimuth_time": measurements.chunksizes["azimuth_time"][0],
+        "slant_range_time": measurements.chunksizes["slant_range_time"][0],
         "acquisition_id": 10,
     }
 
@@ -665,7 +665,7 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
     if any(coeff is None for coeff in coreg_arp_coeffs.values()):
         raise ValueError("Missing ARP polynomial coefficients in metadata.")
     coreg_arp_coeffs = cast(dict[str, np.ndarray], coreg_arp_coeffs)
-    t0 = np.datetime64(annot["Timeline"]["CollectStart"], "ns")
+    t0 = np.datetime64(annot["Timeline"]["CollectStart"].rstrip("Z|z"), "ns")
     acquisition_date_arp_coeffs = {}
     acquisition_date_t0 = {}
     acquisition_date_orbit_type = {}
@@ -675,7 +675,7 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
         acquisition_date_arp_coeffs[acquisition_date] = {
             e: get_coefficients(f"Position.ARPPoly.{e}.Coefs", acquisition_date_annot) for e in ["X", "Y", "Z"]
         }
-        acquisition_date_t0[acquisition_date] = np.datetime64(annot["Timeline"]["CollectStart"], "ns")
+        acquisition_date_t0[acquisition_date] = np.datetime64(annot["Timeline"]["CollectStart"].rstrip("Z|z"), "ns")
         if any(coeff is None for coeff in acquisition_date_arp_coeffs[acquisition_date].values()):
             raise ValueError("Missing ARP polynomial coefficients in metadata.")
         # Determine the type of orbit data used for this acquisition.
@@ -986,7 +986,6 @@ def finalize_coreg(
     nodes = slcs.bursts if multiburst else {"data": slcs}
 
     for k, v in nodes.items():
-        logger.debug(f"node: {k}")
         path = f"bursts/{k}" if multiburst else f"data"
         current_reference_path = normpath(f"{working_directory}/{path}/current_reference")
 
@@ -1007,20 +1006,13 @@ def finalize_coreg(
                 acquisition_id=("acquisition_id", c_ids), acquisition_date=("acquisition_id", c_dates)
             )
             new_coreg_ds = xr.concat([coreg_ds, cr_ds], dim="acquisition_id").sortby("acquisition_date")
-            logger.debug(f"coreg_ds: {new_coreg_ds}")
 
             if multiburst:
-                logger.debug(f"MODIFY")
                 slcs[path].coreg.measurements = new_coreg_ds
                 slcs[path].orig[reference_id].measurements["slc"] = cr_ds.cstack
-                logger.debug(f"slcs orig: {slcs[path].orig[reference_id].measurements}")
-                logger.debug(f"slcs coreg: {slcs[path].coreg.measurements}")
             else:
-                logger.debug(f"SM MOD")
                 slcs.coreg.measurements = new_coreg_ds
                 slcs.orig[reference_id].measurements["slc"] = cr_ds.cstack
-                logger.debug(f"slcs orig: {slcs.orig[reference_id].measurements}")
-                logger.debug(f"slcs coreg: {slcs.coreg.measurements}")
         else:
             bursts_to_remove.append(k)
 

@@ -212,7 +212,6 @@ def import_image(
         chunks_.pop("polarization", None)
         chunks_.pop("acquisition_id", None)
 
-    logger.debug(chunks_)
     image = generate_empty_dataset(
         data_vars=["slc"],
         dims={"slc": dims},
