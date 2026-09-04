@@ -259,7 +259,11 @@ def compute_stack_pearson_coefficient(
         .swap_dims(azimuth_time="y", slant_range_time="x")
         .rename(acquisition_id="z")
         .transpose("y", "x", "z")
-    ).unify_chunks()
+        .chunk({'y': stack.chunksizes['azimuth_time'][0],
+             'x': stack.chunksizes['slant_range_time'][0],
+             'z': stack.chunksizes['acquisition_id'][0]})
+    )
+
 
     # Patches to be used to cross-correlate initialization
     cc_patches = initialize_patches(
