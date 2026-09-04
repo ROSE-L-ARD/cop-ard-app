@@ -370,8 +370,8 @@ def coreg_single_burst(
     )
     range_grid_spacing = 2 * single_pol_annotation["Grid"]["Row"]["SS"] / speed_of_light
     chunksizes = {
-        "azimuth_time": measurements.unify_chunks().chunksizes["azimuth_time"][0],
-        "slant_range_time": measurements.unify_chunks().chunksizes["slant_range_time"][0],
+        "azimuth_time": measurements.chunksizes["azimuth_time"][0],
+        "slant_range_time": measurements.chunksizes["slant_range_time"][0],
         "acquisition_id": 10,
     }
 
