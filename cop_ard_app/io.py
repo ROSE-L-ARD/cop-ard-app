@@ -375,22 +375,9 @@ def check_write_arguments(
         # Use existing name if present, otherwise default to "v"
         _data = data.to_dataset(name=data.name or "v")
 
-    if isinstance(_data, xr.Dataset):
-        fix_string_coords(_data)
-    else:
-        for node in _data.leaves:
-            fix_string_coords(node)
-
     if not isinstance(_data, (xr.Dataset, xr.DataTree)):
         raise ValueError(f"Expected xr.Dataset or xr.DataTree, got {type(_data)}")
     return mode, _file_path, _data, _data_type
-
-
-def fix_string_coords(ds: xr.Dataset | xr.DataTree):
-    updates = {k: v.astype(object) for k, v in ds.coords.items() if v.dtype.kind in ["U", "S"]}
-    if updates:
-        ds.coords.update(updates)
-    return
 
 
 def validate_encoding(data: Union[xr.Dataset, xr.DataTree], encoding: dict | None) -> dict | None:
@@ -398,7 +385,7 @@ def validate_encoding(data: Union[xr.Dataset, xr.DataTree], encoding: dict | Non
     Validates a user-provided encoding dictionary against the data object.
     Strips out invalid variables and warns on unknown encoding parameters.
     """
-    if not encoding:
+    if encoding is None:
         return None
 
     # Get a flat list of all variables in the Dataset or DataTree
