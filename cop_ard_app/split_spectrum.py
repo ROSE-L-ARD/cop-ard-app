@@ -67,7 +67,7 @@ def separate_dispersive_spectrum_components(
     if x_poly is not None:
         # compute phase correction to be applied to each subband
         ph_corr = get_phase_corr_from_x_poly(mosaic_l.azimuth_time, mosaic_l.slant_range_time, x_poly[mosaic_l.acquisition_id.values[0]], frequency_offset)
-        print(f"APPLY CORRECTIONS {ph_corr.min().values, ph_corr.max().values}")
+        logger.debug(f"APPLY CORRECTIONS {ph_corr.min().values, ph_corr.max().values}")
     else:
         ph_corr = 0.
 
@@ -138,12 +138,95 @@ def separate_dispersive_spectrum_components_delta_mean(
     chunks={"azimuth_time": 4096, "slant_range_time": 4096},
     reference_id: str | None = None,
 ):
+    """
+    Estimate dispersive and non-dispersive phase components using the
+    split-spectrum method and the delta/mean phase formulation.
 
+    This workflow generates low-frequency and high-frequency sub-band
+    interferograms, jointly unwraps their differential and mean phases,
+    and separates the resulting phase into dispersive (ionospheric) and
+    non-dispersive components. Optionally, frequency-dependent phase
+    corrections can be applied before the split-spectrum inversion.
+
+    Parameters
+    ----------
+    reference_slcs
+        Reference SLC stack used to form the interferograms.
+    secondary_slcs
+        Secondary SLC stack used to form the interferograms.
+    frequency_offset
+        Frequency offset between the carrier frequency and the center
+        frequency of each sub-band [Hz].
+    bandwidth
+        Bandwidth of the sub-bands used for split-spectrum processing [Hz].
+    cohe_th
+        Coherence threshold used during phase unwrapping.
+    a_min
+        Minimum azimuth oversampling factor or spacing passed to the
+        interferogram generation routine.
+    r_min
+        Minimum range oversampling factor or spacing passed to the
+        interferogram generation routine.
+    x_poly
+        Polynomial phase-correction model applied with opposite signs to
+        the two sub-bands in order to compensate frequency-dependent phase
+        errors. If ``None``, no correction is applied.
+    y_poly
+        Polynomial model used during interferogram generation.
+    wdir_path
+        Working directory used to persist intermediate products.
+        If ``None``, no products are written to disk.
+    multilook
+        Optional multilooking specification passed to interferogram
+        generation.
+    multiburst
+        If ``True``, process data as a mosaic of bursts. Default is
+        ``True``.
+    enable_dask
+        Enable Dask-backed processing. Default is ``True``.
+    chunks
+        Chunking scheme used for Dask processing.
+    reference_id
+        Optional identifier of the reference acquisition.
+
+    Returns
+    -------
+    tuple[xr.Dataset, xr.DataArray]
+        A tuple containing:
+
+        - **phase_iono**: Dispersive (ionospheric) phase component stored
+          as a dataset. The dataset contains the estimated phase, coherence,
+          and raw azimuth-time coordinates.
+        - **phase_nd**: Non-dispersive phase component.
+
+    Notes
+    -----
+    The processing chain consists of the following steps:
+
+    1. Determine the carrier frequency and the center frequencies of the
+       low-band and high-band sub-spectra.
+    2. Generate low-band and high-band interferograms.
+    3. Apply optional frequency-dependent phase corrections.
+    4. Jointly unwrap the mean and differential phases of the two
+       sub-bands.
+    5. Separate dispersive and non-dispersive phase contributions using
+       :func:`split_spectrum_core_delta_mean`.
+    6. Store coherence and auxiliary coordinates required for subsequent
+       interpolation and modeling steps.
+
+    The returned dispersive phase is intended to represent the ionospheric
+    contribution, while the non-dispersive phase mainly contains geometric,
+    deformation, and other frequency-independent signals.
+    """
     # define center band frequencies
-    f0 = get_carrier_frequency(reference_slcs, "coreg/measurements/cstack", multiburst=multiburst)
+    f0 = get_carrier_frequency(
+        reference_slcs,
+        "coreg/measurements/cstack",
+        multiburst=multiburst,
+    )
     f_l_tot = f0 - frequency_offset
     f_h_tot = f0 + frequency_offset
-    
+
     # lower band interferogram
     mosaic_l = get_mosaic_interf(
         reference_slcs,
@@ -161,12 +244,20 @@ def separate_dispersive_spectrum_components_delta_mean(
 
     if x_poly is not None:
         # compute phase correction to be applied to each subband
-        ph_corr = get_phase_corr_from_x_poly(mosaic_l.azimuth_time, mosaic_l.slant_range_time, x_poly[mosaic_l.acquisition_id.values[0]], frequency_offset)
-        print(f"APPLY CORRECTIONS {ph_corr.min().values, ph_corr.max().values}")
+        ph_corr = get_phase_corr_from_x_poly(
+            mosaic_l.azimuth_time,
+            mosaic_l.slant_range_time,
+            x_poly[mosaic_l.acquisition_id.values[0]],
+            frequency_offset,
+        )
+        logger.debug(
+            f"APPLY CORRECTIONS "
+            f"{ph_corr.min().values, ph_corr.max().values}"
+        )
     else:
-        ph_corr = 0.
+        ph_corr = 0.0
 
-    mosaic_l['phase'] = mosaic_l['phase'] + ph_corr
+    mosaic_l["phase"] = mosaic_l["phase"] + ph_corr
 
     # upper band interferogram
     mosaic_h = get_mosaic_interf(
@@ -182,25 +273,45 @@ def separate_dispersive_spectrum_components_delta_mean(
         multiburst=multiburst,
         chunks=chunks,
     )
-    mosaic_h['phase'] = mosaic_h['phase'] - ph_corr
+    mosaic_h["phase"] = mosaic_h["phase"] - ph_corr
 
     if wdir_path is not None:
         # save to disk
         mosaic_l_path = wdir_path.append("mosaic_l")
-        mosaic_l = cast(xr.Dataset, write(mosaic_l, data_path=mosaic_l_path, mode="w"))
+        mosaic_l = cast(
+            xr.Dataset,
+            write(mosaic_l, data_path=mosaic_l_path, mode="w"),
+        )
+
         mosaic_h_path = wdir_path.append("mosaic_h")
-        mosaic_h = cast(xr.Dataset, write(mosaic_h, data_path=mosaic_h_path, mode="w"))
+        mosaic_h = cast(
+            xr.Dataset,
+            write(mosaic_h, data_path=mosaic_h_path, mode="w"),
+        )
 
     # joint interferogram phase unwrapping
     phase_delta, phase_mean, coherence = joint_unwrap_delta_mean(
-        mosaic_l.coherence, mosaic_h.coherence, mosaic_l.phase, mosaic_h.phase, cohe_th=cohe_th
+        mosaic_l.coherence,
+        mosaic_h.coherence,
+        mosaic_l.phase,
+        mosaic_h.phase,
+        cohe_th=cohe_th,
     )
+
     if "phase_ramp" in mosaic_l.data_vars:
         phase_mean = phase_mean + mosaic_l.phase_ramp
 
     # separate dispersive and non-dispersive components
-    phase_iono, phase_nd = split_spectrum_core_delta_mean(phase_delta, phase_mean, f0, f_l_tot, f_h_tot)
+    phase_iono, phase_nd = split_spectrum_core_delta_mean(
+        phase_delta,
+        phase_mean,
+        f0,
+        f_l_tot,
+        f_h_tot,
+    )
+
     phase_iono = phase_iono.to_dataset(name="phase")
+
     # assign azimuth time of raw image in order to enable interpolation
     phase_iono["azimuth_time_raw"] = mosaic_l["azimuth_time_raw"]
     phase_iono["coherence"] = coherence
@@ -208,9 +319,18 @@ def separate_dispersive_spectrum_components_delta_mean(
     if wdir_path is not None:
         # save to disk
         phase_iono_path = wdir_path.append("phase_iono")
-        phase_iono = write(phase_iono, data_path=phase_iono_path, mode="w")
+        phase_iono = write(
+            phase_iono,
+            data_path=phase_iono_path,
+            mode="w",
+        )
+
         phase_nd_path = wdir_path.append("phase_nd")
-        phase_nd = write(phase_nd, data_path=phase_nd_path, mode="w")
+        phase_nd = write(
+            phase_nd,
+            data_path=phase_nd_path,
+            mode="w",
+        )
 
     return phase_iono, phase_nd
 
@@ -378,18 +498,14 @@ def split_spectrum(
 
         # fit polynomial function to ESD and remove it from the interferogram
         y_poly = find_global_shift(esd, poly_degree=esd_poly_degree)
-        # y_poly = None
-        # separate dispersive and non-dispersive components
+
+        for id in y_poly.data_vars:
+            logger.debug(f"ESD {id}: {y_poly[id].values}")
     else:
         y_poly = None
 
-    logger.debug("separate dispersive and non-dispersive components")
-    if y_poly is not None:
-        for id in y_poly.data_vars:
-            print(f"ESD {id}: {y_poly[id].values}")
-    # y_poly = None
-
-    phase_iono, phase_nd = separate_dispersive_spectrum_components(
+    # separate dispersive and non-dispersive components
+    phase_iono, phase_nd = separate_dispersive_spectrum_components_delta_mean(
         reference_slcs,
         secondary_slcs,
         frequency_offset=frequency_offset,
