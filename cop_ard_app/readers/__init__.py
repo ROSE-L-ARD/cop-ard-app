@@ -30,10 +30,7 @@ import sarpy.io.complex.converter
 
 import cop_ard_app.readers.sarpy_rosel as sarpy_rosel
 import cop_ard_app.readers.sarpy_sentinel_safe as sarpy_safe
-import cop_ard_app.readers.sarpy_saocom as sarpy_saocom
 
-# Register the EOPF reader's identification function (`is_a`) with Sarpy.
-sarpy.io.complex.converter.register_opener(sarpy_saocom.is_a)
 # This allows Sarpy to recognize individual SAFE measurement files.
 sarpy.io.complex.converter.register_opener(sarpy_safe.is_a)
 # This allows Sarpy to recognize individual ROSEL measurement files.
