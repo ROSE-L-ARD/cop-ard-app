@@ -40,7 +40,7 @@ requires-python = ">=3.13, <3.14"
 # Users are encouraged to fix the EOPF CPM version to make sure to
 # have a stable build environment.
 dependencies = [
-    "cop-ard-core @ git+ssh://git@github.com/bopen/cop-ard-core.git",  # TODO pin
+    "cop-ard-core",  # TODO pin
     "dask",  # TODO pin
     "distributed>=2026.3.0",
 ]
@@ -58,7 +58,5 @@ markers = ["integration", "unit", "need_files"]
 [[tool.uv.index]]
 url = "https://pypi.org/simple"
 
-# Add the gitlab token in your `.netrc` file to allow `uv lock`
-# s1-ard-core
-[[tool.uv.index]]
-url = "https://gitlab.eopf.copernicus.eu/api/v4/projects/114/packages/pypi/simple"
+[tool.uv.sources]
+cop-ard-core = { git = "git+ssh://git@github.com/bopen/cop-ard-core.git" }
