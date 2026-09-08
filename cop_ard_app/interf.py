@@ -4,17 +4,13 @@ from typing import cast
 import numpy as np
 import xarray as xr
 from cop_ard_core.logger import timeit
-from cop_ard_core.utils import compute_interf_norm, time_to_pixel, wrap
+from cop_ard_core.utils import compute_interf_norm, time_to_pixel, wrap, get_azimuth_time_raw
 
 from cop_ard_app.computation import map
 from cop_ard_app.utils import (
     extract_subband,
-    get_stack_phramp_diff,
-)
-
-from cop_ard_core.utils import (
     get_best_pol,
-    get_azimuth_time_raw,
+    get_stack_phramp_diff,
 )
 
 
@@ -79,7 +75,7 @@ def extract_coreg_aoi(coreg: xr.Dataset, a_min: float, r_min: float, multilook: 
     return coreg_sel
 
 
-@timeit
+# @timeit
 def extract_interf_single(
     burst_id: str,
     annot: str,
@@ -113,8 +109,6 @@ def extract_interf_single(
     # remove uselsess attributes
     cslc_ref = cslc_ref.drop_attrs()
     cslc_sec = cslc_sec.drop_attrs()
-
-    from cop_ard_core.logger import logger
 
     # extract multilooked interferogram and coherence
     interf = get_interf_single_burst(cslc_ref, cslc_sec, multilook)
@@ -175,8 +169,8 @@ def extract_interf_multi(
             (
                 burst_id,
                 json.dumps({k: v.measurements.slc.attrs[pol] for k, v in slc_ref.orig.items()}),
-                slc_ref.coreg.measurements.ds.sel(polarization=pol).unify_chunks(),
-                slc_sec.coreg.measurements.ds.sel(polarization=pol).unify_chunks(),
+                slc_ref.coreg.measurements.ds.sel(polarization=pol),
+                slc_sec.coreg.measurements.ds.sel(polarization=pol),
             )
             for burst_id, slc_ref, slc_sec in zip(
                 reference_slcs.bursts.keys(),
@@ -190,8 +184,8 @@ def extract_interf_multi(
             (
                 "data",  # Standard dummy unit ID for non-multiburst modes
                 json.dumps({k: v.measurements.slc.attrs[pol] for k, v in reference_slcs.orig.items()}),
-                reference_slcs.coreg.measurements.ds.sel(polarization=pol).unify_chunks(),
-                secondary_slcs.coreg.measurements.ds.sel(polarization=pol).unify_chunks(),
+                reference_slcs.coreg.measurements.ds.sel(polarization=pol),
+                secondary_slcs.coreg.measurements.ds.sel(polarization=pol),
             )
         ]
 

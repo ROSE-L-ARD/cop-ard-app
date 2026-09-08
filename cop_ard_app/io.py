@@ -377,22 +377,9 @@ def check_write_arguments(
         # Use existing name if present, otherwise default to "v"
         _data = data.to_dataset(name=data.name or "v")
 
-    if isinstance(_data, xr.Dataset):
-        fix_string_coords(_data)
-    else:
-        for node in _data.leaves:
-            fix_string_coords(node)
-
     if not isinstance(_data, (xr.Dataset, xr.DataTree)):
         raise ValueError(f"Expected xr.Dataset or xr.DataTree, got {type(_data)}")
     return mode, _file_path, _data, _data_type
-
-
-def fix_string_coords(ds: xr.Dataset | xr.DataTree):
-    updates = {k: v.astype(object) for k, v in ds.coords.items() if v.dtype.kind in ["U", "S"]}
-    if updates:
-        ds.coords.update(updates)
-    return
 
 
 def validate_encoding(data: Union[xr.Dataset, xr.DataTree], encoding: dict | None) -> dict | None:
@@ -400,7 +387,7 @@ def validate_encoding(data: Union[xr.Dataset, xr.DataTree], encoding: dict | Non
     Validates a user-provided encoding dictionary against the data object.
     Strips out invalid variables and warns on unknown encoding parameters.
     """
-    if not encoding:
+    if encoding is None:
         return None
 
     # Get a flat list of all variables in the Dataset or DataTree
@@ -1496,6 +1483,25 @@ def read(
 
     return dt
 
+def drop_encodings(data):
+  """Recursively clears encoding dictionaries across DataTree, Dataset, and DataArray objects."""
+  if isinstance(data, xr.DataTree):
+    for node in data.subtree:  # includes root
+      if node.ds is not None:
+        drop_encodings(node.ds)
+
+  elif isinstance(data, xr.Dataset):
+    data.encoding.clear()
+    for v in data.variables.values():
+      v.encoding.clear()
+
+  elif isinstance(data, xr.DataArray):
+    data.encoding.clear()
+    data.variable.encoding.clear()
+    for coord in data.coords.values():
+      coord.encoding.clear()
+      if hasattr(coord, "variable"):
+        coord.variable.encoding.clear()
 
 def write(
     data: Union[xr.Dataset, xr.DataArray, xr.DataTree],
@@ -1514,12 +1520,7 @@ def write(
     mode, _file_path, _data, _data_type = check_write_arguments(data, data_path, mode, region)
 
     # 2. DROP inherited encoding
-    if hasattr(_data, "drop_encoding"):
-        _data = _data.drop_encoding()
-    elif isinstance(_data, xr.DataTree):
-        for node in _data.descendants:
-            for v in node.ds.variables.values():
-                v.encoding = {}
+    drop_encodings(_data)
 
     # 3. VALIDATE user-provided encoding
     safe_encoding = validate_encoding(_data, encoding)

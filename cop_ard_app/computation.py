@@ -868,13 +868,13 @@ def try_to_store(
                 # When the result is saved results_l[j] will be replaced by the path to the file into the data has been saved
                 # This replacement allows try_to_combine (that will be execute in the next steps) to do the right thing
                 if j_drop_coords:
-                    j_result = j_result.reset_coords(drop=True)
+                    j_result = j_result.drop_vars(j_result.coords)
                 if j_drop_attrs:
                     j_result = j_result.drop_attrs()
                 results_l[j] = write(j_result, data_path=j_data_path, region=j_region, **j_opts)
             else:
                 logger.warning(
-                    f"The {j}-th element of results cannot be saved: only xr.Dataset, xr.DataArray or xr.DataTree can be saved by computation"
+                    f"The {j}-th element of results is {j_result}  of type {type(j_result)} and cannot be saved: only xr.Dataset, xr.DataArray or xr.DataTree can be saved by computation"
                 )
         results = typef(results_l)
     elif store_directory is not None:

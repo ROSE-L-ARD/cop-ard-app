@@ -11,7 +11,7 @@ import scipy.fft
 import xarray as xr
 from cop_ard_core.dem import extract_vertical_crs
 from cop_ard_core.logger import logger, timeit
-from cop_ard_core.utils import get_best_pol, get_phramp_diff
+from cop_ard_core.utils import get_phramp_diff
 from pyproj import CRS, Transformer, datadir
 from pyproj.transformer import TransformerGroup
 from scipy.constants import speed_of_light
@@ -177,7 +177,7 @@ def extract_subband(cslc: xr.DataArray, bw: float, f0: float, dim_transf: str = 
     }
 
     frange = xr.DataArray(
-        scipy.fft.fftshift(scipy.fft.fft(cslc.values, norm="ortho", axis=axis), axes=(axis,)),
+        scipy.fft.fftshift(scipy.fft.fft(cslc.fillna(0j).values, norm="ortho", axis=axis), axes=(axis,)),
         dims=freq_dim,
         coords=freq_coords,
     )
@@ -283,7 +283,7 @@ def get_poly(poly, poly_type: str, dd: str):
     return poly
 
 
-@timeit
+# @timeit
 def get_stack_phramp_diff(
     acquisition_id: xr.DataArray,
     azimuth_time: xr.DataArray,
@@ -683,3 +683,26 @@ def sanitize_coordinates(ds: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataA
             clean_coords[coord_name] = (coord_var.dims, coord_var.values)
 
     return ds.assign_coords(clean_coords)
+def get_best_pol(polarization_values: list) -> str:
+    """
+    Select the preferred polarization based on a priority list.
+
+    Parameters
+    ----------
+    polarization_values : list
+        List of available polarizations.
+
+    Returns
+    -------
+    str
+        The selected polarization.
+    """
+    # select preferred polarization
+    available_pols = {str(i) for i in polarization_values}
+    priorities = ["VV", "HH", "VH", "HV"]
+    pol = next((p for p in priorities if p in available_pols), None)
+    if pol is None:
+        raise Exception(f"No polarization has been found {available_pols}")
+
+    return pol
+

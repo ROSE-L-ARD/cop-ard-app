@@ -12,11 +12,11 @@ import numpy as np
 import xarray as xr
 from cop_ard_core.matching import compute_pearson_coefficient, initialize_patches, fix_disparity
 from cop_ard_core.detrend import fit_2d_poly, to_polygrid2d
-from cop_ard_core.utils import get_best_pol
 from scipy.constants import speed_of_light
 
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.model import extract_acquisition_id
+from cop_ard_app.utils import get_best_pol
 
 
 def chunks_optimization(
@@ -111,7 +111,7 @@ def estimate_poly_matching(
         measurements = v.coreg.measurements
         for id in measurements.acquisition_id.values:
             m = measurements.sel(acquisition_id=id)
-            d = (disparity_map.bursts[k] if multiburst else disparity_map["data"]).sel(acquisition_id=id)
+            d = (disparity_map.bursts[k].to_dataset() if multiburst else disparity_map["data"]).sel(acquisition_id=id).to_dataset()
             a = (k, id, d, m.drg, m.daz)
             args.append(a)
 
@@ -134,7 +134,7 @@ def estimate_poly_matching(
 def get_polynomial_correction(acquisition_ids, results, dim: str, degree: int, norm: int = 1):
     poly_corr = {}
     for id in acquisition_ids:
-        to_merge = [ds for _, acquisition_id, ds in results if acquisition_id == id]
+        to_merge = [ds.drop_vars("point", errors='ignore') for _, acquisition_id, ds in results if (acquisition_id == id) and (ds is not None) and (dim in ds.data_vars)]
         ds_tot = xr.concat(to_merge, dim="point")
         off_y = ds_tot.m1_y.min().values
 
@@ -200,13 +200,18 @@ def stack_disparity(
         enable_dask=enable_dask,
         combine=False,
     )
+
+    # Construct disparity datatree for all bursts or for the single slice
     disparity_map = xr.DataTree()
     if multiburst:
+        disparity_map['bursts'] = xr.DataTree()
         for k, v in results:
-            disparity_map[f"bursts/{k}"] = v
+            if k in disparity_map.bursts:
+                raise ValueError(f"Duplicate burst ID {k} found in results. Each burst ID should be unique.")
+            disparity_map[f"bursts/{k}"] = v.to_dataset(dim="variable")
     else:
         for k, v in results:
-            disparity_map["data"] = v
+            disparity_map["data"] = v.to_dataset(dim="variable")
 
     return disparity_map
 
@@ -253,7 +258,11 @@ def compute_stack_pearson_coefficient(
         .swap_dims(azimuth_time="y", slant_range_time="x")
         .rename(acquisition_id="z")
         .transpose("y", "x", "z")
-    ).unify_chunks()
+        .chunk({'y': stack.chunksizes['azimuth_time'][0],
+             'x': stack.chunksizes['slant_range_time'][0],
+             'z': stack.chunksizes['acquisition_id'][0]})
+    )
+
 
     # Patches to be used to cross-correlate initialization
     cc_patches = initialize_patches(
