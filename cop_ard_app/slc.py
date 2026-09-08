@@ -107,7 +107,8 @@ def import_slice(
         first_idx_x = chunk["slant_range_time"].start
         if valid_data_y_idxs is not None and valid_data_x_idxs is not None:
             slc = apply_invalid_mask(slc, valid_data_y_idxs, valid_data_x_idxs, first_idx_y, first_idx_x)
-    slc = slc.astype("complex64")
+    if slc.dtype != "complex64":
+        slc = slc.astype("complex64")
     return slc.to_dataset(name="slc")
 
 
@@ -221,8 +222,13 @@ def import_image(
         coords=coords,
         attrs_data_vars={"slc": annot},
     )
-    dt["measurements"] = image
-    write(dt, data_path, mode="w", compute=True, storage_options=get_storage_options(kwargs))
+    # SAVE ONLY STRUCTURE
+    dt["measurements"] = image.drop_vars("slc")
+    write(dt, data_path, mode="w", compute=True, storage_options=get_storage_options(kwargs), skip_read=True)
+
+    # SAVE EMPTY VARIABLES
+    dt["measurements"] = image.drop_vars(image.coords)
+    write(dt, data_path, mode='a', compute=False, storage_options=get_storage_options(kwargs), skip_read=True)
 
     if do_import:
         # Define the path to the measurements group.

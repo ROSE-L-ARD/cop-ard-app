@@ -1478,6 +1478,25 @@ def read(
 
     return dt
 
+def drop_encodings(data):
+  """Recursively clears encoding dictionaries across DataTree, Dataset, and DataArray objects."""
+  if isinstance(data, xr.DataTree):
+    for node in data.subtree:  # includes root
+      if node.ds is not None:
+        drop_encodings(node.ds)
+
+  elif isinstance(data, xr.Dataset):
+    data.encoding.clear()
+    for v in data.variables.values():
+      v.encoding.clear()
+
+  elif isinstance(data, xr.DataArray):
+    data.encoding.clear()
+    data.variable.encoding.clear()
+    for coord in data.coords.values():
+      coord.encoding.clear()
+      if hasattr(coord, "variable"):
+        coord.variable.encoding.clear()
 
 def write(
     data: Union[xr.Dataset, xr.DataArray, xr.DataTree],
@@ -1496,12 +1515,7 @@ def write(
     mode, _file_path, _data, _data_type = check_write_arguments(data, data_path, mode, region)
 
     # 2. DROP inherited encoding
-    if hasattr(_data, "drop_encoding"):
-        _data = _data.drop_encoding()
-    elif isinstance(_data, xr.DataTree):
-        for node in _data.descendants:
-            for v in node.ds.variables.values():
-                v.encoding = {}
+    drop_encodings(_data)
 
     # 3. VALIDATE user-provided encoding
     safe_encoding = validate_encoding(_data, encoding)
