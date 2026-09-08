@@ -569,7 +569,7 @@ def update_container(dt: xr.DataTree, dt_name, cslc_id):
     return stac, processing_history
 
 
-def update_gslcs(gslcs: xr.DataTree, slcs: xr.DataTree, external_metadata: dict = {}):
+def update_gmlp(gmlp: xr.DataTree, slcs: xr.DataTree, external_metadata: dict = {}):
     """
     Finalize the GSLC product by adding product-level metadata.
 
@@ -594,25 +594,40 @@ def update_gslcs(gslcs: xr.DataTree, slcs: xr.DataTree, external_metadata: dict 
     """
     processing_start_time = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     bursts = xr.DataTree()
-    multiburst = True if "bursts" in gslcs else False
+    multiburst = True if "bursts" in gmlp else False
     # --- Iterate Over Each Burst/Scene ---
-    for k, gslc in (gslcs.bursts if multiburst else {"data": gslcs}).items():
-        gstack = gslc.measurements.ds
-        name = k if multiburst else "data"
+    burst_items = gmlp["bursts"].children.items() if multiburst else [("data", gmlp)]
+
+    for burst_id, burst_node in burst_items:
+        slc = slcs.bursts[burst_id] if multiburst else slcs
+        measurements = slc.coreg.measurements
+        dates_ids = {k: v for k, v in zip(measurements.acquisition_date.values, measurements.acquisition_id.values)}
+        dates = list(burst_node.children)
+        logger.debug(f"Burst '{burst_id}' dates: {dates}")
+
+        if len(dates) != 1:
+            raise ValueError(
+                f"Expected exactly 1 acquisition date for burst '{burst_id}', but found {len(dates)}: {dates}"
+            )
+        acquisition_date = dates[0]
+        acquisition_id = dates_ids[acquisition_date]
+        gstack = burst_node[acquisition_date]
+        display(gstack)
+        raise
         stac, processing_history = get_stac_and_history_gslc(
-            name,
+            burst_id,
             gstack,
             slcs,
             processing_start_time=processing_start_time,
         )
         other_metadata = get_other_metadata_gslc(external_metadata)
-        bursts[stac["id"]] = clean_gslc(gslc)
+        bursts[stac["id"]] = clean_gslc(gstack, slc, acquisition_id)
         bursts[stac["id"]].attrs = {
             "stac_discovery": stac,
             "processing_history": processing_history,
             "other_metadata": other_metadata,
         }
-    stac_group, history_group = update_container(bursts, "GSLC", slcs.attrs["stac_discovery"]["id"])
+    stac_group, history_group = update_container(bursts, "GMLP", slcs.attrs["stac_discovery"]["id"])
     # Apply any final, global attribute fixes.
     fix_attributes(bursts, ATTRS_GEO)
     bursts.attrs = {"stac_discovery": stac_group, "processing_history": history_group}
@@ -678,9 +693,11 @@ def fix_attributes(data: Union[xr.DataTree, xr.DataArray], attrs):
     return data
 
 
-def clean_gslc(gslc):
+def clean_gslc(gslc, slc, acquisition_id):
     # --- Restructure the DataTree for Final Product Format ---
     gslc_fix = xr.DataTree()
+
+    orbit = slc.coreg.conditions.orbit
     aq_size = gslc.measurements.acquisition_date.size
     gslc_fix["measurements/gslc"] = (
         gslc.measurements.gstack.squeeze("acquisition_date") if aq_size == 1 else gslc.measurements.gstack
@@ -719,8 +736,7 @@ def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time):
     attrs = copy.deepcopy((slcs.bursts[burst_id] if multiburst else slcs)).attrs
     stac = attrs["stac_discovery"]
     processing_history = attrs["processing_history"]
-
-    crs = CRS(gslc.rio.crs).to_3d()
+    crs = CRS(gslc.measurements.rio.crs).to_3d()
     horizontal_crs = str(crs.to_2d().to_epsg())
     vertical_crs = extract_vertical_crs(crs)
     vertical_crs = f"+{vertical_crs}" if crs.is_vertical else ""

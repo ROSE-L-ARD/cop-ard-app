@@ -16,6 +16,7 @@ from cop_ard_core.slc import (
     noise_removal,
 )
 from cop_ard_core.utils import sync_sicd_metadata
+from cop_ard_core.griddata import interpolate
 
 import cop_ard_app.readers
 from cop_ard_app.computation import init_zarr_groups, map, map_blocks
@@ -983,43 +984,55 @@ def updateLookVector(
     grid_size: Sequence[int] = (200, 200),
 ) -> xr.Dataset | None:
 
-    logger.debug("LOOK VECTOR INTERPOLATION")
+    # Optional subsampling of the simulation dataset for performance
+    step_y = max(1, simulation.sizes["y"] // (grid_size[0] * 2))
+    step_x = max(1, simulation.sizes["x"] // (grid_size[1] * 2))
+    simulation = simulation.isel(y=slice(None, None, step_y), x=slice(None, None, step_x))
+
+    # 1. Calculate the look vector (maintaining float64)
     dem_distance = simulation.dem_distance.squeeze()
     norm = np.linalg.norm(dem_distance.values, ord=2, axis=-1, keepdims=True)
     look_vector_arr = dem_distance.values / norm
-    look_vector_arr = np.moveaxis(look_vector_arr, -1, 0)
+    look_vector_arr = np.moveaxis(look_vector_arr, -1, 0)  # shape: (3, y, x)
 
-    ds_look = xr.Dataset(data_vars={"look_vector": (("axis", "y", "x"), look_vector_arr)}, coords={"axis": [0, 1, 2]})
-
-    az_min, az_max = float(simulation.azimuth_time.min()), float(simulation.azimuth_time.max())
-    rg_min, rg_max = float(simulation.slant_range_time.min()), float(simulation.slant_range_time.max())
-
-    az_points = np.linspace(az_min, az_max, simulation.sizes["y"])
-    rg_points = np.linspace(rg_min, rg_max, simulation.sizes["x"])
-
-    points = (az_points, rg_points)
-
-    azimuth_time = measurements.azimuth_time.values
-    slant_range_time = measurements.slant_range_time.values
+    azimuth_time = measurements.azimuth_time
+    slant_range_time = measurements.slant_range_time
 
     idx_az = np.linspace(0, len(azimuth_time) - 1, grid_size[0], dtype=int)
     idx_rg = np.linspace(0, len(slant_range_time) - 1, grid_size[1], dtype=int)
     az_sampled = azimuth_time[idx_az]
     rg_sampled = slant_range_time[idx_rg]
 
-    az_grid, rg_grid = np.meshgrid(az_sampled, rg_sampled, indexing="ij")
-    xi = (az_grid, rg_grid)
-
     target_coords = {"azimuth_time": az_sampled, "slant_range_time": rg_sampled}
 
-    ds_interp = interp_dataset_scaled(
-        data=ds_look,
-        xi=xi,
-        common_dims=("y", "x"),
-        points=points,
-        rename={"y": "azimuth_time", "x": "slant_range_time"},
-        target_coords=target_coords,
-        method="cubic",
+    dt_az_ns = (az_sampled.max() - az_sampled.min()).astype(float).values / (az_sampled.size - 1)
+    dt_rg_s = (rg_sampled.max() - rg_sampled.min()).values / (rg_sampled.size - 1)
+    az_ref, rg_ref = azimuth_time[0].values, slant_range_time[0].values
+
+    # Build points mapping
+    points = np.array(
+        [
+            (((simulation.azimuth_time - az_ref).astype(float)) / dt_az_ns).values,
+            ((simulation.slant_range_time - rg_ref).astype(float) / dt_rg_s).values,
+        ]
+    ).transpose(2, 1, 0)
+
+    # Prepare values to be interpolated and define output grid bounding box
+    z = look_vector_arr.transpose(0, 2, 1)
+    bbox = np.array([0, 0, rg_sampled.size, az_sampled.size])
+
+    # Interpolate using custom griddata interpolate function
+    m = interpolate(points, z, bbox)
+    m = m / np.linalg.norm(m, axis=0)
+
+    # Build the resulting xarray Dataset
+    ds_interp = xr.Dataset(
+        data_vars={"look_vector": (("axis", "azimuth_time", "slant_range_time"), m)},
+        coords={
+            "axis": [0, 1, 2],
+            "azimuth_time": az_sampled,
+            "slant_range_time": rg_sampled,
+        },
     )
 
     return ds_interp
