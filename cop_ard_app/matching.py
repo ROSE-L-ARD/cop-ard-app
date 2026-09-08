@@ -83,7 +83,6 @@ def estimate_poly_matching(
     disparity_map: xr.DataTree,
     degree: int = 2,
     cohe_th: float = 0.3,
-    norm: int = 1,
     kernel_shape: list = [15, 15],
     enable_dask: bool = True,
 ) -> xr.DataTree:
@@ -126,26 +125,26 @@ def estimate_poly_matching(
         enable_dask=enable_dask,
     )
 
-    x_poly = get_polynomial_correction(acquisition_ids, results, "dx", degree=degree, norm=norm)
-    y_poly = get_polynomial_correction(acquisition_ids, results, "dy", degree=degree, norm=norm)
+    x_poly = get_polynomial_correction(acquisition_ids, results, "dx", degree=degree)
+    y_poly = get_polynomial_correction(acquisition_ids, results, "dy", degree=degree)
 
     return x_poly, y_poly
 
 
-def get_polynomial_correction(acquisition_ids, results, dim: str, degree: int, norm: int):
+def get_polynomial_correction(acquisition_ids, results, dim: str, degree: int, norm: int = 1):
     poly_corr = {}
     for id in acquisition_ids:
         to_merge = [ds.drop_vars("point", errors='ignore') for _, acquisition_id, ds in results if (acquisition_id == id) and (ds is not None) and (dim in ds.data_vars)]
         ds_tot = xr.concat(to_merge, dim="point")
         off_y = ds_tot.m1_y.min().values
-        
+
         (
             coeffs,
             x_sc,
             x_0,
         ) = fit_2d_poly(
             ds_tot.m1_x.values,
-            (ds_tot.m1_y-off_y).astype(float).values,
+            (ds_tot.m1_y - off_y).astype(float).values,
             ds_tot[dim].values,
             degree=degree,
             norm=norm,

@@ -891,14 +891,7 @@ def try_to_store(
         )
     elif force_compute:
         results = typef(
-            [
-                (
-                    e.compute()
-                    if isinstance(e, (xr.Dataset, xr.DataArray, xr.DataTree))
-                    else e
-                )
-                for e in results_l
-            ]
+            [(e.compute() if isinstance(e, (xr.Dataset, xr.DataArray, xr.DataTree)) else e) for e in results_l]
         )
 
     return results
@@ -1201,7 +1194,9 @@ def map(
         config = {"scheduler": scheduler} if scheduler is not None else {}
         with dask.config.set(config):
             result = func(*args, **kwargs)
-            return try_to_store(result, {}, save_options=save_options, store_directory=store_directory, force_compute=force_compute)
+            return try_to_store(
+                result, {}, save_options=save_options, store_directory=store_directory, force_compute=force_compute
+            )
 
     # Use a context manager to retrieve/create a client (Dask or Dummy)
     # and handle its lifecycle, along with other configuration flags.

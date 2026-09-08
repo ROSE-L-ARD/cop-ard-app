@@ -1,8 +1,10 @@
 import copy
+import re
 import os
 from datetime import datetime, timezone
 from typing import Sequence, Union, cast
 
+import cop_ard_app
 import cop_ard_core
 import numpy as np
 import sarpy.io.complex.sentinel
@@ -11,10 +13,15 @@ from cop_ard_core.dem import extract_vertical_crs
 from cop_ard_core.logger import logger
 from pyproj import CRS
 from scipy.constants import speed_of_light
+from cop_ard_app.io import get_id_product, path_to_dict, read, get_storage_options
 
-from cop_ard_app.io import get_id_product, path_to_dict
-
-DEL_ATTRS = ["store_path", "obj_type", "_FillValue", "etad_file", "coregistration_reference_date"]
+DEL_ATTRS = [
+    "store_path",
+    "obj_type",
+    "_FillValue",
+    "etad_file",
+    "coregistration_reference_date",
+]
 DEL_ENCODING = ["coordinates"]
 ATTRS_GEO = {
     "phase_model": {
@@ -425,7 +432,10 @@ def get_footprint(ds, index: int):
     # Extract the corner coordinates for all images from the metadata.
     corners = {
         i: [
-            (ds.sicd_meta[i].GeoData.ImageCorners[j % 4].Lon, ds.sicd_meta[i].GeoData.ImageCorners[j % 4].Lat)
+            (
+                ds.sicd_meta[i].GeoData.ImageCorners[j % 4].Lon,
+                ds.sicd_meta[i].GeoData.ImageCorners[j % 4].Lat,
+            )
             for j in range(5)
         ]
         for i in range(len(ds.sicd_meta))
@@ -519,7 +529,12 @@ def update_container(dt: xr.DataTree, dt_name, cslc_id):
         e = np.datetime64(stac_product["properties"]["end_datetime"])
         b = stac_product["bbox"]
         c = stac_product["geometry"]["coordinates"][0][:-1]
-        bbox = [min(b[0], bbox[0]), min(b[1], bbox[1]), max(b[2], bbox[2]), max(b[3], bbox[3])]
+        bbox = [
+            min(b[0], bbox[0]),
+            min(b[1], bbox[1]),
+            max(b[2], bbox[2]),
+            max(b[3], bbox[3]),
+        ]
         start = np.minimum(s, start)
         end = np.maximum(e, end)
         for i in range(4):
@@ -548,13 +563,13 @@ def update_container(dt: xr.DataTree, dt_name, cslc_id):
     stac["stac_extensions"] = [i for i in stac["stac_extensions"] if i.split("/")[-3] not in ["view", "projection"]]
     id = get_id_product(stac)
     stac["id"] = id
-    processing_history[f"Sentinel-1 ARD {dt_name} Product"][0]["inputs"] = cslc_id
-    processing_history[f"Sentinel-1 ARD {dt_name} Product"][0]["outputs"] = id
+    processing_history[f"COP ARD {dt_name} Product"][0]["inputs"] = cslc_id
+    processing_history[f"COP ARD {dt_name} Product"][0]["outputs"] = id
 
     return stac, processing_history
 
 
-def update_gslcs(gslcs: xr.DataTree, slcs: xr.DataTree, external_metadata: dict = {}):
+def update_gmlp(gmlp: xr.DataTree, slcs: xr.DataTree, external_metadata: dict = {}):
     """
     Finalize the GSLC product by adding product-level metadata.
 
@@ -579,25 +594,38 @@ def update_gslcs(gslcs: xr.DataTree, slcs: xr.DataTree, external_metadata: dict 
     """
     processing_start_time = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     bursts = xr.DataTree()
-    multiburst = True if "bursts" in gslcs else False
+    multiburst = True if "bursts" in gmlp else False
     # --- Iterate Over Each Burst/Scene ---
-    for k, gslc in (gslcs.bursts if multiburst else {"data": gslcs}).items():
-        gstack = gslc.measurements.ds
-        name = k if multiburst else "data"
+    burst_items = gmlp["bursts"].children.items() if multiburst else [("data", gmlp)]
+
+    for burst_id, burst_node in burst_items:
+        slc = slcs.bursts[burst_id] if multiburst else slcs
+        measurements = slc.coreg.measurements
+        dates_ids = {k: v for k, v in zip(measurements.acquisition_date.values, measurements.acquisition_id.values)}
+        dates = list(burst_node.children)
+        logger.debug(f"Burst '{burst_id}' dates: {dates}")
+
+        if len(dates) != 1:
+            raise ValueError(
+                f"Expected exactly 1 acquisition date for burst '{burst_id}', but found {len(dates)}: {dates}"
+            )
+        acquisition_date = dates[0]
+        acquisition_id = dates_ids[acquisition_date]
+        gslc = burst_node[acquisition_date]
         stac, processing_history = get_stac_and_history_gslc(
-            name,
-            gstack,
+            burst_id,
+            gslc.measurements.to_dataset(),
             slcs,
             processing_start_time=processing_start_time,
         )
         other_metadata = get_other_metadata_gslc(external_metadata)
-        bursts[stac["id"]] = clean_gslc(gslc)
+        bursts[stac["id"]] = clean_gslc(gslc, slc, acquisition_id)
         bursts[stac["id"]].attrs = {
             "stac_discovery": stac,
             "processing_history": processing_history,
             "other_metadata": other_metadata,
         }
-    stac_group, history_group = update_container(bursts, "GSLC", slcs.attrs["stac_discovery"]["id"])
+    stac_group, history_group = update_container(bursts, "GMLP", slcs.attrs["stac_discovery"]["id"])
     # Apply any final, global attribute fixes.
     fix_attributes(bursts, ATTRS_GEO)
     bursts.attrs = {"stac_discovery": stac_group, "processing_history": history_group}
@@ -617,7 +645,7 @@ def fix_attributes(data: Union[xr.DataTree, xr.DataArray], attrs):
     ----------
     data : Union[xr.DataTree, xr.DataArray]
         The xarray.DataTree or xarray.DataArray to be cleaned.
-    attrs
+    attrsfix_attributes
         A dictionary template where keys are dimension or variable names
         and values are the standard attributes to be assigned.
 
@@ -637,7 +665,6 @@ def fix_attributes(data: Union[xr.DataTree, xr.DataArray], attrs):
                 raise Exception(f"Expected str, got {type(k)}")
             data[k].attrs = attrs[k]
             data[k].attrs.update({"short_name": k})
-
     # --- Clean Top-Level Attributes and Encoding ---
     # Remove any unwanted attributes from the top level of the object.
     for k in DEL_ATTRS:
@@ -664,20 +691,46 @@ def fix_attributes(data: Union[xr.DataTree, xr.DataArray], attrs):
     return data
 
 
-def clean_gslc(gslc):
+def clean_gslc(gslc, slc, acquisition_id):
     # --- Restructure the DataTree for Final Product Format ---
     gslc_fix = xr.DataTree()
+    orbit = slc.coreg.conditions.orbit.to_dataset().drop_vars(
+        ["orbit_files", "reference_time", "type"], errors="ignore"
+    )
     aq_size = gslc.measurements.acquisition_date.size
-    gslc_fix["measurements/gslc"] = (
-        gslc.measurements.gstack.squeeze("acquisition_date") if aq_size == 1 else gslc.measurements.gstack
+
+    mask = gslc.measurements.mask.to_dataset(name="distortion_mask").drop_vars(["acquisition_date", "acquisition_id"])
+    look_vector = gslc.conditions.look_vector
+    acquisition_dates = gslc.measurements.acquisition_date.values
+    measurements = (
+        gslc.measurements.to_dataset()
+        .drop_vars([k for k in gslc.measurements.data_vars if "phase" not in k])
+        .expand_dims(acquisition_id=1)
+        .transpose("polarization", "acquisition_id", "y", "x")
     )
-    gslc_fix["measurements/phase_model"] = (
-        gslc.measurements.phase_model.squeeze("acquisition_date") if aq_size == 1 else gslc.measurements.phase_model
+    measurements = measurements.assign_coords(
+        acquisition_date=("acquisition_id", np.atleast_1d(measurements.acquisition_date.values))
     )
-    gslc_fix["conditions/local_incidence_angle"] = gslc.conditions.lia
-    gslc_fix["conditions/anf"] = gslc.conditions.anf
-    gslc_fix["quality/mask"] = gslc.conditions.mask
-    gslc_fix["quality/nlooks"] = gslc.conditions.nlooks
+    coherence = (
+        gslc.measurements.to_dataset()
+        .drop_vars([k for k in gslc.measurements.data_vars if "coh" not in k])
+        .expand_dims(acquisition_id=1)
+        .transpose("polarization", "acquisition_id", "y", "x")
+    )
+    coherence = coherence.assign_coords(
+        acquisition_date=("acquisition_id", np.atleast_1d(measurements.acquisition_date.values))
+    )
+
+    if "etad" in gslc.conditions:
+        etad = gslc.conditions.etad.to_dataset()
+        etad = add_acquisition_date(etad, measurements)
+        gslc_fix["conditions/ETAD"] = etad
+
+    gslc_fix["conditions/look_vector"] = look_vector
+    gslc_fix["conditions/orbit"] = add_acquisition_date(orbit, measurements)
+    gslc_fix["measurements"] = measurements
+    gslc_fix["quality/distortion_mask"] = mask
+    gslc_fix["quality/coherence"] = coherence
 
     return gslc_fix
 
@@ -688,7 +741,7 @@ def get_other_metadata_gslc(external_metadata):
         "product_geometry": "projected",
         "product_pixel_coordinate_convention": external_metadata["product_pixel_coordinate_convention"],
         "noise_correction_flag": external_metadata["noise_removal"],
-        "gslc_status": external_metadata["gslc_status"],
+        "gmlp_status": external_metadata["gmlp_status"],
         "product_family_specification": external_metadata["product_family_specification"],
         "measurement_type": external_metadata["measurement_type"],
         "product_resampling_method": "sinc interpolator",
@@ -705,7 +758,6 @@ def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time):
     attrs = copy.deepcopy((slcs.bursts[burst_id] if multiburst else slcs)).attrs
     stac = attrs["stac_discovery"]
     processing_history = attrs["processing_history"]
-
     crs = CRS(gslc.rio.crs).to_3d()
     horizontal_crs = str(crs.to_2d().to_epsg())
     vertical_crs = extract_vertical_crs(crs)
@@ -732,17 +784,22 @@ def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time):
     stac["stac_extensions"].append("https://stac-extensions.github.io/projection/v1.1.0/schema.json")
     stac["bbox"] = bbox
     stac["geometry"]["coordinates"] = [coordinates]
-    stac["properties"]["title"] = "Sentinel-1 ARD GSLC Product"
+    stac["properties"]["title"] = "COP ARD GMLP Product"
     stac["properties"]["created"] = processing_start_time
-    stac["properties"]["processing:software"] = {"COP ARD CORE": f"{cop_ard_core.__version__}"}
-    stac["properties"]["processing:version"] = f"{cop_ard_core.__version__}"
+    stac["properties"]["processing:software"] = {
+        "COP ARD CORE": f"{cop_ard_core.__version__}",
+        "COP ARD APP": f"{cop_ard_app.__version__}",
+    }
+    stac["properties"]["processing:version"] = f"{cop_ard_app.__version__}"
     stac["properties"]["processing:datetime"] = processing_start_time
-    stac["properties"]["product:type"] = f"S01S{mode}GSL"
+    stac["properties"]["product:type"] = f"S01S{mode}GMP"
     stac["properties"]["gsd"] = gsd
     stac["properties"]["proj:epsg"] = product_epsg
     stac["properties"]["proj:wkt2"] = product_wkt
     stac["properties"]["proj:shape"] = [pixels_number, lines_number]
     stac["properties"]["proj:transform"] = list(gslc.rio.transform())[:6]
+
+    stac["links"] = [{"href": "./zarr.json", "rel": "self", "type": "application/json"}]
     stac["assets"] = {
         "measurements": {
             "href": "./measurements",
@@ -769,12 +826,12 @@ def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time):
     id = get_id_product(stac, burst_id=burst_id)
     stac["id"] = id
 
-    processing_history["Sentinel-1 ARD GSLC Product"] = copy.deepcopy(processing_history["Sentinel-1 ARD CSLC Product"])
-    inputs = processing_history["Sentinel-1 ARD CSLC Product"][0]["outputs"]
-    processing_history["Sentinel-1 ARD GSLC Product"][0]["inputs"] = inputs
-    processing_history["Sentinel-1 ARD GSLC Product"][0]["outputs"] = id
-    processing_history["Sentinel-1 ARD GSLC Product"][0]["time"] = processing_start_time
-    processing_history["Sentinel-1 ARD GSLC Product"][0]["version"] = f"{cop_ard_core.__version__}"
+    processing_history["COP ARD GMLP Product"] = copy.deepcopy(processing_history["COP ARD CSLC Product"])
+    inputs = processing_history["COP ARD CSLC Product"][0]["outputs"]
+    processing_history["COP ARD GMLP Product"][0]["inputs"] = inputs
+    processing_history["COP ARD GMLP Product"][0]["outputs"] = id
+    processing_history["COP ARD GMLP Product"][0]["time"] = processing_start_time
+    processing_history["COP ARD GMLP Product"][0]["version"] = f"{cop_ard_app.__version__}"
 
     return stac, processing_history
 
@@ -782,6 +839,10 @@ def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time):
 def stac_discovery_template(burst_id, orig, coreg, external_metadata, stac, processing_start_time):
     sicd = orig.attrs[list(orig.attrs)[0]]
     sicd_coreg = coreg.attrs[list(coreg.attrs)[0]]
+    tx_frequency = sicd["RadarCollection"]["TxFrequency"]
+    platform, constellation, instruments = extract_stac_sar_props(sicd)
+
+    band = get_rf_band(tx_frequency["Min"], tx_frequency["Max"])
     coordinates = []
     for v in sicd["GeoData"]["ImageCorners"]:
         coordinates.append([round(v["Lon"], 6), round(v["Lat"], 6)])
@@ -801,20 +862,14 @@ def stac_discovery_template(burst_id, orig, coreg, external_metadata, stac, proc
     pol = ["".join(i.split(":")) for i in orig.polarization.values]
     if "properties" in stac:
         datatake_id = stac["properties"]["eopf:datatake_id"]
-        absolute_orbit = stac["properties"]["sat:absolute_orbit"]
-        relative_orbit = stac["properties"]["sat:relative_orbit"]
-        anx_time = stac["properties"]["sat:anx_datetime"]
-        if not anx_time.endswith("Z"):
-            anx_time += "Z"
+        absolute_orbit = int(stac["properties"]["sat:absolute_orbit"])
+        relative_orbit = int(stac["properties"]["sat:relative_orbit"])
         orbit_state = stac["properties"]["sat:orbit_state"]
-        platform_international_designator = stac["properties"]["sat:platform_international_designator"]
     else:
-        datatake_id = sicd["CollectionInfo"]["CoreName"][10:15]
-        absolute_orbit = 1
-        relative_orbit = 1
-        anx_time = "1970-01-01T00:00:00.000000Z"
-        orbit_state = "n/a"
-        platform_international_designator = "n/a"
+        datatake_id = sicd["CollectionInfo"]["CoreName"][10:16]
+        absolute_orbit = int(sicd["CollectionInfo"]["Parameters"].get("ABSOLUTE_ORBIT", 0))
+        relative_orbit = int(sicd["CollectionInfo"]["Parameters"].get("RELATIVE_ORBIT", 0))
+        orbit_state = "ascending" if sicd["SCPCOA"]["ARPVel"]["Z"] > 0 else "descending"
 
     stac_payload = {
         "type": "Feature",
@@ -831,19 +886,22 @@ def stac_discovery_template(burst_id, orig, coreg, external_metadata, stac, proc
         "bbox": bbox,
         "geometry": {"type": "Polygon", "coordinates": [coordinates]},
         "properties": {
-            "title": "Sentinel-1 ARD CSLC Product",
+            "title": "COP-ARD CSLC Product",
             "datetime": m,
             "start_datetime": s,
             "end_datetime": e,
             "created": processing_start_time,
-            "constellation": "sentinel-1",
-            "instruments": ["sar"],
-            "platform": sicd["CollectionInfo"]["CollectorName"].replace("S", "sentinel-").lower(),
+            "constellation": constellation,
+            "instruments": instruments,
+            "platform": platform,
             "eopf:datatake_id": datatake_id,
             "eopf:instrument_mode": mode,
             "processing:lineage": "systematic",
-            "processing:software": {"Sentinel-1 ARD CORE": f"{cop_ard_core.__version__}"},
-            "processing:version": f"{cop_ard_core.__version__}",
+            "processing:software": {
+                "COP-ARD-CORE": f"{cop_ard_core.__version__}",
+                "COP-ARD-APP": f"{cop_ard_app.__version__}",
+            },
+            "processing:version": f"{cop_ard_app.__version__}",
             "processing:datetime": processing_start_time,
             "processing:facility": external_metadata["facility"],
             "product:timeliness": external_metadata["product_timeliness"],
@@ -852,20 +910,18 @@ def stac_discovery_template(burst_id, orig, coreg, external_metadata, stac, proc
             "providers": external_metadata["providers"],
             "sar:beam_ids": [sicd["CollectionInfo"]["Parameters"]["SWATH"].upper()],
             "sar:center_frequency": sicd["RMA"]["INCA"]["FreqZero"],
-            "sar:frequency_band": "C",
+            "sar:frequency_band": band,
             "sar:instrument_mode": mode,
             "sar:pixel_spacing_azimuth": round(sicd_coreg["Grid"]["Col"]["SS"], 5),
             "sar:pixel_spacing_range": round(sicd_coreg["Grid"]["Row"]["SS"], 5),
             "sar:polarizations": pol,
             "sat:absolute_orbit": absolute_orbit,
-            "sat:anx_datetime": anx_time,
             "sat:orbit_state": orbit_state,
-            "sat:platform_international_designator": platform_international_designator,
             "sat:relative_orbit": relative_orbit,
             "view:incidence_angle": sicd["SCPCOA"]["IncidenceAng"],
             "sci:citation": external_metadata["atbd_link"],
         },
-        "links": [{"href": "./.zattrs.json", "rel": "self", "type": "application/json"}],
+        "links": [{"href": "./zarr.json", "rel": "self", "type": "application/json"}],
         "assets": {
             "measurements": {
                 "href": "./measurements",
@@ -897,9 +953,10 @@ def stac_discovery_template(burst_id, orig, coreg, external_metadata, stac, proc
 
 
 def get_stac_cslc(slc: xr.DataTree, burst_id: str, external_metadata, processing_start_time):
-    reference_date = slc.coreg.measurements.attrs["coregistration_reference_date"]
+    reference_id = slc.coreg.measurements.attrs["coregistration_reference_id"]
     acquisition_dates = slc.coreg.measurements.cstack.acquisition_date.values
-    date = acquisition_dates[0] if acquisition_dates.size == 1 else reference_date
+    acquisition_ids = slc.coreg.measurements.cstack.acquisition_id.values
+    date = acquisition_ids[0] if acquisition_ids.size == 1 else reference_id
     orig = slc.orig[date].measurements.slc
     coreg = slc.coreg.measurements.cstack
     stac = slc.orig[date].conditions.attrs.get("stac_discovery", {})
@@ -908,9 +965,9 @@ def get_stac_cslc(slc: xr.DataTree, burst_id: str, external_metadata, processing
 
 
 def get_processing_history_cslc(slc: xr.DataTree, stac_discovery, external_metadata, processing_start_time):
-    reference_date = slc.coreg.measurements.attrs["coregistration_reference_date"]
-    acquisition_dates = slc.coreg.measurements.cstack.acquisition_date.values
-    date = acquisition_dates[0] if acquisition_dates.size == 1 else reference_date
+    reference_id = slc.coreg.measurements.attrs["coregistration_reference_id"]
+    acquisition_ids = slc.coreg.measurements.cstack.acquisition_id.values
+    date = acquisition_ids[0] if acquisition_ids.size == 1 else reference_id
     processing_history = slc.orig[date].conditions.attrs.get("processing_history", {})
     stac = slc.orig[date].conditions.attrs.get("stac_discovery", {})
     inputs = stac["id"] if "id" in stac else "n/a"
@@ -923,24 +980,24 @@ def get_processing_history_cslc(slc: xr.DataTree, stac_discovery, external_metad
         if e in external_metadata:
             adfs.extend(external_metadata[e])
 
-    processing_history["Sentinel-1 ARD CSLC Product"] = [
+    processing_history["COP ARD CSLC Product"] = [
         {
             "adfs": adfs,
             "inputs": inputs,
             "facility": external_metadata["facility"],
             "outputs": stac_discovery["id"],
-            "processor": "Sentinel-1 ARD CORE",
+            "processor": "COP ARD APP",
             "time": processing_start_time,
-            "version": f"{cop_ard_core.__version__}",
+            "version": f"{cop_ard_app.__version__}",
         }
     ]
     return processing_history
 
 
 def get_other_metadata_cslc(slc: xr.DataTree, external_metadata):
-    reference_date = slc.coreg.measurements.attrs["coregistration_reference_date"]
-    acquisition_dates = slc.coreg.measurements.cstack.acquisition_date.values
-    date = acquisition_dates[0] if acquisition_dates.size == 1 else reference_date
+    reference_id = slc.coreg.measurements.attrs["coregistration_reference_id"]
+    acquisition_ids = slc.coreg.measurements.cstack.acquisition_id.values
+    date = acquisition_ids[0] if acquisition_ids.size == 1 else reference_id
 
     other_metadata = {}
     other_metadata["SICD"] = slc.orig[date].measurements.slc.attrs
@@ -954,7 +1011,13 @@ def get_other_metadata_cslc(slc: xr.DataTree, external_metadata):
     return other_metadata
 
 
-def update_coreg(slcs: xr.DataTree, external_metadata: dict = {}):
+def update_coreg(
+    slcs: xr.DataTree,
+    wdir_path_static: str,
+    reference_id: str,
+    external_metadata: dict = {},
+    **kwargs,
+):
     """
     Finalize the coregistered DataTree by adding product-level metadata.
 
@@ -981,6 +1044,13 @@ def update_coreg(slcs: xr.DataTree, external_metadata: dict = {}):
     # --- Iterate Over Each Burst/Scene ---
     for k, slc in (slcs.bursts if multiburst else {"data": slcs}).items():
         name = k if multiburst else "data"
+        path = f"bursts/{k}" if multiburst else f"data/{reference_id}"
+        static_data = read(
+            f"{wdir_path_static}/{path}/radar_grid",
+            as_type="xr.Dataset",
+            storage_options=get_storage_options(kwargs),
+        )
+        mask = static_data.layover.astype(np.int8) + 2 * static_data.shadow.astype(np.int8)
 
         stac_discovery = get_stac_cslc(
             slc,
@@ -995,7 +1065,7 @@ def update_coreg(slcs: xr.DataTree, external_metadata: dict = {}):
             processing_start_time=processing_start_time,
         )
         other_metadata = get_other_metadata_cslc(slc, external_metadata)
-        bursts[stac_discovery["id"]] = clean_cslc(slc)
+        bursts[stac_discovery["id"]] = clean_cslc(slc, mask)
         # --- Assign Product-Level Metadata ---
         bursts[stac_discovery["id"]].attrs = {
             "stac_discovery": stac_discovery.copy(),
@@ -1093,7 +1163,11 @@ def encode_poly(v_poly: xr.Dataset, name: str, stack: xr.Dataset) -> xr.Dataset:
 
     # 6. Chunking
     # We use .get() to avoid KeyErrors if dims are missing or not chunked
-    chunk_plan = {"acquisition_date": stack.chunksizes.get("acquisition_date", "auto"), "i": 1, "j": 1}
+    chunk_plan = {
+        "acquisition_date": stack.chunksizes.get("acquisition_date", "auto"),
+        "i": 1,
+        "j": 1,
+    }
 
     # Only chunk dimensions that actually exist in the output
     final_chunks = {k: v for k, v in chunk_plan.items() if k in ds_out.dims}
@@ -1172,7 +1246,7 @@ def decode_poly(v_poly: xr.Dataset, name: str, stack: xr.Dataset) -> xr.Dataset:
     return decoded_ds
 
 
-def get_carrier_frequency(slcs: xr.DataTree, path: str, multiburst: bool=True) -> float:
+def get_carrier_frequency(slcs: xr.DataTree, path: str, multiburst: bool = True) -> float:
     """
     Compute the mean carrier frequency of the bursts.
 
@@ -1199,7 +1273,7 @@ def get_carrier_frequency(slcs: xr.DataTree, path: str, multiburst: bool=True) -
     return np.mean(f0)
 
 
-def clean_cslc(slc: xr.DataTree):
+def clean_cslc(slc: xr.DataTree, mask: xr.DataArray):
     # --- Restructure the DataTree ---
     # Rename 'cstack' to 'cslc' and drop unnecessary coordinates.
     cslc = xr.DataTree()
@@ -1207,39 +1281,46 @@ def clean_cslc(slc: xr.DataTree):
     measurements = (
         slc.coreg.measurements.to_dataset().rename({"cstack": "cslc"}).drop_vars(["slant_range_m", "azimuth_m"])
     ).drop_attrs()
-    quality = slc.coreg.quality.to_dataset().rename({"RCS": "rcs", "crg_accuracy": "coregistration_accuracy"})
+    quality = slc.coreg.quality.to_dataset()
+    renames = {"RCS": "rcs", "crg_accuracy": "coregistration_accuracy"}
+    quality = quality.rename({k: v for k, v in renames.items() if k in quality.variables})
     orbit = slc.coreg.conditions.orbit.to_dataset()
     phase_demod = slc.coreg.conditions.phase_demod.to_dataset()
-    # Ensure ETAD group exists, even if empty.
-    if "ETAD" not in slc.coreg.conditions:
-        etad = xr.Dataset(
-            data_vars={
-                "azcorr": (["slant_range_time", "azimuth_time"], [[np.nan]]),
-                "rgcorr": (["slant_range_time", "azimuth_time"], [[np.nan]]),
-            },
-            coords={
-                "slant_range_time": [0.0],
-                "azimuth_time": [np.datetime64("0", "ns")],
-            },
-        )
-    else:
+    look_vector = slc.coreg.conditions.look_vector.to_dataset()
+
+    quality = add_acquisition_date(quality, measurements)
+    phase_demod = add_acquisition_date(phase_demod, measurements)
+    orbit = orbit.drop_vars(["orbit_files", "reference_time", "type"], errors="ignore")
+    orbit = add_acquisition_date(orbit, measurements)
+    if "ETAD" in slc.coreg.conditions:
         etad = slc.coreg.conditions.ETAD.to_dataset()
+        etad = add_acquisition_date(etad, measurements)
+        cslc["conditions/ETAD"] = etad
+    if "side_band" in slc.coreg.conditions:
+        side_band = slc.coreg.conditions.side_band.to_dataset()
+        side_band = add_acquisition_date(side_band, measurements)
+        cslc["conditions/side_band"] = side_band
 
-    if measurements.acquisition_date.size == 1:
-        measurements = measurements.squeeze("acquisition_date")
-        quality = quality.squeeze("acquisition_date")
-        orbit = orbit.drop_vars(["orbit_files", "reference_time", "type"]).squeeze("acquisition_date")
-        phase_demod = phase_demod.squeeze("acquisition_date")
-        if "etad_file" in etad:
-            etad = etad.drop_vars(["etad_file"]).squeeze("acquisition_date")
-
-    cslc["measurements"] = measurements
-    cslc["quality"] = quality
+    cslc["measurements"] = measurements.drop_vars(["daz", "drg"])
     cslc["conditions/orbit"] = orbit
+    cslc["conditions/look_vector"] = look_vector
     cslc["conditions/phase_demodulation"] = phase_demod
-    cslc["conditions/ETAD"] = etad
+    cslc["quality/radar_qlt"] = quality
+    cslc["quality/distortion_mask"] = mask.to_dataset(name="distortion_mask")
 
     return cslc
+
+
+def add_acquisition_date(ds: xr.Dataset | None, ref_measurements: xr.Dataset) -> xr.Dataset | None:
+    """
+    Attach 'acquisition_date' as a non-dimension coordinate dependent on 'acquisition_id'.
+    """
+    if ds is None or "acquisition_id" not in ds.dims:
+        return ds
+
+    dates = ref_measurements.acquisition_date.sel(acquisition_id=ds.acquisition_id.values)
+
+    return ds.assign_coords(acquisition_date=("acquisition_id", dates.values))
 
 
 def update_cslc_container(bursts: xr.DataTree):
@@ -1262,7 +1343,12 @@ def update_cslc_container(bursts: xr.DataTree):
         e = np.datetime64(stac_product["properties"]["end_datetime"])
         b = stac_product["bbox"]
         c = stac_product["geometry"]["coordinates"][0][:-1]
-        bbox = [min(b[0], bbox[0]), min(b[1], bbox[1]), max(b[2], bbox[2]), max(b[3], bbox[3])]
+        bbox = [
+            min(b[0], bbox[0]),
+            min(b[1], bbox[1]),
+            max(b[2], bbox[2]),
+            max(b[3], bbox[3]),
+        ]
         start = np.minimum(s, start)
         end = np.maximum(e, end)
         for i in range(4):
@@ -1282,10 +1368,87 @@ def update_cslc_container(bursts: xr.DataTree):
     stac["properties"]["end_datetime"] = end
     stac["bbox"] = bbox
     stac["geometry"]["coordinates"] = [coords]
-    stac["properties"]["sar:beam_ids"] = beam_ids[stac["properties"]["sar:instrument_mode"]]
+    try:
+        instrument_mode = stac["properties"]["sar:instrument_mode"]
+        stac["properties"]["sar:beam_ids"] = beam_ids[instrument_mode]
+    except (KeyError, TypeError) as err:
+        logger.warning(f"Failed to set 'sar:beam_ids': missing key or invalid mapping ({err})")
+        stac["properties"]["sar:beam_ids"] = []
     stac["assets"] = assets
     id = get_id_product(stac)
     stac["id"] = id
-    processing_history["Sentinel-1 ARD CSLC Product"][0]["outputs"] = id
+    processing_history["COP ARD CSLC Product"][0]["outputs"] = id
 
     return stac, processing_history
+
+
+def get_rf_band(tx_frequency_min, tx_frequency_max):
+    f_min = float(tx_frequency_min)  # Hz
+    f_max = float(tx_frequency_max)  # Hz
+
+    freq_hz = (f_min + f_max) / 2
+    freq_ghz = freq_hz / 1e9
+    if 0.3 <= freq_ghz < 1.0:
+        return "P"
+    elif 1.0 <= freq_ghz < 2.0:
+        return "L"
+    elif 2.0 <= freq_ghz < 4.0:
+        return "S"
+    elif 4.0 <= freq_ghz < 8.0:
+        return "C"
+    elif 8.0 <= freq_ghz < 12.0:
+        return "X"
+    return "Unknown"
+
+
+FAMILIES_MAP = {
+    "S1": ("sentinel-1", "sentinel-1"),
+    "SENTINEL-1": ("sentinel-1", "sentinel-1"),
+    "SAOCOM": ("saocom-1", "saocom"),
+    "ROSE": ("rose-l", "rose-l"),
+    "CSK": ("cosmo-skymed", "csk"),
+    "CSG": ("cosmo-skymed", "csg"),
+    "TSX": ("terrasar-x", "tsx"),
+    "TDX": ("terrasar-x", "tdx"),
+    "PAZ": ("paz", "paz"),
+    "BIOMASS": ("biomass", "biomass"),
+}
+
+
+def extract_stac_sar_props(sicd):
+    raw_collector = sicd["CollectionInfo"]["CollectorName"].strip().upper()
+
+    # 1. PLATFORM & CONSTELLATION
+    constellation = None
+    platform = None
+
+    for prefix, (const_name, plat_prefix) in FAMILIES_MAP.items():
+        if raw_collector.startswith(prefix):
+            constellation = const_name
+            suffix = raw_collector[len(prefix) :].replace("_", "").replace("-", "").lower()
+            platform = f"{plat_prefix}{suffix}" if suffix else plat_prefix
+            break
+
+    if not constellation:
+        platform = re.sub(r"[\s_]+", "-", raw_collector.lower())
+        constellation = re.sub(r"[-_][a-z0-9]$", "", platform)
+
+    instruments = ["sar"]
+    try:
+        tx_freq = sicd["RadarCollection"]["TxFrequency"]
+        f_center_ghz = (float(tx_freq["Min"]) + float(tx_freq["Max"])) / 2 / 1e9
+
+        if 0.3 <= f_center_ghz < 1.0:
+            instruments = ["p-sar"]
+        elif 1.0 <= f_center_ghz < 2.0:
+            instruments = ["l-sar"]
+        elif 2.0 <= f_center_ghz < 4.0:
+            instruments = ["s-sar"]
+        elif 4.0 <= f_center_ghz < 8.0:
+            instruments = ["c-sar"]
+        elif 8.0 <= f_center_ghz < 12.0:
+            instruments = ["x-sar"]
+    except (KeyError, TypeError, ValueError):
+        pass
+
+    return platform, constellation, instruments

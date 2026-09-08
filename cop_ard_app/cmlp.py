@@ -8,7 +8,7 @@ from cop_ard_core.utils import get_normalized_interf
 
 from cop_ard_app.computation import map
 from cop_ard_app.io import Path, get_storage_options, normpath, read, save_empty_dataset, write
-from cop_ard_app.utils import slice_and_drop_coordinates
+from cop_ard_app.utils import slice_and_drop_coordinates, sanitize_coordinates
 from cop_ard_core.logger import logger
 
 SHORT_DIMS = ["polarization", "azimuth_time", "slant_range_time"]
@@ -285,6 +285,7 @@ def _prepare_cstack(cstack: xr.DataArray) -> tuple[xr.DataArray, dict]:
 
     chunks = {k: v[0] for k, v in cstack.chunksizes.items() if k in SHORT_DIMS}
     cstack_sel = cstack.drop_vars([k for k in cstack.coords if k not in DIMS]).sortby("acquisition_date")
+    cstack_sel = sanitize_coordinates(cstack_sel)
 
     return cstack_sel, chunks
 

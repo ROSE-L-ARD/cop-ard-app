@@ -1,6 +1,7 @@
 import itertools
+import re
 import os
-
+from typing import Any, Union, Optional
 import dask.distributed
 import numpy as np
 import pyproj
@@ -18,6 +19,7 @@ from scipy.constants import speed_of_light
 from cop_ard_app.model import get_az_rg_times, get_coefficients
 from cop_ard_app.io import write
 from cop_ard_app.computation import map
+from cop_ard_core.iono_height import convert_ecef_to_llh, get_iono_height
 
 
 class GeoEnvPlugin(dask.distributed.WorkerPlugin):
@@ -189,7 +191,7 @@ def extract_subband(cslc: xr.DataArray, bw: float, f0: float, dim_transf: str = 
     )
 
 
-def get_bounding_box(slcs: xr.DataTree, path: str, multiburst: bool=True) -> list:
+def get_bounding_box(slcs: xr.DataTree, path: str, multiburst: bool = True) -> list:
     """
     Compute the bounding box of a burst stack in azimuth time and slant range time.
 
@@ -441,8 +443,17 @@ def get_bbox(slcs, reference_date: str | None = None):
     ]
 
 
-def save_single_burst(burst_id, current_reference, stable_reference, reference_db_path, multiburst):
-    path = f"bursts/{burst_id}" if multiburst else burst_id
+def save_single_burst(
+    burst_id,
+    current_reference,
+    stable_reference,
+    reference_db_path,
+    multiburst,
+    reference_id: str | None = None,
+):
+    if (not multiburst) and (reference_id is None):
+        raise ValueError(f"In single burst case, the reference_id is mandatory")
+    path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     current_reference_path = f"{reference_db_path}/{path}/current_reference"
     stable_reference_path = f"{reference_db_path}/{path}/stable_reference"
 
@@ -462,7 +473,9 @@ def save_single_burst(burst_id, current_reference, stable_reference, reference_d
             write(s_ref_slice, f"{stable_reference_path}/{date_val}")
 
 
-def update_reference_database(current_reference_tree, stable_references_tree, reference_db_path):
+def update_reference_database(
+    current_reference_tree, stable_references_tree, reference_db_path, reference_id: str | None = None
+):
     multiburst = "bursts" in current_reference_tree
 
     # 1. Check if the stable_references_tree is the dummy one we created to bypass EOPF errors
@@ -497,11 +510,179 @@ def update_reference_database(current_reference_tree, stable_references_tree, re
     map(
         save_single_burst,
         args,
-        kwargs={"reference_db_path": reference_db_path, "multiburst": multiburst},
+        kwargs={"reference_db_path": reference_db_path, "multiburst": multiburst, "reference_id": reference_id},
         enable_dask=True,
     )
 
 
+def split_slc_datatrees(
+    slcs,
+    reference_id: str,
+    multiburst: bool = True,
+) -> tuple[xr.DataTree, xr.DataTree]:
+    """Splits an SLC dataset or multi-burst object into reference and secondary DataTrees.
+
+    Parameters
+    ----------
+    slcs : object
+        The input SLC container containing `.bursts` or direct xarray data.
+    reference_id : str
+        Acquisition ID for the reference SLC dataset.
+    multiburst : bool, default True
+        Flag indicating if the input contains multiple bursts.
+
+    Returns
+    -------
+    tuple[xr.DataTree, xr.DataTree]
+        A tuple of (reference_slcs, secondary_slcs) DataTrees.
+    """
+    reference_slcs = xr.DataTree()
+    secondary_slcs = xr.DataTree()
+
+    # Determine dictionary items based on multiburst flag
+    burst_items = slcs.bursts.items() if multiburst else {"data": slcs}.items()
+
+    for k, v in burst_items:
+        prefix = f"bursts/{k}/" if multiburst else ""
+
+        # Populate reference tree
+        ref_path = f"{prefix}coreg"
+        reference_slcs[ref_path] = v.coreg
+        reference_slcs[ref_path]["measurements"] = v.coreg.measurements.to_dataset().sel(acquisition_id=[reference_id])
+        reference_slcs[f"{prefix}orig"] = v.orig
+
+        # Populate secondary tree
+        sec_path = f"{prefix}coreg/measurements"
+        secondary_slcs[sec_path] = v.coreg.measurements.to_dataset().drop_sel(acquisition_id=reference_id)
+
+    return reference_slcs, secondary_slcs
+
+
+def recompose_slc_datatrees(
+    reference_slcs: xr.DataTree,
+    secondary_slcs: xr.DataTree,
+    multiburst: bool = True,
+    keep_reference: bool = False,
+) -> xr.DataTree:
+    """Recomposes a single SLC DataTree from reference and secondary DataTrees.
+
+    Parameters
+    ----------
+    reference_slcs : xr.DataTree
+        DataTree containing reference measurements and 'orig' groups.
+    secondary_slcs : xr.DataTree
+        DataTree containing secondary measurements.
+    multiburst : bool, default True
+        Flag indicating if the dataset contains multiple bursts.
+
+    Returns
+    -------
+    xr.DataTree
+        Recomposed SLC DataTree containing combined measurements and original data.
+    """
+    slcs = reference_slcs.copy()
+
+    if multiburst and "bursts" in reference_slcs.children:
+        burst_keys = list(reference_slcs["bursts"].children.keys())
+    else:
+        burst_keys = [None]
+
+    for k in burst_keys:
+        prefix = f"bursts/{k}/" if (multiburst and k is not None) else ""
+        meas_path = f"{prefix}coreg/measurements"
+
+        sec_ds = secondary_slcs[meas_path].ds
+
+        if keep_reference:
+            ref_ds = reference_slcs[meas_path].ds
+            combined_ds = xr.concat([ref_ds, sec_ds], dim="acquisition_id")
+            slcs[meas_path] = combined_ds.sortby("acquisition_date")
+        else:
+            slcs[meas_path] = sec_ds
+
+        slcs[meas_path] = sanitize_coordinates(slcs[meas_path].to_dataset())
+
+    return slcs
+
+
+def compute_iono_and_orb_height(
+    reference_slcs: xr.DataTree,
+    secondary_slcs: xr.DataTree,
+    wdir_path_tmp: str,
+    acquisition_id: str,
+    iono_height_input: float | int | None = None,
+    default_iono_height: float = 350_000.0,
+) -> tuple[float, float]:
+    """Calculates orbital height (h_orb) and determines ionospheric height (h_iono).
+
+    Parameters
+    ----------
+    reference_slcs : xr.DataTree
+        DataTree container containing reference SLC coregistration and origin metadata.
+    secondary_slcs : xr.DataTree
+        DataTree container containing secondary SLC coregistration and origin metadata.
+    wdir_path_tmp : str
+        Temporary working directory path for ionosphere calculation.
+    acquisition_id : str
+        Target acquisition ID to select measurements from.
+    iono_height_input : float or int or None, default None
+        Pre-defined ionospheric height. If None, `get_iono_height()` is called.
+    default_iono_height : float, default 350000.0
+        Fallback height (in meters) if `get_iono_height()` raises an exception.
+
+    Returns
+    -------
+    tuple[float, float]
+        A tuple containing (h_orb, h_iono) in meters.
+    """
+    # Resolve single vs multi-burst object structure
+    multiburst = "bursts" in reference_slcs
+    burst_reference = next(iter(reference_slcs.bursts.values())) if multiburst else reference_slcs
+    burst_secondary = next(iter(secondary_slcs.bursts.values())) if multiburst else secondary_slcs
+
+    # Extract metadata attributes for secondary scene
+    best_pol = get_best_pol(burst_secondary.coreg.measurements.cstack.polarization.values)
+
+    acq_dates = burst_secondary.coreg.measurements.acquisition_date.values
+
+    if acq_dates.size != 1:
+        raise ValueError(f"Expected exactly 1 acquisition date for '{acquisition_id}', got {acq_dates.size}.")
+
+    acq_date = str(acq_dates[0])
+    logger.debug(f"Resolved secondary acquisition date: {acq_date}")
+
+    # Calculate orbital height (h_orb) using burst_reference node
+    scp_dict = burst_reference.orig[acquisition_id].measurements.slc.attrs[best_pol]["SCPCOA"]["ARPPos"]
+    scp_ecef = np.array([scp_dict[k] for k in ["X", "Y", "Z"]])
+    h_orb = float(convert_ecef_to_llh(scp_ecef)[2])
+    logger.info(f"Calculated h_orb: {h_orb} m")
+
+    # Determine ionospheric height (h_iono) logic
+    if iono_height_input is None:
+        try:
+            h_iono = float(get_iono_height(acq_date, scp_dict, wdir_path_tmp))
+        except Exception as err:
+            logger.warning(
+                f"Failed to fetch iono height automatically ({err}). Falling back to default: {default_iono_height} m"
+            )
+            h_iono = float(default_iono_height)
+    elif isinstance(iono_height_input, (float, int)):
+        h_iono = float(iono_height_input)
+    else:
+        raise TypeError(f"Invalid iono_height_input type: {type(iono_height_input)}. Expected float, int, or None.")
+
+    logger.info(f"Final h_iono: {h_iono} m")
+
+    return h_orb, h_iono
+
+
+def sanitize_coordinates(ds: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
+    clean_coords = {}
+    for coord_name, coord_var in ds.coords.items():
+        if coord_name not in ds.dims:
+            clean_coords[coord_name] = (coord_var.dims, coord_var.values)
+
+    return ds.assign_coords(clean_coords)
 def get_best_pol(polarization_values: list) -> str:
     """
     Select the preferred polarization based on a priority list.

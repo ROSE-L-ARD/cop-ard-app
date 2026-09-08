@@ -189,6 +189,11 @@ def save_etad(
         data_vars={
             "azcorr": (["azimuth_time", "slant_range_time"], etad_burst.sumOfCorrectionsAz.values),
             "rgcorr": (["azimuth_time", "slant_range_time"], etad_burst.sumOfCorrectionsRg.values),
+            "lowrescorr": (
+                ["azimuth_time", "slant_range_time"],
+                etad_burst.dopplerRangeShiftRg.values + etad_burst.geodeticCorrectionRg.values,
+            ),
+            "tropocorr": (["azimuth_time", "slant_range_time"], etad_burst.ionosphericCorrectionRg.values),
         },
         coords=coords,
         attrs={"etad_file": etadf},

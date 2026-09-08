@@ -16,6 +16,7 @@ from cop_ard_core.slc import (
     noise_removal,
 )
 from cop_ard_core.utils import sync_sicd_metadata
+from cop_ard_core.griddata import interpolate
 
 import cop_ard_app.readers
 from cop_ard_app.computation import init_zarr_groups, map, map_blocks
@@ -43,6 +44,7 @@ from cop_ard_app.model import (
     get_coefficients,
     get_footprint,
 )
+from cop_ard_core.griddata import interp_dataset_scaled
 from cop_ard_app.utils import get_best_pol
 
 cop_ard_app.readers.__file__
@@ -703,7 +705,11 @@ def finalize_import(
                 logger.info(f"Reading reference data for {acquisition_id} from static directory.")
                 current_ids = list(slcs.orig.keys())
                 _, acq_id, status_or_data = read_slc_static(
-                    "data", current_ids, working_directory=working_directory, **kwargs
+                    "data",
+                    current_ids,
+                    working_directory=working_directory,
+                    reference_id=acquisition_id,
+                    **kwargs,
                 )
 
                 if isinstance(status_or_data, int):
@@ -888,43 +894,153 @@ def updateOrbits(slc: xr.DataTree) -> xr.Dataset:
     return orbits
 
 
-def updateETAD(slc: xr.DataTree) -> xr.Dataset | None:
+def updateETAD(
+    slc: xr.DataTree,
+    measurements: xr.Dataset,
+    grid_size: Sequence[int] = (200, 200),
+) -> xr.Dataset | None:
     """
     Consolidate Extended Timing Annotation Data (ETAD) from all acquisitions.
 
-    If ETAD correction files were used during processing, this function gathers
-    the ETAD information from each acquisition's `conditions` group and
-    combines them into a single Dataset for the stack.
+    Gathers ETAD correction grids from each acquisition's `conditions` group within
+    the DataTree, resamples them onto a coregistered target grid using
+    scaled spline interpolation, converts time delays to interferometric phase,
+    and concatenates them along the `acquisition_id` dimension.
 
     Parameters
     ----------
-    slc
-        The DataTree for a single burst, containing the `orig` nodes.
+    slc : xr.DataTree
+        The DataTree structure for a single burst containing the `orig` nodes.
+    measurements : xr.Dataset
+        Dataset containing coregistration offsets (`daz`, `drg`) and reference coordinates.
+    grid_size : Sequence[int], optional
+        Dimensions (azimuth, range) for sampling the interpolation grid, by default (200, 200).
 
     Returns
     -------
-    xarray.Dataset or None
-        An xarray.Dataset containing the consolidated ETAD corrections, or None
-        if no ETAD data is found.
+    xr.Dataset | None
+        An xarray.Dataset containing consolidated ETAD corrections in radians and seconds,
+        or None if no ETAD metadata is found.
     """
-    # Check if ETAD data is present for all acquisitions.
-    if all(("conditions" in v) and ("ETAD" in v.conditions) for _, v in slc.orig.items()):
-        # Create a list of ETAD datasets, one for each acquisition.
-        etads = [
-            v.conditions.ETAD.to_dataset().assign_coords(acquisition_id=k).expand_dims("acquisition_id")
-            for k, v in slc.orig.items()
-        ]
-        # Add the original ETAD filename as a variable.
-        etads = [
-            e.assign({k: (["acquisition_id"], [os.path.basename(e.attrs.get(k, ""))]) for k in ["etad_file"]})
-            for e in etads
-        ]
-        # Concatenate the list of datasets into a single dataset along the acquisition_date dimension.
-        etads = xr.concat(etads, dim="acquisition_id")
-        # Re-chunk the final dataset.
-        etads = etads.chunk({k: 2048 for k in etads.dims})
-    else:
-        # Return None if ETAD data is not consistently available.
-        etads = None
+    etads = []
 
-    return etads
+    # Extract reference coordinate vectors
+    azimuth_time = measurements.azimuth_time.values
+    slant_range_time = measurements.slant_range_time.values
+
+    # Generate equispaced indices for spatial sampling
+    idx_az = np.linspace(0, len(azimuth_time) - 1, grid_size[0], dtype=int)
+    idx_rg = np.linspace(0, len(slant_range_time) - 1, grid_size[1], dtype=int)
+    az_sampled = azimuth_time[idx_az]
+    rg_sampled = slant_range_time[idx_rg]
+
+    # Iterate through each acquisition in the DataTree
+    for k, v in slc.orig.items():
+        if ("conditions" in v) and ("ETAD" in v.conditions):
+            etad = v.conditions.ETAD.to_dataset()
+            annot = v.measurements.slc.attrs
+            annot = annot[list(annot)[0]]
+            center_frequency = annot["RMA"]["INCA"]["FreqZero"]
+            # Select coregistration shifts for the current acquisition
+            daz = measurements.daz.sel(acquisition_id=k)
+            drg = measurements.drg.sel(acquisition_id=k)
+            daz_sel = daz.sel(azimuth_time=az_sampled, slant_range_time=rg_sampled)
+            drg_sel = drg.sel(azimuth_time=az_sampled, slant_range_time=rg_sampled)
+
+            # Build deformation-compensated interpolation meshgrid (xi)
+            az_grid, rg_grid = np.meshgrid(az_sampled, rg_sampled, indexing="ij")
+            az_grid = (az_grid + daz_sel).values
+            rg_grid = (rg_grid + drg_sel).values
+            xi = (az_grid, rg_grid)
+
+            target_coords = {
+                "azimuth_time": az_sampled,
+                "slant_range_time": rg_sampled,
+            }
+
+            # Perform scaled spline interpolation to avoid numerical underflow
+            etad_interp = interp_dataset_scaled(
+                data=etad,
+                xi=xi,
+                common_dims=("azimuth_time", "slant_range_time"),
+                target_coords=target_coords,
+                method="cubic",
+            )
+
+            # Assign acquisition coordinate and stack dimension
+            etad_interp = etad_interp.assign_coords(acquisition_id=k).expand_dims("acquisition_id")
+            etads.append(etad_interp)
+
+    if etads:
+        # Concatenate along acquisition dimension and re-chunk for optimal I/O
+        consolidated_etad = xr.concat(etads, dim="acquisition_id").compute()
+        consolidated_etad = consolidated_etad.chunk(
+            {
+                "acquisition_id": 1,
+                "azimuth_time": -1,
+                "slant_range_time": -1,
+            }
+        )
+        return consolidated_etad
+
+    return None
+
+
+def updateLookVector(
+    measurements: xr.Dataset,
+    simulation: xr.Dataset,
+    grid_size: Sequence[int] = (200, 200),
+) -> xr.Dataset | None:
+
+    # Optional subsampling of the simulation dataset for performance
+    step_y = max(1, simulation.sizes["y"] // (grid_size[0] * 2))
+    step_x = max(1, simulation.sizes["x"] // (grid_size[1] * 2))
+    simulation = simulation.squeeze().isel(y=slice(None, None, step_y), x=slice(None, None, step_x))
+
+    # 1. Calculate the look vector (maintaining float64)
+    dem_distance = simulation.dem_distance.squeeze()
+    norm = np.linalg.norm(dem_distance.values, ord=2, axis=-1, keepdims=True)
+    look_vector_arr = dem_distance.values / norm
+    look_vector_arr = np.moveaxis(look_vector_arr, -1, 0)  # shape: (3, y, x)
+
+    azimuth_time = measurements.azimuth_time
+    slant_range_time = measurements.slant_range_time
+
+    idx_az = np.linspace(0, len(azimuth_time) - 1, grid_size[0], dtype=int)
+    idx_rg = np.linspace(0, len(slant_range_time) - 1, grid_size[1], dtype=int)
+    az_sampled = azimuth_time[idx_az]
+    rg_sampled = slant_range_time[idx_rg]
+
+    target_coords = {"azimuth_time": az_sampled, "slant_range_time": rg_sampled}
+
+    dt_az_ns = (az_sampled.max() - az_sampled.min()).astype(float).values / (az_sampled.size - 1)
+    dt_rg_s = (rg_sampled.max() - rg_sampled.min()).values / (rg_sampled.size - 1)
+    az_ref, rg_ref = azimuth_time[0].values, slant_range_time[0].values
+
+    # Build points mapping
+    points = np.array(
+        [
+            (((simulation.azimuth_time - az_ref).astype(float)) / dt_az_ns).values,
+            ((simulation.slant_range_time - rg_ref).astype(float) / dt_rg_s).values,
+        ]
+    ).transpose(2, 1, 0)
+
+    # Prepare values to be interpolated and define output grid bounding box
+    z = look_vector_arr.transpose(0, 2, 1)
+    bbox = np.array([0, 0, rg_sampled.size, az_sampled.size])
+
+    # Interpolate using custom griddata interpolate function
+    m = interpolate(points, z, bbox)
+    m = m / np.linalg.norm(m, axis=0)
+
+    # Build the resulting xarray Dataset
+    ds_interp = xr.Dataset(
+        data_vars={"look_vector": (("axis", "azimuth_time", "slant_range_time"), m)},
+        coords={
+            "axis": [0, 1, 2],
+            "azimuth_time": az_sampled,
+            "slant_range_time": rg_sampled,
+        },
+    )
+
+    return ds_interp
