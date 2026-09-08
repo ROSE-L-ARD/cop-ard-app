@@ -563,8 +563,8 @@ def update_container(dt: xr.DataTree, dt_name, cslc_id):
     stac["stac_extensions"] = [i for i in stac["stac_extensions"] if i.split("/")[-3] not in ["view", "projection"]]
     id = get_id_product(stac)
     stac["id"] = id
-    processing_history[f"Sentinel-1 ARD {dt_name} Product"][0]["inputs"] = cslc_id
-    processing_history[f"Sentinel-1 ARD {dt_name} Product"][0]["outputs"] = id
+    processing_history[f"COP ARD {dt_name} Product"][0]["inputs"] = cslc_id
+    processing_history[f"COP ARD {dt_name} Product"][0]["outputs"] = id
 
     return stac, processing_history
 
@@ -611,17 +611,15 @@ def update_gmlp(gmlp: xr.DataTree, slcs: xr.DataTree, external_metadata: dict = 
             )
         acquisition_date = dates[0]
         acquisition_id = dates_ids[acquisition_date]
-        gstack = burst_node[acquisition_date]
-        display(gstack)
-        raise
+        gslc = burst_node[acquisition_date]
         stac, processing_history = get_stac_and_history_gslc(
             burst_id,
-            gstack,
+            gslc.measurements.to_dataset(),
             slcs,
             processing_start_time=processing_start_time,
         )
         other_metadata = get_other_metadata_gslc(external_metadata)
-        bursts[stac["id"]] = clean_gslc(gstack, slc, acquisition_id)
+        bursts[stac["id"]] = clean_gslc(gslc, slc, acquisition_id)
         bursts[stac["id"]].attrs = {
             "stac_discovery": stac,
             "processing_history": processing_history,
@@ -696,19 +694,43 @@ def fix_attributes(data: Union[xr.DataTree, xr.DataArray], attrs):
 def clean_gslc(gslc, slc, acquisition_id):
     # --- Restructure the DataTree for Final Product Format ---
     gslc_fix = xr.DataTree()
-
-    orbit = slc.coreg.conditions.orbit
+    orbit = slc.coreg.conditions.orbit.to_dataset().drop_vars(
+        ["orbit_files", "reference_time", "type"], errors="ignore"
+    )
     aq_size = gslc.measurements.acquisition_date.size
-    gslc_fix["measurements/gslc"] = (
-        gslc.measurements.gstack.squeeze("acquisition_date") if aq_size == 1 else gslc.measurements.gstack
+
+    mask = gslc.measurements.mask.to_dataset(name="distortion_mask").drop_vars(["acquisition_date", "acquisition_id"])
+    look_vector = gslc.conditions.look_vector
+    acquisition_dates = gslc.measurements.acquisition_date.values
+    measurements = (
+        gslc.measurements.to_dataset()
+        .drop_vars([k for k in gslc.measurements.data_vars if "phase" not in k])
+        .expand_dims(acquisition_id=1)
+        .transpose("polarization", "acquisition_id", "y", "x")
     )
-    gslc_fix["measurements/phase_model"] = (
-        gslc.measurements.phase_model.squeeze("acquisition_date") if aq_size == 1 else gslc.measurements.phase_model
+    measurements = measurements.assign_coords(
+        acquisition_date=("acquisition_id", np.atleast_1d(measurements.acquisition_date.values))
     )
-    gslc_fix["conditions/local_incidence_angle"] = gslc.conditions.lia
-    gslc_fix["conditions/anf"] = gslc.conditions.anf
-    gslc_fix["quality/mask"] = gslc.conditions.mask
-    gslc_fix["quality/nlooks"] = gslc.conditions.nlooks
+    coherence = (
+        gslc.measurements.to_dataset()
+        .drop_vars([k for k in gslc.measurements.data_vars if "coh" not in k])
+        .expand_dims(acquisition_id=1)
+        .transpose("polarization", "acquisition_id", "y", "x")
+    )
+    coherence = coherence.assign_coords(
+        acquisition_date=("acquisition_id", np.atleast_1d(measurements.acquisition_date.values))
+    )
+
+    if "etad" in gslc.conditions:
+        etad = gslc.conditions.etad.to_dataset()
+        etad = add_acquisition_date(etad, measurements)
+        gslc_fix["conditions/ETAD"] = etad
+
+    gslc_fix["conditions/look_vector"] = look_vector
+    gslc_fix["conditions/orbit"] = add_acquisition_date(orbit, measurements)
+    gslc_fix["measurements"] = measurements
+    gslc_fix["quality/distortion_mask"] = mask
+    gslc_fix["quality/coherence"] = coherence
 
     return gslc_fix
 
@@ -719,7 +741,7 @@ def get_other_metadata_gslc(external_metadata):
         "product_geometry": "projected",
         "product_pixel_coordinate_convention": external_metadata["product_pixel_coordinate_convention"],
         "noise_correction_flag": external_metadata["noise_removal"],
-        "gslc_status": external_metadata["gslc_status"],
+        "gmlp_status": external_metadata["gmlp_status"],
         "product_family_specification": external_metadata["product_family_specification"],
         "measurement_type": external_metadata["measurement_type"],
         "product_resampling_method": "sinc interpolator",
@@ -736,7 +758,7 @@ def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time):
     attrs = copy.deepcopy((slcs.bursts[burst_id] if multiburst else slcs)).attrs
     stac = attrs["stac_discovery"]
     processing_history = attrs["processing_history"]
-    crs = CRS(gslc.measurements.rio.crs).to_3d()
+    crs = CRS(gslc.rio.crs).to_3d()
     horizontal_crs = str(crs.to_2d().to_epsg())
     vertical_crs = extract_vertical_crs(crs)
     vertical_crs = f"+{vertical_crs}" if crs.is_vertical else ""
@@ -762,17 +784,22 @@ def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time):
     stac["stac_extensions"].append("https://stac-extensions.github.io/projection/v1.1.0/schema.json")
     stac["bbox"] = bbox
     stac["geometry"]["coordinates"] = [coordinates]
-    stac["properties"]["title"] = "Sentinel-1 ARD GSLC Product"
+    stac["properties"]["title"] = "COP ARD GMLP Product"
     stac["properties"]["created"] = processing_start_time
-    stac["properties"]["processing:software"] = {"COP ARD CORE": f"{cop_ard_core.__version__}"}
-    stac["properties"]["processing:version"] = f"{cop_ard_core.__version__}"
+    stac["properties"]["processing:software"] = {
+        "COP ARD CORE": f"{cop_ard_core.__version__}",
+        "COP ARD APP": f"{cop_ard_app.__version__}",
+    }
+    stac["properties"]["processing:version"] = f"{cop_ard_app.__version__}"
     stac["properties"]["processing:datetime"] = processing_start_time
-    stac["properties"]["product:type"] = f"S01S{mode}GSL"
+    stac["properties"]["product:type"] = f"S01S{mode}GMP"
     stac["properties"]["gsd"] = gsd
     stac["properties"]["proj:epsg"] = product_epsg
     stac["properties"]["proj:wkt2"] = product_wkt
     stac["properties"]["proj:shape"] = [pixels_number, lines_number]
     stac["properties"]["proj:transform"] = list(gslc.rio.transform())[:6]
+
+    stac["links"] = [{"href": "./zarr.json", "rel": "self", "type": "application/json"}]
     stac["assets"] = {
         "measurements": {
             "href": "./measurements",
@@ -799,12 +826,12 @@ def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time):
     id = get_id_product(stac, burst_id=burst_id)
     stac["id"] = id
 
-    processing_history["Sentinel-1 ARD GSLC Product"] = copy.deepcopy(processing_history["Sentinel-1 ARD CSLC Product"])
-    inputs = processing_history["Sentinel-1 ARD CSLC Product"][0]["outputs"]
-    processing_history["Sentinel-1 ARD GSLC Product"][0]["inputs"] = inputs
-    processing_history["Sentinel-1 ARD GSLC Product"][0]["outputs"] = id
-    processing_history["Sentinel-1 ARD GSLC Product"][0]["time"] = processing_start_time
-    processing_history["Sentinel-1 ARD GSLC Product"][0]["version"] = f"{cop_ard_core.__version__}"
+    processing_history["COP ARD GMLP Product"] = copy.deepcopy(processing_history["COP ARD CSLC Product"])
+    inputs = processing_history["COP ARD CSLC Product"][0]["outputs"]
+    processing_history["COP ARD GMLP Product"][0]["inputs"] = inputs
+    processing_history["COP ARD GMLP Product"][0]["outputs"] = id
+    processing_history["COP ARD GMLP Product"][0]["time"] = processing_start_time
+    processing_history["COP ARD GMLP Product"][0]["version"] = f"{cop_ard_app.__version__}"
 
     return stac, processing_history
 
@@ -874,7 +901,7 @@ def stac_discovery_template(burst_id, orig, coreg, external_metadata, stac, proc
                 "COP-ARD-CORE": f"{cop_ard_core.__version__}",
                 "COP-ARD-APP": f"{cop_ard_app.__version__}",
             },
-            "processing:version": f"{cop_ard_core.__version__}",
+            "processing:version": f"{cop_ard_app.__version__}",
             "processing:datetime": processing_start_time,
             "processing:facility": external_metadata["facility"],
             "product:timeliness": external_metadata["product_timeliness"],
@@ -953,15 +980,15 @@ def get_processing_history_cslc(slc: xr.DataTree, stac_discovery, external_metad
         if e in external_metadata:
             adfs.extend(external_metadata[e])
 
-    processing_history["Sentinel-1 ARD CSLC Product"] = [
+    processing_history["COP ARD CSLC Product"] = [
         {
             "adfs": adfs,
             "inputs": inputs,
             "facility": external_metadata["facility"],
             "outputs": stac_discovery["id"],
-            "processor": "Sentinel-1 ARD CORE",
+            "processor": "COP ARD APP",
             "time": processing_start_time,
-            "version": f"{cop_ard_core.__version__}",
+            "version": f"{cop_ard_app.__version__}",
         }
     ]
     return processing_history
@@ -1291,7 +1318,7 @@ def add_acquisition_date(ds: xr.Dataset | None, ref_measurements: xr.Dataset) ->
     if ds is None or "acquisition_id" not in ds.dims:
         return ds
 
-    dates = ref_measurements.acquisition_date.sel(acquisition_id=ds.acquisition_id)
+    dates = ref_measurements.acquisition_date.sel(acquisition_id=ds.acquisition_id.values)
 
     return ds.assign_coords(acquisition_date=("acquisition_id", dates.values))
 
@@ -1350,7 +1377,7 @@ def update_cslc_container(bursts: xr.DataTree):
     stac["assets"] = assets
     id = get_id_product(stac)
     stac["id"] = id
-    processing_history["Sentinel-1 ARD CSLC Product"][0]["outputs"] = id
+    processing_history["COP ARD CSLC Product"][0]["outputs"] = id
 
     return stac, processing_history
 

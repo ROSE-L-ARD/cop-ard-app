@@ -987,7 +987,7 @@ def updateLookVector(
     # Optional subsampling of the simulation dataset for performance
     step_y = max(1, simulation.sizes["y"] // (grid_size[0] * 2))
     step_x = max(1, simulation.sizes["x"] // (grid_size[1] * 2))
-    simulation = simulation.isel(y=slice(None, None, step_y), x=slice(None, None, step_x))
+    simulation = simulation.squeeze().isel(y=slice(None, None, step_y), x=slice(None, None, step_x))
 
     # 1. Calculate the look vector (maintaining float64)
     dem_distance = simulation.dem_distance.squeeze()

@@ -110,7 +110,7 @@ def stack_gmlp(
                 cmlp,
                 s,
                 s_ml,
-                etad.to_dataset().sel(acquisition_id=id) if etad is not None else None,
+                etad.to_dataset().sel(acquisition_id=[id]) if etad is not None else None,
                 phase.sel(acquisition_id=id),
             )
             args.append(a)
@@ -366,6 +366,7 @@ def map_geocoding_cmlp(
     # 3. Shape e Dtype trasparenti per 2D, 3D o 4D (zero KeyError)
     shape = {k: [*da.shape[:-2], y.size, x.size] for k, da in all_vars.items()}
     dtype = {k: da.dtype.name for k, da in all_vars.items()}
+    dtype["mask"] = np.int8
 
     # 4. Coords & Chunks
     coords = {k: v.values for k, v in cmlp_ds.coords.items() if k in COORDS}
@@ -496,7 +497,7 @@ def update_conditions_gmlp(
     norm_coarse[norm_coarse == 0] = 1.0  # Prevent potential division by zero
     ds_look_coarse["look_vector"][...] = look_vals / norm_coarse
 
-    gmlp["conditions/look_vector"] = ds_look_coarse
+    gmlp["conditions/look_vector"] = ds_look_coarse.astype("float64")
 
     # --- 3. Interpolate ETAD Corrections (Radar Time -> Coarse Geo Grid) ---
     if etad is not None and len(etad.data_vars) > 0:
@@ -533,20 +534,27 @@ def update_conditions_gmlp(
         az_query = ds_times_coarse.azimuth_time.squeeze().values
         rg_query = ds_times_coarse.slant_range_time.squeeze().values
         xi_etad = (az_query, rg_query)
-        e = etad.squeeze()
-        # Interpolate ETAD corrections onto the target (y, x) coarse grid
-        logger.debug(f"e: {e}")
-        logger.debug(f"xi_etad: {xi_etad}")
-        logger.debug(f"points_etad: {points_etad}")
-        logger.debug(f"target_coords: {target_coords}")
-        etad_yx = interp_dataset_scaled(
-            data=e,
-            xi=xi_etad,
-            common_dims=("azimuth_time", "slant_range_time"),
-            points=points_etad,
-            rename={"azimuth_time": "y", "slant_range_time": "x"},
-            target_coords=target_coords,
-            method="linear",
+        etad_interpolated_list = []
+
+        for acq_id in etad.acquisition_id.values:
+            etad_sub = etad.sel(acquisition_id=acq_id)
+            interp_sub = interp_dataset_scaled(
+                data=etad_sub,
+                xi=xi_etad,
+                common_dims=("azimuth_time", "slant_range_time"),
+                points=points_etad,
+                rename={"azimuth_time": "y", "slant_range_time": "x"},
+                target_coords={"y": y_sampled, "x": x_sampled},
+                method="cubic",
+            )
+
+            interp_sub = interp_sub.expand_dims("acquisition_id").assign_coords(acquisition_id=[acq_id])
+            etad_interpolated_list.append(interp_sub)
+
+        etad_yx = (
+            xr.concat(etad_interpolated_list, dim="acquisition_id")
+            .astype("float32")
+            .chunk({"acquisition_id": 1, "y": -1, "x": -1})
         )
 
         gmlp["conditions/etad"] = etad_yx
@@ -751,6 +759,6 @@ def blockwise_interp_cmlp(
                 method="nearest",
                 fill_value=0,
             )
-            ds["mask"] = mask_interp["mask"].astype(int)
+            ds["mask"] = mask_interp["mask"].astype(np.int8)
 
     return ds
