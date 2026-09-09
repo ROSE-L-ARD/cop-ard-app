@@ -9,7 +9,16 @@ from cop_ard_core.warp import GRID, coreg_qlt, getLUT, sinc, warp_cslc, warp_daz
 from scipy.constants import speed_of_light
 
 from cop_ard_app.computation import map, map_blocks
-from cop_ard_app.io import get_storage_options, normpath, path_to_dict, read, save_empty_dataset, write, exists
+from cop_ard_app.io import (
+    get_storage_options,
+    normpath,
+    path_to_dict,
+    read,
+    save_empty_dataset,
+    write,
+    exists,
+    generate_empty_dataset,
+)
 from cop_ard_app.model import get_coefficients
 from cop_ard_app.slc import updateETAD, updateOrbits, updateLookVector
 from cop_ard_app.utils import get_margin, get_best_pol
@@ -84,23 +93,34 @@ def init_single_coreg_stack(
         "slant_range_m": ("slant_range_time", slc.slant_range_m.values),
     }
 
-    measurements = save_empty_dataset(
+    measurements = generate_empty_dataset(
         data_vars=data_vars,
         dims=dims,
         shape=shape_dict,
         chunks=chunks,
         dtype=dtype,
-        data_path=measurements_path,
         coords=coords,
-        attrs={
-            # "coregistration_reference_date": ref_date,
-            "coregistration_reference_id": ref_id,
-        },
+        attrs={"coregistration_reference_id": ref_id},
         attrs_data_vars={"cstack": slc.attrs},
-        skip_read=False,
-        compute=True,
-        **kwargs,
     )
+
+    write(
+        measurements.drop_vars(["cstack", "phase_model"]),
+        measurements_path,
+        mode="w",
+        compute=True,
+        storage_options=get_storage_options(kwargs),
+        skip_read=True,
+    )
+    measurements = write(
+        measurements,
+        measurements_path,
+        mode="a",
+        compute=False,
+        storage_options=get_storage_options(kwargs),
+        skip_read=False,
+    )
+
     crg["measurements"] = measurements
 
     data_vars = ["daz", "drg"]

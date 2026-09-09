@@ -4,7 +4,14 @@ from typing import cast
 import numpy as np
 import xarray as xr
 from cop_ard_core.logger import logger, timeit
-from cop_ard_core.split_spectrum import fit_ionosphere, joint_unwrap, joint_unwrap_delta_mean, reconstruct_iono_surface, split_spectrum_core, split_spectrum_core_delta_mean
+from cop_ard_core.split_spectrum import (
+    fit_ionosphere,
+    joint_unwrap,
+    joint_unwrap_delta_mean,
+    reconstruct_iono_surface,
+    split_spectrum_core,
+    split_spectrum_core_delta_mean,
+)
 from cop_ard_core.utils import get_azimuth_time_raw, get_best_pol
 
 from cop_ard_app.computation import map, map_blocks
@@ -20,16 +27,26 @@ from cop_ard_app.utils import (
 )
 from cop_ard_app.utils import get_best_pol
 
-def get_phase_corr_from_x_poly(azimuth_time: xr.DataArray, slant_range_time: xr.DataArray, x_poly: xr.Dataset, freq: float) -> xr.DataArray:
+
+def get_phase_corr_from_x_poly(
+    azimuth_time: xr.DataArray, slant_range_time: xr.DataArray, x_poly: xr.Dataset, freq: float
+) -> xr.DataArray:
     from numpy.polynomial.polynomial import polygrid2d
 
-    out_coords = {'azimuth_time': azimuth_time.values, 'slant_range_time': slant_range_time.values}
+    out_coords = {"azimuth_time": azimuth_time.values, "slant_range_time": slant_range_time.values}
 
-    az_sc = ((azimuth_time - np.datetime64(x_poly.attrs['off_y'], 'ns')).astype(float) -  x_poly.offset[0]) / x_poly.scale_fact[0]
-    rg_sc = (slant_range_time -  x_poly.offset[1]) / x_poly.scale_fact[1]
+    az_sc = (
+        (azimuth_time - np.datetime64(x_poly.attrs["off_y"], "ns")).astype(float) - x_poly.offset[0]
+    ) / x_poly.scale_fact[0]
+    rg_sc = (slant_range_time - x_poly.offset[1]) / x_poly.scale_fact[1]
 
-    rg_corr = xr.DataArray(polygrid2d(az_sc.values, rg_sc.values, x_poly.values), dims=['azimuth_time', 'slant_range_time'], coords=out_coords)
+    rg_corr = xr.DataArray(
+        polygrid2d(az_sc.values, rg_sc.values, x_poly.values),
+        dims=["azimuth_time", "slant_range_time"],
+        coords=out_coords,
+    )
     return 2 * np.pi * freq * rg_corr
+
 
 @timeit
 def separate_dispersive_spectrum_components(
@@ -54,7 +71,7 @@ def separate_dispersive_spectrum_components(
     f0 = get_carrier_frequency(reference_slcs, "coreg/measurements/cstack", multiburst=multiburst)
     f_l_tot = f0 - frequency_offset
     f_h_tot = f0 + frequency_offset
-    
+
     # lower band interferogram
     mosaic_l = get_mosaic_interf(
         reference_slcs,
@@ -72,12 +89,17 @@ def separate_dispersive_spectrum_components(
 
     if x_poly is not None:
         # compute phase correction to be applied to each subband
-        ph_corr = get_phase_corr_from_x_poly(mosaic_l.azimuth_time, mosaic_l.slant_range_time, x_poly[mosaic_l.acquisition_id.values[0]], frequency_offset)
+        ph_corr = get_phase_corr_from_x_poly(
+            mosaic_l.azimuth_time,
+            mosaic_l.slant_range_time,
+            x_poly[mosaic_l.acquisition_id.values[0]],
+            frequency_offset,
+        )
         logger.debug(f"APPLY CORRECTIONS {ph_corr.min().values, ph_corr.max().values}")
     else:
-        ph_corr = 0.
+        ph_corr = 0.0
 
-    mosaic_l['phase'] = mosaic_l['phase'] + ph_corr
+    mosaic_l["phase"] = mosaic_l["phase"] + ph_corr
 
     # upper band interferogram
     mosaic_h = get_mosaic_interf(
@@ -93,7 +115,7 @@ def separate_dispersive_spectrum_components(
         multiburst=multiburst,
         chunks=chunks,
     )
-    mosaic_h['phase'] = mosaic_h['phase'] - ph_corr
+    mosaic_h["phase"] = mosaic_h["phase"] - ph_corr
 
     if wdir_path is not None:
         # save to disk
@@ -256,10 +278,7 @@ def separate_dispersive_spectrum_components_delta_mean(
             x_poly[mosaic_l.acquisition_id.values[0]],
             frequency_offset,
         )
-        logger.debug(
-            f"APPLY CORRECTIONS "
-            f"{ph_corr.min().values, ph_corr.max().values}"
-        )
+        logger.debug(f"APPLY CORRECTIONS {ph_corr.min().values, ph_corr.max().values}")
     else:
         ph_corr = 0.0
 
@@ -483,8 +502,8 @@ def split_spectrum(
     split_spectrum_poly_degree: int = 2,
     h_iono: float | None = None,
     enable_dask: bool = True,
-    reference_id: str | None = None,
     x_poly: xr.Dataset | None = None,
+    dbfile: str | None = None,
 ):
     wdir_path = Path(wdir_path)
     reference_slcs, secondary_slcs = split_slc_datatrees(
@@ -498,6 +517,7 @@ def split_spectrum(
         wdir_path_tmp=wdir_path,
         acquisition_id=reference_id,
         iono_height_input=h_iono,
+        dbfile=dbfile,
     )
 
     # evaluate bounding box

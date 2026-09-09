@@ -1483,25 +1483,27 @@ def read(
 
     return dt
 
+
 def drop_encodings(data):
-  """Recursively clears encoding dictionaries across DataTree, Dataset, and DataArray objects."""
-  if isinstance(data, xr.DataTree):
-    for node in data.subtree:  # includes root
-      if node.ds is not None:
-        drop_encodings(node.ds)
+    """Recursively clears encoding dictionaries across DataTree, Dataset, and DataArray objects."""
+    if isinstance(data, xr.DataTree):
+        for node in data.subtree:  # includes root
+            if node.ds is not None:
+                drop_encodings(node.ds)
 
-  elif isinstance(data, xr.Dataset):
-    data.encoding.clear()
-    for v in data.variables.values():
-      v.encoding.clear()
+    elif isinstance(data, xr.Dataset):
+        data.encoding.clear()
+        for v in data.variables.values():
+            v.encoding.clear()
 
-  elif isinstance(data, xr.DataArray):
-    data.encoding.clear()
-    data.variable.encoding.clear()
-    for coord in data.coords.values():
-      coord.encoding.clear()
-      if hasattr(coord, "variable"):
-        coord.variable.encoding.clear()
+    elif isinstance(data, xr.DataArray):
+        data.encoding.clear()
+        data.variable.encoding.clear()
+        for coord in data.coords.values():
+            coord.encoding.clear()
+            if hasattr(coord, "variable"):
+                coord.variable.encoding.clear()
+
 
 def write(
     data: Union[xr.Dataset, xr.DataArray, xr.DataTree],
@@ -1534,6 +1536,7 @@ def write(
     # 5. WRITE
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*Consolidated metadata is currently not part.*")
+        warnings.filterwarnings("ignore", message=".*does not have a Zarr V3 specification.*")
         _data.to_zarr(
             store=_file_path,
             mode=mode,

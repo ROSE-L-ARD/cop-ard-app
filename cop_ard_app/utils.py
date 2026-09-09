@@ -548,12 +548,15 @@ def split_slc_datatrees(
         # Populate reference tree
         ref_path = f"{prefix}coreg"
         reference_slcs[ref_path] = v.coreg
-        reference_slcs[ref_path]["measurements"] = v.coreg.measurements.to_dataset().sel(acquisition_id=[reference_id])
+        m = v.coreg.measurements
+        if not isinstance(m, xr.Dataset):
+            m = m.to_dataset()
+        reference_slcs[ref_path]["measurements"] = m.sel(acquisition_id=[reference_id])
         reference_slcs[f"{prefix}orig"] = v.orig
 
         # Populate secondary tree
         sec_path = f"{prefix}coreg/measurements"
-        secondary_slcs[sec_path] = v.coreg.measurements.to_dataset().drop_sel(acquisition_id=reference_id)
+        secondary_slcs[sec_path] = m.drop_sel(acquisition_id=reference_id)
 
     return reference_slcs, secondary_slcs
 
@@ -612,6 +615,7 @@ def compute_iono_and_orb_height(
     acquisition_id: str,
     iono_height_input: float | int | None = None,
     default_iono_height: float = 350_000.0,
+    dbfile: str | None = None,
 ) -> tuple[float, float]:
     """Calculates orbital height (h_orb) and determines ionospheric height (h_iono).
 
@@ -660,7 +664,7 @@ def compute_iono_and_orb_height(
     # Determine ionospheric height (h_iono) logic
     if iono_height_input is None:
         try:
-            h_iono = float(get_iono_height(acq_date, scp_dict, wdir_path_tmp))
+            h_iono = float(get_iono_height(acq_date, scp_dict, wdir_path_tmp, dbfile))
         except Exception as err:
             logger.warning(
                 f"Failed to fetch iono height automatically ({err}). Falling back to default: {default_iono_height} m"
@@ -683,6 +687,8 @@ def sanitize_coordinates(ds: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataA
             clean_coords[coord_name] = (coord_var.dims, coord_var.values)
 
     return ds.assign_coords(clean_coords)
+
+
 def get_best_pol(polarization_values: list) -> str:
     """
     Select the preferred polarization based on a priority list.
@@ -705,4 +711,3 @@ def get_best_pol(polarization_values: list) -> str:
         raise Exception(f"No polarization has been found {available_pols}")
 
     return pol
-

@@ -229,8 +229,8 @@ def import_image(
     write(dt, data_path, mode="w", compute=True, storage_options=get_storage_options(kwargs), skip_read=True)
 
     # SAVE EMPTY VARIABLES
-    dt["measurements"] = image.drop_vars(image.coords)
-    write(dt, data_path, mode='a', compute=False, storage_options=get_storage_options(kwargs), skip_read=True)
+    dt["measurements"] = image
+    write(dt, data_path, mode="a", compute=False, storage_options=get_storage_options(kwargs), skip_read=True)
 
     if do_import:
         # Define the path to the measurements group.
