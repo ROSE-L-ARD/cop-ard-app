@@ -771,7 +771,7 @@ class SentinelDetails(object):
                 y_scale=1e-3,
                 rcond=1e-35,
             )
-            logger.info(
+            logger.debug(
                 "The phase polynomial fit details:\n\t"
                 "root mean square residuals = {}\n\t"
                 "rank = {}\n\t"
@@ -801,7 +801,7 @@ class SentinelDetails(object):
                 y_scale=1e-3,
                 rcond=1e-40,
             )
-            logger.info(
+            logger.debug(
                 "The TimeCOAPoly fit details:\n\t"
                 "root mean square residuals = {}\n\t"
                 "rank = {}\n\t"
@@ -1018,7 +1018,7 @@ class SentinelDetails(object):
                     y_scale=1e-3,
                     rcond=1e-35,
                 )
-                logger.info(
+                logger.debug(
                     "The {} polynomial fit details:\n\t"
                     "root mean square residuals = {}\n\t"
                     "rank = {}\n\t"
@@ -1163,7 +1163,7 @@ class SentinelDetails(object):
                     y_scale=1e-3,
                     rcond=1e-40,
                 )
-                logger.info(
+                logger.debug(
                     "NoisePoly fit details:\n\t"
                     "root mean square residuals = {}\n\t"
                     "rank = {}\n\t"
@@ -1375,7 +1375,7 @@ def is_a(file_name: str) -> Optional[SentinelReader]:
 
     try:
         sentinel_details = SentinelDetails(file_name)
-        logger.info("Path {} is determined to be or contain a Sentinel-1 manifest.safe file.".format(file_name))
+        logger.debug("Path {} is determined to be or contain a Sentinel-1 manifest.safe file.".format(file_name))
         return SentinelReader(sentinel_details)
     except (SarpyIOError, AttributeError, SyntaxError, ElementTree.ParseError):
         return None

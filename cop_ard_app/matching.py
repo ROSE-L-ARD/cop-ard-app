@@ -10,8 +10,8 @@ from typing import Literal, Sequence
 
 import numpy as np
 import xarray as xr
-from cop_ard_core.matching import compute_pearson_coefficient, initialize_patches, fix_disparity
 from cop_ard_core.detrend import fit_2d_poly, to_polygrid2d
+from cop_ard_core.matching import compute_pearson_coefficient, fix_disparity, initialize_patches
 from scipy.constants import speed_of_light
 
 from cop_ard_app.computation import map, map_blocks
@@ -76,7 +76,7 @@ def estimate_poly_matching(
     cohe_th: float = 0.3,
     kernel_shape: list = [15, 15],
     enable_dask: bool = True,
-) -> xr.DataTree:
+) -> tuple[xr.Dataset, xr.Dataset]:
     """Starting from the disparity maps evaluated ion cotrrespondence of each burst / slice the global polynomial correction function is evaluated.
     Corrections are stored in a datatree. At first level the nodes corresponds to the acquisition_id.
     At the second level the two polynomial corrections x_poly and y_poly are provided.

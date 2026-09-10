@@ -458,13 +458,13 @@ def stack_simulation_ml(
         ),
     )
     # --- Assemble Results ---
-    simulation_ml_tree: dict = {"bursts": {}} if multiburst else {}
+    simulation_ml_tree = xr.DataTree()
     for k, sim_ml in results:
-        # Reconstruct the nested dictionary structure from the list of results.
+        # Reconstruct the DataTree structure from the list of results.
         if multiburst:
-            simulation_ml_tree["bursts"][k] = sim_ml
+            simulation_ml_tree[f"bursts/{k}"] = sim_ml
         else:
-            simulation_ml_tree = sim_ml
+            simulation_ml_tree = xr.DataTree(sim_ml)
     return simulation_ml_tree
 
 
@@ -665,16 +665,18 @@ def single_simulation_ml(
         logger.info(f"Found existing simulation multilook file for {burst_id}")
 
     # --- Read and Return the Result ---
-    simulation_ml = {
-        "min": read(
-            normpath(f"{data_path}/simulation_ml_min"),
-            as_type="xr.Dataset",
-            storage_options=get_storage_options(kwargs),
-        ),
-        "max": read(
-            normpath(f"{data_path}/simulation_ml_max"),
-            as_type="xr.Dataset",
-            storage_options=get_storage_options(kwargs),
-        ),
-    }
+    simulation_ml = xr.DataTree.from_dict(
+        {
+            "min": read(
+                normpath(f"{data_path}/simulation_ml_min"),
+                as_type="xr.Dataset",
+                storage_options=get_storage_options(kwargs),
+            ),
+            "max": read(
+                normpath(f"{data_path}/simulation_ml_max"),
+                as_type="xr.Dataset",
+                storage_options=get_storage_options(kwargs),
+            ),
+        }
+    )
     return (burst_id, simulation_ml)

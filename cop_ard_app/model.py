@@ -1,10 +1,9 @@
 import copy
-import re
 import os
+import re
 from datetime import datetime, timezone
-from typing import Sequence, Union, cast
+from typing import Any, Sequence, Union, cast
 
-import cop_ard_app
 import cop_ard_core
 import numpy as np
 import sarpy.io.complex.sentinel
@@ -13,7 +12,9 @@ from cop_ard_core.dem import extract_vertical_crs
 from cop_ard_core.logger import logger
 from pyproj import CRS
 from scipy.constants import speed_of_light
-from cop_ard_app.io import get_id_product, path_to_dict, read, get_storage_options
+
+import cop_ard_app
+from cop_ard_app.io import get_id_product, get_storage_options, path_to_dict, read
 
 DEL_ATTRS = [
     "store_path",
@@ -661,10 +662,9 @@ def fix_attributes(data: Union[xr.DataTree, xr.DataArray], attrs):
             raise Exception(f"Expected str, got {type(k)}")
         # If the dimension name is in the attribute template, apply the standard attributes.
         if k in attrs:
-            if not isinstance(k, str):
-                raise Exception(f"Expected str, got {type(k)}")
             data[k].attrs = attrs[k]
             data[k].attrs.update({"short_name": k})
+
     # --- Clean Top-Level Attributes and Encoding ---
     # Remove any unwanted attributes from the top level of the object.
     for k in DEL_ATTRS:
@@ -675,19 +675,22 @@ def fix_attributes(data: Union[xr.DataTree, xr.DataArray], attrs):
         if k in data.encoding:
             del data.encoding[k]
 
-    # --- Standardize Data Variable Attributes ---
-    # If the object is a DataArray and its name is in the attribute template...
-    if data.name in attrs and isinstance(data, xr.DataArray):
+    # --- Standardize Data Variable Attributes (if data is DataArray) ---
+    if isinstance(data, xr.DataArray) and data.name in attrs:
         if not isinstance(data.name, str):
             raise Exception(f"Expected str, got {type(data.name)}")
-        # ...update its attributes with the standard template.
         data.attrs.update({**attrs[data.name], "short_name": data.name})
 
     # --- Recurse for DataTree ---
-    # If the object is a DataTree, apply this function recursively to all its nodes.
     if isinstance(data, xr.DataTree):
-        for k, v in data.items():
-            fix_attributes(v, attrs)
+        # 1. Recurse over DataVariables within the current node
+        for var_name, var_array in data.data_vars.items():
+            fix_attributes(var_array, attrs)
+
+        # 2. Recurse over Child Nodes (Groups) in the DataTree hierarchy
+        for child_name, child_node in data.children.items():
+            fix_attributes(child_node, attrs)
+
     return data
 
 
