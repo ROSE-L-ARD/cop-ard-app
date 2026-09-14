@@ -740,18 +740,22 @@ def clean_gslc(gslc, slc, acquisition_id):
 
 def get_other_metadata_gslc(external_metadata):
     attrs = {
-        "product_data_access": external_metadata["product_data_access"],
+        "product_data_access": external_metadata[-1]["execution_parameters"]["product_data_access"],
         "product_geometry": "projected",
-        "product_pixel_coordinate_convention": external_metadata["product_pixel_coordinate_convention"],
-        "noise_correction_flag": external_metadata["noise_removal"],
-        "gmlp_status": external_metadata["gmlp_status"],
-        "product_family_specification": external_metadata["product_family_specification"],
-        "measurement_type": external_metadata["measurement_type"],
+        "product_pixel_coordinate_convention": external_metadata[-1]["execution_parameters"][
+            "product_pixel_coordinate_convention"
+        ],
+        "noise_correction_flag": external_metadata[0]["execution_parameters"]["noise_removal"],
+        "gmlp_status": external_metadata[-1]["execution_parameters"]["gmlp_status"],
+        "product_family_specification": external_metadata[-1]["execution_parameters"]["product_family_specification"],
+        "measurement_type": external_metadata[0]["execution_parameters"]["measurement_type"],
         "product_resampling_method": "sinc interpolator",
-        "product_filtering": external_metadata["product_filtering"],
-        "eastern_geometric_accuracy": external_metadata["eastern_geometric_accuracy"],
-        "northern_geometric_accuracy": external_metadata["northern_geometric_accuracy"],
-        "geometric_accuracy_radial_rmse": external_metadata["geometric_accuracy_radial_rmse"],
+        # "product_filtering": external_metadata[-1]["execution_parameters"]["product_filtering"],
+        # "eastern_geometric_accuracy": external_metadata[-1]["execution_parameters"]["eastern_geometric_accuracy"],
+        # "northern_geometric_accuracy": external_metadata[-1]["execution_parameters"]["northern_geometric_accuracy"],
+        # "geometric_accuracy_radial_rmse": external_metadata[-1]["execution_parameters"][
+        #     "geometric_accuracy_radial_rmse"
+        # ],
     }
     return attrs
 
@@ -906,11 +910,11 @@ def stac_discovery_template(burst_id, orig, coreg, external_metadata, stac, proc
             },
             "processing:version": f"{cop_ard_app.__version__}",
             "processing:datetime": processing_start_time,
-            "processing:facility": external_metadata["facility"],
-            "product:timeliness": external_metadata["product_timeliness"],
-            "product:timeliness_category": external_metadata["product_timeliness_category"],
+            "processing:facility": external_metadata[-1]["execution_parameters"]["facility"],
+            "product:timeliness": external_metadata[-1]["execution_parameters"]["product_timeliness"],
+            "product:timeliness_category": external_metadata[-1]["execution_parameters"]["product_timeliness_category"],
             "product:type": f"S01S{mode}CSL",
-            "providers": external_metadata["providers"],
+            "providers": external_metadata[-1]["execution_parameters"]["providers"],
             "sar:beam_ids": [sicd["CollectionInfo"]["Parameters"]["SWATH"].upper()],
             "sar:center_frequency": sicd["RMA"]["INCA"]["FreqZero"],
             "sar:frequency_band": band,
@@ -922,7 +926,7 @@ def stac_discovery_template(burst_id, orig, coreg, external_metadata, stac, proc
             "sat:orbit_state": orbit_state,
             "sat:relative_orbit": relative_orbit,
             "view:incidence_angle": sicd["SCPCOA"]["IncidenceAng"],
-            "sci:citation": external_metadata["atbd_link"],
+            "sci:citation": external_metadata[-1]["execution_parameters"]["atbd_link"],
         },
         "links": [{"href": "./zarr.json", "rel": "self", "type": "application/json"}],
         "assets": {
@@ -978,22 +982,7 @@ def get_processing_history_cslc(slc: xr.DataTree, stac_discovery, external_metad
         if processing_history["Level-1 Product"][0]["outputs"]:
             inputs = processing_history["Level-1 Product"][0]["outputs"]
 
-    adfs = [external_metadata["dem"]]
-    for e in ["etad", "orbit"]:
-        if e in external_metadata:
-            adfs.extend(external_metadata[e])
-
-    processing_history["COP ARD CSLC Product"] = [
-        {
-            "adfs": adfs,
-            "inputs": inputs,
-            "facility": external_metadata["facility"],
-            "outputs": stac_discovery["id"],
-            "processor": "COP ARD APP",
-            "time": processing_start_time,
-            "version": f"{cop_ard_app.__version__}",
-        }
-    ]
+    processing_history["COP ARD CSLC Product"] = external_metadata
     return processing_history
 
 
@@ -1005,12 +994,15 @@ def get_other_metadata_cslc(slc: xr.DataTree, external_metadata):
     other_metadata = {}
     other_metadata["SICD"] = slc.orig[date].measurements.slc.attrs
     other_metadata["product_geometry"] = "slant-range"
-    other_metadata["product_pixel_coordinate_convention"] = external_metadata["product_pixel_coordinate_convention"]
-    other_metadata["cslc_status"] = external_metadata["cslc_status"]
-    other_metadata["product_family_specification"] = external_metadata["product_family_specification"]
-    other_metadata["measurement_type"] = external_metadata["measurement_type"]
-    other_metadata["noise_correction_flag"] = external_metadata["noise_removal"]
-
+    other_metadata["product_pixel_coordinate_convention"] = external_metadata[-1]["execution_parameters"][
+        "product_pixel_coordinate_convention"
+    ]
+    other_metadata["cslc_status"] = external_metadata[-1]["execution_parameters"]["cslc_status"]
+    other_metadata["product_family_specification"] = external_metadata[-1]["execution_parameters"][
+        "product_family_specification"
+    ]
+    other_metadata["measurement_type"] = external_metadata[0]["execution_parameters"]["measurement_type"]
+    other_metadata["noise_correction_flag"] = external_metadata[0]["execution_parameters"]["noise_removal"]
     return other_metadata
 
 
@@ -1084,8 +1076,13 @@ def update_coreg(
 
     # Apply any final attribute fixes.
     fix_attributes(bursts, ATTRS_RADAR)
-    bursts.attrs = {"stac_discovery": stac_group, "processing_history": history_group}
-    slcs.attrs = {"stac_discovery": stac_group, "processing_history": history_group}
+    bursts.attrs = {
+        "stac_discovery": stac_group,
+        "processing_history": history_group,
+        "other_metadata": {"coregistration_polynomials": slcs.attrs["coregistration_polynomials"]},
+    }
+    slcs.attrs.update({"stac_discovery": stac_group, "processing_history": history_group})
+
     return bursts, slcs
 
 

@@ -10,18 +10,18 @@ from scipy.constants import speed_of_light
 
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.io import (
+    exists,
+    generate_empty_dataset,
     get_storage_options,
     normpath,
     path_to_dict,
     read,
     save_empty_dataset,
     write,
-    exists,
-    generate_empty_dataset,
 )
 from cop_ard_app.model import get_coefficients
-from cop_ard_app.slc import updateETAD, updateOrbits, updateLookVector
-from cop_ard_app.utils import get_margin, get_best_pol
+from cop_ard_app.slc import updateETAD, updateLookVector, updateOrbits
+from cop_ard_app.utils import get_best_pol, get_margin
 
 
 def init_single_coreg_stack(
@@ -515,6 +515,8 @@ def stack_coregistration(
     multiburst: bool = True,
     recompute: bool = False,
     enable_dask: bool = True,
+    x_poly: xr.DataArray | None = None,
+    y_poly: xr.DataArray | None = None,
     **kwargs,
 ) -> xr.DataTree:
     """
@@ -592,6 +594,8 @@ def stack_coregistration(
                 save_daz_drg=save_daz_drg,
                 do_reramp=do_reramp,
                 do_flattening=do_flattening,
+                x_poly=x_poly,
+                y_poly=y_poly,
                 **kwargs,
             ),
             enable_dask=enable_dask,
@@ -999,10 +1003,11 @@ def finalize_coreg(
     reference_id: str,
     do_image_matching: bool = False,
     do_split_spectrum: bool = False,
+    do_esd: bool = False,
     enable_dask: bool = True,
     **kwargs,
 ) -> xr.DataTree:
-    if not (do_image_matching or do_split_spectrum):
+    if not (do_image_matching or do_split_spectrum or do_esd):
         logger.info("Image matching and split spectrum disabled. Skipping current_reference loading.")
         return slcs
 

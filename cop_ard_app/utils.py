@@ -1,7 +1,8 @@
 import itertools
-import re
 import os
-from typing import Any, Union, Optional
+import re
+from typing import Any, Optional, Union
+
 import dask.distributed
 import numpy as np
 import pyproj
@@ -10,16 +11,16 @@ import rasterio
 import scipy.fft
 import xarray as xr
 from cop_ard_core.dem import extract_vertical_crs
+from cop_ard_core.iono_height import convert_ecef_to_llh, get_iono_height
 from cop_ard_core.logger import logger, timeit
 from cop_ard_core.utils import get_phramp_diff
 from pyproj import CRS, Transformer, datadir
 from pyproj.transformer import TransformerGroup
 from scipy.constants import speed_of_light
 
-from cop_ard_app.model import get_az_rg_times, get_coefficients
-from cop_ard_app.io import write
 from cop_ard_app.computation import map
-from cop_ard_core.iono_height import convert_ecef_to_llh, get_iono_height
+from cop_ard_app.io import write
+from cop_ard_app.model import get_az_rg_times, get_coefficients
 
 
 class GeoEnvPlugin(dask.distributed.WorkerPlugin):
@@ -292,7 +293,7 @@ def get_stack_phramp_diff(
     daz_full: xr.DataArray,
     annot: dict,
     y_poly: xr.Dataset,
-    multilook: dict,
+    multilook: dict | None = None,
 ):
     ph_ramp_diff_list = []
 
@@ -313,12 +314,18 @@ def get_stack_phramp_diff(
         if dkcoa_polynomial_coeffs is None:
             raise ValueError(f"Missing DeltaKCOA polynomial coefficients for acquisition date {dd} in annotation.")
         azimuth_grid_spacing = acquisition_date_annot["Grid"]["Col"]["SS"]
+        daz = daz_full.sel(acquisition_id=dd)
+        drg = drg_full.sel(acquisition_id=dd)
+
+        if multilook is not None:
+            daz = daz.coarsen(multilook, boundary="trim").mean()  # type: ignore mean is injected dynamically
+            drg = drg.coarsen(multilook, boundary="trim").mean()  # type: ignore mean is injected dynamically
 
         res = get_phramp_diff(
             azimuth_time=azimuth_time,
             slant_range_time=slant_range_time,
-            daz=daz_full.sel(acquisition_id=dd).coarsen(multilook, boundary="trim").mean(),  # type: ignore mean is injected dynamically
-            drg=drg_full.sel(acquisition_id=dd).coarsen(multilook, boundary="trim").mean(),  # type: ignore mean is injected dynamically
+            daz=daz,
+            drg=drg,
             timeca_polynomial_coeffs=timeca_polynomial_coeffs,
             dkcoa_polynomial_coeffs=dkcoa_polynomial_coeffs,
             azimuth_grid_spacing=azimuth_grid_spacing,
@@ -538,7 +545,7 @@ def split_slc_datatrees(
     """
     reference_slcs = xr.DataTree()
     secondary_slcs = xr.DataTree()
-
+    reference_slcs.attrs = slcs.attrs
     # Determine dictionary items based on multiburst flag
     burst_items = slcs.bursts.items() if multiburst else {"data": slcs}.items()
 
@@ -711,3 +718,59 @@ def get_best_pol(polarization_values: list) -> str:
         raise Exception(f"No polarization has been found {available_pols}")
 
     return pol
+
+
+def build_coreg_poly_dict(description, y_poly=None, x_poly=None, iono_poly=None):
+    """
+    Builds a nested dictionary for coregistration metadata, handling both
+    azimuth (y_poly) and range (x_poly) polynomials.
+
+    Args:
+        description (str): A brief explanation of the correction.
+        application_method (str): How the polynomial is applied (e.g., "phase_ramp", "warp").
+        y_poly (xr.Dataset, optional): Dataset containing azimuth polynomial variables.
+        x_poly (xr.Dataset, optional): Dataset containing range polynomial variables.
+
+    Returns:
+        dict: A structured dictionary ready for attributes.
+    """
+    out_dict = {
+        "description": description,
+        "acquisitions": {},
+    }
+
+    def _to_float(val) -> float:
+        return float(np.asarray(val).flat[0])
+
+    # Funzione interna per processare un singolo dataset e aggiornare out_dict
+    def _process_dataset(poly_dataset, direction_name):
+        for acq_id, poly_data in poly_dataset.data_vars.items():
+            acq_id_str = str(acq_id)
+            time_ref = str(poly_data.attrs.get("off_y", ""))
+            offset = poly_data.attrs.get("offset", (0.0, 0.0))
+            scale = poly_data.attrs.get("scale_fact", (1.0, 1.0))
+            logger.critical(f"time_Ref: {time_ref}")
+            # Se l'acquisizione non esiste ancora nel dizionario, la creiamo
+            if acq_id_str not in out_dict["acquisitions"]:
+                out_dict["acquisitions"][acq_id_str] = {}
+
+            # Aggiungiamo i dati per la specifica direzione
+            out_dict["acquisitions"][acq_id_str][direction_name] = {
+                "coefficients": poly_data.values.flatten().tolist(),
+                "shape": list(poly_data.shape),
+                "azimuth_offset": _to_float(offset[0]),
+                "range_offset": _to_float(offset[1]),
+                "azimuth_scale": _to_float(scale[0]),
+                "range_scale": _to_float(scale[1]),
+                "azimuth_time_reference_ns": time_ref,
+            }
+
+    if y_poly is not None:
+        _process_dataset(y_poly, "azimuth")
+
+    if x_poly is not None:
+        _process_dataset(x_poly, "range")
+    if iono_poly is not None:
+        _process_dataset(iono_poly, "ionosphere")
+
+    return out_dict

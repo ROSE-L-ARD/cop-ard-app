@@ -1,13 +1,24 @@
 import datetime
+import json
+import os
 from typing import cast
 
 import numpy as np
 import xarray as xr
-from cop_ard_core.esd import compute_azimuth_shifts, optimize_curvature
 from cop_ard_core import detrend
+from cop_ard_core.esd import compute_azimuth_shifts, optimize_curvature
+from cop_ard_core.logger import logger
+from PIL.ImageFont import core
 
 from cop_ard_app.computation import map, map_blocks
-from cop_ard_app.utils import get_best_pol
+from cop_ard_app.io import Path, generate_empty_dataset, get_storage_options, normpath, write
+from cop_ard_app.utils import (
+    build_coreg_poly_dict,
+    get_best_pol,
+    get_stack_phramp_diff,
+    recompose_slc_datatrees,
+    split_slc_datatrees,
+)
 
 
 def esd_single_burst(
@@ -148,7 +159,7 @@ def estimate(
     )
 
     # Structure re-formatting in order to solve the global problem
-    to_merge = [e.drop_vars("acquisition_date", errors='ignore') for e in esd if e is not None and len(e) > 0]
+    to_merge = [e.drop_vars("acquisition_date", errors="ignore") for e in esd if e is not None and len(e) > 0]
     esd = xr.merge(
         to_merge,
         compat="no_conflicts",
@@ -265,8 +276,123 @@ def to_dataset_1D(X, acquisition_id, t0, r0, s_y, s_x):
             data=_to_polygrid(X),
             dims=["i", "j"],
             coords={"i": axis, "j": axis},
-            attrs={"deg": deg, "offset": (0., r0), "scale_fact": (s_y, s_x), "off_y": str(t0)},
+            attrs={"deg": deg, "offset": (0.0, r0), "scale_fact": (s_y, s_x), "off_y": str(t0)},
         )
         for i, dd in enumerate(acquisition_id.values)
     ]
     return xr.Dataset({e.name: e for e in da})
+
+
+def stack_esd(
+    slcs: xr.DataTree,
+    wdir_path: str,
+    multiburst: bool,
+    reference_id: str,
+    esd_poly_degree: int = 2,
+    enable_dask: bool = True,
+    **kwargs,
+):
+    wdir_path = Path(wdir_path)
+
+    # estimate ESD at full-band
+    if multiburst:
+        reference_slcs, secondary_slcs = split_slc_datatrees(
+            slcs=slcs,
+            reference_id=reference_id,
+            multiburst=multiburst,
+        )
+        esd = estimate(
+            reference_slcs,
+            secondary_slcs,
+            poly_degree=esd_poly_degree,
+            enable_dask=enable_dask,
+        )
+
+        # fit polynomial function to ESD and remove it from the interferogram
+        y_poly = find_global_shift(esd, poly_degree=esd_poly_degree)
+
+        for id in y_poly.data_vars:
+            logger.debug(f"ESD {id}: {y_poly[id].values}")
+        first_burst_key = next(iter(reference_slcs.bursts))
+        ref_node = reference_slcs.bursts[first_burst_key]
+        sec_node = secondary_slcs.bursts[first_burst_key]
+
+        # Extract common polarizations
+        available_pols_ref = {str(i) for i in ref_node.coreg.measurements.polarization.values}
+        available_pols_sec = {str(i) for i in sec_node.coreg.measurements.polarization.values}
+        pol = get_best_pol(list(available_pols_ref.intersection(available_pols_sec)))
+        args = []
+
+        for k, v in secondary_slcs.bursts.items():
+            a = json.dumps({k: v.measurements.slc.attrs[pol] for k, v in reference_slcs.bursts[k].orig.items()})
+            args.append((k, v.coreg.measurements.to_dataset(), a))
+
+        args = list(zip(*args))
+        results = cast(
+            list[tuple[str, xr.Dataset]],
+            map(
+                map_single_phase_ramp,
+                args=args,
+                kwargs=dict(y_poly=y_poly, working_directory=wdir_path, **kwargs),
+                enable_dask=enable_dask,
+                force_compute=True,
+                combine=False,
+            ),
+        )
+        for k, v in results:
+            secondary_slcs.bursts[k].coreg.measurements["cstack"] = v.cstack
+
+        slcs = recompose_slc_datatrees(
+            reference_slcs,
+            secondary_slcs,
+            multiburst=multiburst,
+        )
+    else:
+        logger.warning(f"Skipping ESD, got multiburst = {multiburst}")
+    attrs = {
+        "esd": build_coreg_poly_dict(
+            description="Enhanced Spectral Diversity",
+            y_poly=y_poly,
+        )
+    }
+    slcs.attrs.setdefault("coregistration_polynomials", {}).update(attrs)
+    return slcs
+
+
+def map_single_phase_ramp(
+    burst_id: str,
+    coreg_sec: xr.Dataset,
+    annot: str,
+    y_poly: xr.Dataset,
+    working_directory: str,
+    **kwargs,
+):
+    # Define the output path for this burst.
+    path = f"bursts/{burst_id}"
+    coreg_path = normpath(f"{working_directory}/{path}")
+    measurements_path = os.path.join(coreg_path, "coreg", "measurements")
+    # decompress attributes
+    annot_dict = json.loads(annot)
+    # compute multilooked phase corrections
+    ph_ramp_diff_ml = get_stack_phramp_diff(
+        coreg_sec.acquisition_id,
+        coreg_sec.azimuth_time,
+        coreg_sec.slant_range_time,
+        coreg_sec.drg,
+        coreg_sec.daz,
+        annot_dict,
+        y_poly,
+    )
+
+    cstack = coreg_sec.cstack
+    cstack *= np.exp(-1j * ph_ramp_diff_ml)
+    cstack = cstack.to_dataset(name="cstack")
+    cstack = write(
+        cstack,
+        f"{measurements_path}",
+        mode="w",
+        skip_read=False,
+        compute=True,
+    )
+
+    return (burst_id, cstack)

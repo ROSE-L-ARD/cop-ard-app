@@ -17,15 +17,16 @@ from cop_ard_core.utils import get_azimuth_time_raw, get_best_pol
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.esd import estimate, find_global_shift
 from cop_ard_app.interf import get_mosaic_interf
-from cop_ard_app.io import Path, read, write, normpath
+from cop_ard_app.io import Path, normpath, read, write
 from cop_ard_app.model import get_carrier_frequency
 from cop_ard_app.utils import (
-    get_bounding_box,
-    split_slc_datatrees,
+    build_coreg_poly_dict,
     compute_iono_and_orb_height,
+    get_best_pol,
+    get_bounding_box,
     recompose_slc_datatrees,
+    split_slc_datatrees,
 )
-from cop_ard_app.utils import get_best_pol
 
 
 def get_phase_corr_from_x_poly(
@@ -585,4 +586,15 @@ def split_spectrum(
         secondary_slcs,
         multiburst=multiburst,
     )
+
+    attrs = {
+        "split_spectrum": build_coreg_poly_dict(
+            description="Split Spectrum",
+            y_poly=y_poly,
+            x_poly=x_poly,
+            iono_poly=poly_corr.to_dataset(name=reference_id),
+        )
+    }
+
+    slcs.attrs.setdefault("coregistration_polynomials", {}).update(attrs)
     return slcs
