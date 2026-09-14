@@ -11,7 +11,7 @@ from cop_ard_core.logger import logger
 from PIL.ImageFont import core
 
 from cop_ard_app.computation import map, map_blocks
-from cop_ard_app.io import Path, generate_empty_dataset, get_storage_options, normpath, write
+from cop_ard_app.io import Path, generate_empty_dataset, get_storage_options, normpath, read, write
 from cop_ard_app.utils import (
     build_coreg_poly_dict,
     get_best_pol,
@@ -333,9 +333,13 @@ def stack_esd(
             map(
                 map_single_phase_ramp,
                 args=args,
-                kwargs=dict(y_poly=y_poly, working_directory=wdir_path, **kwargs),
+                kwargs=dict(
+                    y_poly=y_poly,
+                    working_directory=wdir_path,
+                    enable_dask=enable_dask,
+                    **kwargs,
+                ),
                 enable_dask=enable_dask,
-                force_compute=True,
                 combine=False,
             ),
         )
@@ -365,15 +369,80 @@ def map_single_phase_ramp(
     annot: str,
     y_poly: xr.Dataset,
     working_directory: str,
+    enable_dask: bool,
     **kwargs,
 ):
     # Define the output path for this burst.
     path = f"bursts/{burst_id}"
     coreg_path = normpath(f"{working_directory}/{path}")
     measurements_path = os.path.join(coreg_path, "coreg", "measurements")
-    # decompress attributes
+    store_mapping = {
+        0: {
+            "data_path": measurements_path,
+            "save_options": {
+                "consolidated": False,
+                "storage_options": get_storage_options(kwargs),
+            },
+        },
+    }
+    cstack = coreg_sec.cstack
+    data_vars = ["cstack"]
+    dims = {"cstack": cstack.dims}
+    shape_dict = {"cstack": cstack.shape}
+    dtype = {"cstack": "complex64"}
+    chunks = {k: v[0] for k, v in cstack.chunksizes.items()}
+    coords = cstack.coords
+    measurements = generate_empty_dataset(
+        data_vars=data_vars,
+        dims=dims,
+        shape=shape_dict,
+        chunks=chunks,
+        dtype=dtype,
+        coords=coords,
+        attrs_data_vars={"cstack": cstack.attrs},
+    )
+
+    write(
+        measurements.drop_vars(["cstack"]),
+        measurements_path,
+        mode="w",
+        compute=True,
+        storage_options=get_storage_options(kwargs),
+        skip_read=True,
+    )
+    measurements = write(
+        measurements,
+        measurements_path,
+        mode="a",
+        compute=False,
+        storage_options=get_storage_options(kwargs),
+        skip_read=False,
+    )
+
+    chunksizes = {
+        "azimuth_time": measurements.chunksizes["azimuth_time"][0],
+        "slant_range_time": measurements.chunksizes["slant_range_time"][0],
+        "acquisition_id": 10,
+    }
+
+    map_blocks(
+        compute_phase_ramp,
+        obj=[coreg_sec],
+        args=(y_poly, annot),
+        kwargs=kwargs,
+        combine=False,
+        enable_dask=enable_dask,
+        chunksizes=chunksizes,
+        store_mapping=store_mapping,
+    )
+
+    measurements = read(measurements_path, storage_options=get_storage_options(kwargs))
+
+    return (burst_id, measurements)
+
+
+def compute_phase_ramp(coreg_sec: xr.Dataset, y_poly: xr.Dataset, annot: str):
     annot_dict = json.loads(annot)
-    # compute multilooked phase corrections
     ph_ramp_diff_ml = get_stack_phramp_diff(
         coreg_sec.acquisition_id,
         coreg_sec.azimuth_time,
@@ -386,13 +455,5 @@ def map_single_phase_ramp(
 
     cstack = coreg_sec.cstack
     cstack *= np.exp(-1j * ph_ramp_diff_ml)
-    cstack = cstack.to_dataset(name="cstack")
-    cstack = write(
-        cstack,
-        f"{measurements_path}",
-        mode="w",
-        skip_read=False,
-        compute=True,
-    )
-
-    return (burst_id, cstack)
+    ds = cstack.to_dataset(name="cstack")
+    return ds
