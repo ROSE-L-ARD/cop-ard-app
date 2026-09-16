@@ -464,7 +464,7 @@ def stack_simulation_ml(
         if multiburst:
             simulation_ml_tree[f"bursts/{k}"] = sim_ml
         else:
-            simulation_ml_tree = xr.DataTree(sim_ml)
+            simulation_ml_tree = sim_ml
     return simulation_ml_tree
 
 
