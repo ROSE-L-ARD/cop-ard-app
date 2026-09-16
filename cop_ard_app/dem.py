@@ -3,7 +3,6 @@ from typing import Any, Dict, Mapping, Sequence, cast
 import numpy as np
 import xarray as xr
 from cop_ard_core.dem import (
-    check_available_transformation,
     compute_shape_and_off,
     extract_vertical_crs,
     get_default_epsg,
@@ -269,8 +268,6 @@ def stack_dem(
         epsg = get_default_epsg(dem)
     else:
         epsg = crs
-    # Check if the required transformation is available.
-    check_available_transformation(dem, epsg)
 
     # --- Prepare Arguments and Run in Parallel ---
     # Create a list of arguments for each burst/scene to be processed.
