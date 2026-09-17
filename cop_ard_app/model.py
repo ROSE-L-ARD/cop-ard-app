@@ -564,8 +564,7 @@ def update_container(dt: xr.DataTree, dt_name, cslc_id):
     stac["stac_extensions"] = [i for i in stac["stac_extensions"] if i.split("/")[-3] not in ["view", "projection"]]
     id = get_id_product(stac)
     stac["id"] = id
-    processing_history[f"COP ARD {dt_name} Product"][0]["inputs"] = cslc_id
-    processing_history[f"COP ARD {dt_name} Product"][0]["outputs"] = id
+    processing_history[f"COP ARD {dt_name} Product"][-1]["outputs"][0] = id
 
     return stac, processing_history
 
@@ -618,6 +617,7 @@ def update_gmlp(gmlp: xr.DataTree, slcs: xr.DataTree, external_metadata: dict = 
             gslc.measurements.to_dataset(),
             slcs,
             processing_start_time=processing_start_time,
+            external_metadata=external_metadata,
         )
         other_metadata = get_other_metadata_gslc(external_metadata)
         bursts[stac["id"]] = clean_gslc(gslc, slc, acquisition_id)
@@ -760,11 +760,10 @@ def get_other_metadata_gslc(external_metadata):
     return attrs
 
 
-def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time):
+def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time, external_metadata):
     multiburst = True if "bursts" in slcs else False
     attrs = copy.deepcopy((slcs.bursts[burst_id] if multiburst else slcs)).attrs
     stac = attrs["stac_discovery"]
-    processing_history = attrs["processing_history"]
     crs = CRS(gslc.rio.crs).to_3d()
     horizontal_crs = str(crs.to_2d().to_epsg())
     vertical_crs = extract_vertical_crs(crs)
@@ -833,12 +832,8 @@ def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time):
     id = get_id_product(stac, burst_id=burst_id)
     stac["id"] = id
 
-    processing_history["COP ARD GMLP Product"] = copy.deepcopy(processing_history["COP ARD CSLC Product"])
-    inputs = processing_history["COP ARD CSLC Product"][0]["outputs"]
-    processing_history["COP ARD GMLP Product"][0]["inputs"] = inputs
-    processing_history["COP ARD GMLP Product"][0]["outputs"] = id
-    processing_history["COP ARD GMLP Product"][0]["time"] = processing_start_time
-    processing_history["COP ARD GMLP Product"][0]["version"] = f"{cop_ard_app.__version__}"
+    processing_history = {"COP ARD GMLP Product": external_metadata}
+    processing_history["COP ARD GMLP Product"][-1]["outputs"][0] = id
 
     return stac, processing_history
 
@@ -1250,7 +1245,7 @@ def update_cslc_container(bursts: xr.DataTree):
     stac["assets"] = assets
     id = get_id_product(stac)
     stac["id"] = id
-    processing_history["COP ARD CSLC Product"][0]["outputs"] = id
+    processing_history["COP ARD CSLC Product"][-1]["outputs"][0] = id
 
     return stac, processing_history
 
