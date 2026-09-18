@@ -1,4 +1,4 @@
-from typing import Any, Union, cast
+from typing import Any, cast
 
 import numpy as np
 import xarray as xr
@@ -49,7 +49,7 @@ def import_ETAD(
     is_valid = all(isinstance(x, Path) for x in etad_files)
     if not is_valid:
         raise TypeError("Invalid input: Expected a list of Path objects for ETAD files.")
-    acquisition_date: Union[str, np.datetime64]
+    acquisition_date: str | np.datetime64
     etad_paths = set()
     # --- Find Matching ETAD Files ---
     for acquisition_date in acquisition_dates:
@@ -122,7 +122,7 @@ def discover_etaddate_slcsdate(slcs: xr.DataTree, etad: xr.DataTree, multiburst:
     dateid = set()
 
     # Iterate over all SLCs (either in bursts or as a single scene).
-    for _, i in (slcs.bursts if multiburst else {"data": slcs}).items():
+    for i in (slcs.bursts if multiburst else {"data": slcs}).values():
         for name, j in i.orig.items():
             # Check if the SLC's entire azimuth time span is within the ETAD's time span.
             if (j.measurements[0] >= tstart) & (j.measurements[-1] <= tend):
@@ -201,7 +201,6 @@ def save_etad(
 
     # Save the dataset to a Zarr store.
     write(etad_ds, out_path, storage_options=get_storage_options(kwargs), skip_read=True)
-    return
 
 
 def update_etad(
@@ -298,7 +297,7 @@ def import_etad_stack(
 
         # Traverse the DataTree immediately to extract bursts
         for sw_name, etad_sw in etad_nc.items():
-            for et_name, etad_burst in etad_sw.items():
+            for etad_burst in etad_sw.children.values():
                 burst_key = f"{sw_name.lower()}_{etad_burst.attrs['burstId']}"
 
                 # Check if burst exists in input SLC data

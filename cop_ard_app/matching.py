@@ -6,7 +6,8 @@
 # permission, please contact the copyright holders and delete this file.
 # This file must not be copied, modified, or distributed without explicit
 # written permission from the copyright holder.
-from typing import Literal, Sequence
+from collections.abc import Sequence
+from typing import cast
 
 import numpy as np
 import xarray as xr
@@ -53,7 +54,7 @@ def chunks_optimization(
     patches = patches.assign_coords({"index": (["patch"], index)})
     # Now considering all the patches belonging to each chunk the optimized chunksizes can be computed
     g = patches.groupby("index")
-    chunks = g.reduce(np.min)[["x_start", "y_start"]].assign(g.reduce(np.max)[["x_end", "y_end"]])
+    chunks = g.reduce(np.min)[["x_start", "y_start"]].assign(g.reduce(np.max)[["x_end", "y_end"]])  # type: ignore
     chunks = {
         "x": np.vstack((chunks.x_start.values, chunks.x_end.values + 1)).T.tolist(),
         "y": np.vstack((chunks.y_start.values, chunks.y_end.values + 1)).T.tolist(),
@@ -74,7 +75,7 @@ def estimate_poly_matching(
     disparity_map: xr.DataTree,
     degree: int = 2,
     cohe_th: float = 0.3,
-    kernel_shape: list = [15, 15],
+    kernel_shape: list | None = None,
     enable_dask: bool = True,
 ) -> tuple[xr.Dataset, xr.Dataset]:
     """Starting from the disparity maps evaluated ion cotrrespondence of each burst / slice the global polynomial correction function is evaluated.
@@ -93,8 +94,11 @@ def estimate_poly_matching(
     y = (azimuth_time - offset[1]) / scale_fact[1]
 
     surf = polyval2d(coeffs, x, y)
+
+    kernel_shape defaults to [15, 15]
     """
-    multiburst = True if "bursts" in slcs else False
+    kernel_shape = kernel_shape or [15, 15]
+    multiburst = "bursts" in slcs
     acquisition_ids = extract_acquisition_id(slcs, multiburst)
     args = []
 
@@ -169,7 +173,7 @@ def stack_disparity(
     block_size: int = 10,
     enable_dask: bool = True,
 ) -> xr.DataTree:
-    multiburst = True if "bursts" in slcs else False
+    multiburst = "bursts" in slcs
     args = []
     for k, v in (slcs.bursts if multiburst else {"data": slcs}).items():
         a = (k, v.coreg.measurements.cstack)
@@ -180,20 +184,23 @@ def stack_disparity(
 
     # --- Execute Coregistration in Parallel ---
     # Map the `coreg_single_burst` function over the list of arguments.
-    results = map(
-        compute_stack_pearson_coefficient,
-        args,
-        kwargs=dict(
-            reference_id=reference_id,
-            wsize=wsize,
-            wstep=wstep,
-            wsearch=wsearch,
-            block_size=block_size,
-            dim=dim,
+    results = cast(
+        list[tuple[str, xr.DataArray]],
+        map(
+            compute_stack_pearson_coefficient,
+            args,
+            kwargs=dict(
+                reference_id=reference_id,
+                wsize=wsize,
+                wstep=wstep,
+                wsearch=wsearch,
+                block_size=block_size,
+                dim=dim,
+                enable_dask=enable_dask,
+            ),
             enable_dask=enable_dask,
+            combine=False,
         ),
-        enable_dask=enable_dask,
-        combine=False,
     )
 
     # Construct disparity datatree for all bursts or for the single slice
@@ -236,7 +243,7 @@ def compute_stack_pearson_coefficient(
     """
     # Check if the master date is in the input stack
     if reference_id not in stack.acquisition_id:
-        raise Exception(f"Unable to find the master date {reference_id} in stack {stack.acquisition_id.values}")
+        raise ValueError(f"Unable to find the master date {reference_id} in stack {stack.acquisition_id.values}")
 
     best_pol = get_best_pol(stack.polarization.values)
     # x and y coordinates must be added and used here as dimensions replacing slant_range_time, azimuth_time
@@ -284,13 +291,16 @@ def compute_stack_pearson_coefficient(
         dim,
     )
     # Cross-Correlation computation via map_blocks
-    results = map_blocks(
-        blockwise_pearson_coefficient,
-        (xyz_stack, xyz_stack.sel(z=reference_id)),
-        args=args,
-        chunks=chunks_opt,
-        combine=False,
-        enable_dask=enable_dask,
+    results = cast(
+        list[xr.DataArray],
+        map_blocks(
+            blockwise_pearson_coefficient,
+            (xyz_stack, xyz_stack.sel(z=reference_id)),
+            args=args,
+            chunks=chunks_opt,
+            combine=False,
+            enable_dask=enable_dask,
+        ),
     )
 
     disparity = xr.concat(results, dim="point").drop_vars("point")
@@ -307,7 +317,7 @@ def blockwise_pearson_coefficient(
     azimuth_grid_spacing: float,
     range_grid_spacing: float,
     dim: Sequence[int],
-    chunk: dict = {},
+    chunk: dict | None = None,
     job_id: int = 0,
 ):
     """
@@ -315,6 +325,7 @@ def blockwise_pearson_coefficient(
     Compute the Pearson coefficient for all the patches belong to the current stack chunk
 
     """
+    chunk = chunk or {}
     # Results initialization
     results = []
     # Identification of patches belong to the current chunk

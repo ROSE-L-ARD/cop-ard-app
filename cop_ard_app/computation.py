@@ -15,9 +15,10 @@
 import copy
 import inspect
 import itertools
+from collections.abc import Callable, KeysView, Mapping, Sequence, ValuesView
 from contextlib import contextmanager
 from types import FunctionType
-from typing import Any, Callable, Dict, KeysView, List, Literal, Mapping, Sequence, Tuple, Union, ValuesView, cast
+from typing import Any, Literal, cast
 
 import dask.distributed
 import numpy as np
@@ -29,7 +30,7 @@ from cop_ard_core.logger import logger
 from cop_ard_app.io import Path, get_storage_options, isdir, read, write
 
 
-class DummyClient(object):
+class DummyClient:
     """A mock client that mimics a distributed computing client API.
 
     This class provides a synchronous, in-memory implementation of a client
@@ -89,11 +90,9 @@ class DummyClient(object):
 
     def cancel(self, *args, **kwargs):
         """Mock implementation of a cancel operation. This is a no-op."""
-        pass
 
     def restart(self, **kwargs):
         """Mock implementation of a client restart. This is a no-op."""
-        pass
 
     def map(self, func, *args, key=None, workers=None, **kwargs):
         """Mock implementation of a map operation.
@@ -140,7 +139,7 @@ class DummyClient(object):
         return [e.result() for e in results]
 
 
-class DummyFuture(object):
+class DummyFuture:
     """A mock Future object that holds a result directly.
 
     This class mimics the behavior of a future object from a concurrent
@@ -207,9 +206,9 @@ def conditional_delayed(enable_dask: bool, name: str):
 
 def get_chunks(
     data: xr.DataArray,
-    chunks: Dict[str, Tuple] | None = None,
-    chunksizes: Dict[str, int] | None = None,
-) -> Tuple[Dict[str, Tuple], Dict[str, Any], int]:
+    chunks: dict[str, tuple] | None = None,
+    chunksizes: dict[str, int] | None = None,
+) -> tuple[dict[str, tuple], dict[str, Any], int]:
     """
     Calculates an optimal chunking scheme aligned with the data's existing chunks.
 
@@ -250,23 +249,27 @@ def get_chunks(
     _indices: dict[str, Any] = {}
     if chunks is None:
         if chunksizes is None:
-            k: Union[str, KeysView[str]]
-            v: Union[
-                np.typing.NDArray[Any], Tuple[int, ...], List[int], Tuple[Tuple[int, int]], List[Tuple[Tuple[int, int]]]
-            ]
+            k: str | KeysView[str]
+            v: (
+                np.typing.NDArray[Any]
+                | tuple[int, ...]
+                | list[int]
+                | tuple[tuple[int, int]]
+                | list[tuple[tuple[int, int]]]
+            )
 
             for k, v in data.chunksizes.items():
                 v = np.insert(np.cumsum(v), 0, 0)
                 if not (isinstance(k, str)):
-                    raise Exception(f"Expected str, got {type(k)}")
+                    raise TypeError(f"Expected str, got {type(k)}")
                 _chunks[k], _indices[k] = zip(*tuple(((v[i], v[i + 1]), i) for i in range(len(v) - 1)))
         else:
-            if ((set(chunksizes.keys()) - set(cast(Tuple[str], data.dims))) == set()) is False:
-                raise Exception(
+            if ((set(chunksizes.keys()) - set(cast(tuple[str], data.dims))) == set()) is False:
+                raise ValueError(
                     f"chunksizes element list {tuple(chunksizes.keys())} must be a subset of the data\
                     dimension set {data.dims}",
                 )
-            for k in cast(Tuple[str], data.dims):
+            for k in cast(tuple[str], data.dims):
                 if k in chunksizes:
                     if chunksizes[k] >= data[k].size:
                         v = [0, chunksizes[k]]
@@ -281,24 +284,24 @@ def get_chunks(
         v = list(cast(tuple, zip(*itertools.product(*_indices.values()))))
         _indices = {k: v for k, v in zip(_indices.keys(), v)}
     else:
-        k, v = chunks.keys(), cast(List[Tuple[Tuple[int, int]]], list(cast(ValuesView, chunks.values())))
+        k, v = chunks.keys(), cast(list[tuple[tuple[int, int]]], list(cast(ValuesView, chunks.values())))
         if (set(k) == set(data.dims)) is False:
-            raise Exception("chunks must contain all the data dimensions")
+            raise ValueError("chunks must contain all the data dimensions")
         if (all(len(v[0]) == len(e) for e in v)) is False:
-            raise Exception("the lists of values of chunks cannot have a different number of elements")
+            raise ValueError("the lists of values of chunks cannot have a different number of elements")
         if (all(i[0] <= i[1] for j in v for i in j)) is False:
-            raise Exception("chunk start value must be lower than or equal to the corresponding end value")
+            raise ValueError("chunk start value must be lower than or equal to the corresponding end value")
         if (all(np.max(v) <= data[k].size for k, v in chunks.items())) is False:
-            raise Exception("all chunks values must be lower than the size of the corresponding data dimension")
+            raise ValueError("all chunks values must be lower than the size of the corresponding data dimension")
         _chunks = dict(chunks)
         _indices = {k: (0,) * len(v) for k, v in _chunks.items()}
-    n_chunks = list(_chunks.values())[0]
+    n_chunks = next(iter(_chunks.values()))
     n_chunks = len(n_chunks) if isinstance(n_chunks, (list, tuple)) else n_chunks
     return _chunks, _indices, n_chunks
 
 
 def apply_overlap(
-    chunks: Dict[str, Tuple],
+    chunks: dict[str, tuple],
     overlap_sizes: Mapping[str, Any] = {},
 ) -> dict:
     """
@@ -331,15 +334,15 @@ def apply_overlap(
         `(start, end)` boundaries for each chunk.
     """
     _chunks_ov = {}
-    for k in chunks.keys():
-        delta = overlap_sizes[k] if k in overlap_sizes else 0
-        _chunks_ov[k] = [[s - delta if s > delta else 0, e + delta] for (s, e) in chunks[k]]
+    for k, v in chunks.items():
+        delta = overlap_sizes.get(k, 0)
+        _chunks_ov[k] = [[s - delta if s > delta else 0, e + delta] for (s, e) in v]
     return _chunks_ov
 
 
 def try_to_combine(
-    results: List[xr.DataArray | xr.Dataset | str],
-) -> List[xr.DataArray | xr.Dataset] | xr.DataArray | xr.Dataset | None:
+    results: list[xr.DataArray | xr.Dataset | str],
+) -> list[xr.DataArray | xr.Dataset] | xr.DataArray | xr.Dataset | None:
     """Applies a function to blocks of xarray objects, with parallel support via Dask.
 
     This function provides a high-level parallel map operation for large xarray
@@ -443,14 +446,14 @@ def try_to_combine(
             try:
                 _result = xr.concat(_result, dim=_dims[0][0])
                 _ok = True
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning(f"type of exception: {e.__class__.__name__}")
                 logger.warning("concat failed results will be returned as a list")
         else:
             try:
                 _result = xr.combine_by_coords(_result)
                 _ok = True
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning(f"type of exception: {e.__class__.__name__}")
                 logger.warning("combine_by_coords failed results will be returned as a list")
         return _result if _ok else result
@@ -473,10 +476,10 @@ def try_to_combine(
 
 
 def retrieve_client(
-    client_options: dict = {},
+    client_options: dict,
     enable_dask: bool = True,
     **kwargs: dict,
-) -> Tuple[Union[dask.distributed.Client, DummyClient], bool, bool, Union[bool, None], bool, int]:
+) -> tuple[dask.distributed.Client | DummyClient, bool, bool, bool | None, bool, int]:
     """Retrieves an existing Dask client or creates a new one based on options.
 
     This function manages the lifecycle of a distributed computing client. It
@@ -533,7 +536,7 @@ def retrieve_client(
         jobs_chunksize = 20_000
         try:
             # client retrieve if dask is enabled #
-            client: Union[DummyClient, dask.distributed.client.Client] = dask.distributed.get_client(name)
+            client: DummyClient | dask.distributed.client.Client = dask.distributed.get_client(name)
         except (ValueError, OSError):
             create = True
 
@@ -551,7 +554,7 @@ def select_scatter_strategy(
     objs: Sequence[xr.DataArray | xr.Dataset],
     scatter_strategy: str | None = None,
     memory_threshold: float = 512,
-) -> Tuple[Union[None, str], bool]:
+) -> tuple[None | str, bool]:
     """Selects an optimal Dask scattering strategy based on coordinate memory size.
 
     This function determines whether it's more efficient to scatter (i.e., send)
@@ -658,15 +661,14 @@ def client_manager(client_options: dict, enable_dask: bool = True):
             yielded = True
             yield (client, True, False, False, False, 20_000)
 
-    except Exception as e:
+    except Exception:
         if yielded:
             # The client connected perfectly, but your actual map/map_blocks
             # computation crashed.
-            raise e
+            raise
 
         # If yielded is STILL False, the error happened during worker_client setup
         # (the race condition). We swallow the error and prepare to retry.
-        pass
 
     # --- 3. THE FALLBACK (Jitter Delay) ---
     if not yielded:
@@ -706,7 +708,7 @@ def get_params(func: Callable[..., Any], **kwargs):
     """
     RESERVED_KWARGS = ("job_id", "chunk", "block_id", "chunk_ov")
     if (set(kwargs.keys()) == (set(kwargs.keys()) - set(RESERVED_KWARGS))) is False:
-        raise Exception(f"{RESERVED_KWARGS} are reserved. Got {kwargs}")
+        raise ValueError(f"{RESERVED_KWARGS} are reserved. Got {kwargs}")
 
     func_parameters = inspect.signature(func).parameters
     kwargs = {k: v for k, v in kwargs.items() if k not in RESERVED_KWARGS}
@@ -757,7 +759,7 @@ def setup(results: list | tuple | Any) -> tuple[int, Callable, list[Any]]:
         results_l = list(results)
         typef = tuple
     else:
-        results_l, typef = [results], lambda x: list(x)[0]
+        results_l, typef = [results], lambda x: next(iter(list(x)))
     return len(results_l), typef, results_l
 
 
@@ -826,7 +828,7 @@ def try_to_store(
         region = {k: v for k, v in chunk.items() if k in config.get("dims", chunk.keys())}
         if j in region_callback:
             callback = region_callback[j]
-            region = callback(region, kwargs)
+            region = callback(region, kwargs)  # type: ignore
             if region is not None:
                 region = dict(region)
 
@@ -852,12 +854,12 @@ def try_to_store(
 
         # The dimensions names must be all keys of chunk
         _, regions, _, _, _ = zip(*[extract_store_info(k, v) for k, v in store_mapping.items()])
-        dims = set([k for j in regions if j is not None for k in j.keys()])
+        dims = {k for j in regions if j is not None for k in j}
         if any(j not in chunk for j in dims):
             raise RuntimeError(f"Invalid `store_mapping`: all dimensions ({dims}) must be a key of chunk ({chunk})")
 
         # If I am here it means store_mapping seems to be good so I try to save following that instructions
-        for j in store_mapping.keys():
+        for j in store_mapping:
             # Result to be saved and required information (i.e path, region and options) extraction
             j_result, (j_data_path, j_region, j_drop_coords, j_drop_attrs, j_opts) = (
                 results_l[j],
@@ -899,7 +901,7 @@ def try_to_store(
 
 @retry.retry(tries=5, delay=1, jitter=5, logger=logger)
 def map_blocks(
-    func: FunctionType,
+    func: FunctionType | Callable,
     obj: Sequence[xr.DataArray | xr.Dataset] | xr.Dataset | xr.DataArray,
     obj_ov: Sequence[xr.DataArray] = [],
     combine: bool = True,
@@ -911,7 +913,7 @@ def map_blocks(
     fix_memory_leak: bool | Literal["auto"] = False,  # n_replicate: int = 0,
     scatter_strategy: str | None = None,
     scheduler: str | None = "synchronous",
-    client_options: dict[str, Any] = {},
+    client_options: dict[str, Any] | None = None,
     compute_on_host: bool = False,
     workers: list[str] | str | None = None,
     store_directory: str | None = None,
@@ -919,7 +921,7 @@ def map_blocks(
     region_callback: Mapping[int, Callable[[Mapping[str, slice], dict[str, Any]], Mapping[str, slice] | None]] = {},
     args: Sequence[Any] = (),
     kwargs: Mapping[str, Any] = {},
-) -> List[Any] | xr.DataArray | xr.Dataset | None:
+) -> list[Any] | xr.DataArray | xr.Dataset | None:
     """Applies a function to blocks of xarray objects, with parallel support via Dask.
 
     This function provides a high-level parallel map operation for large xarray
@@ -1001,9 +1003,10 @@ def map_blocks(
           combination fails.
         - `None` if the input object is empty.
     """
+    client_options = client_options or {}
     with client_manager(client_options, enable_dask) as (
         client,
-        enable_dask,
+        enable_dask,  # noqa: PLR1704
         restart,
         destroy,
         broadcast,
@@ -1105,13 +1108,13 @@ def map_blocks(
 
 
 def map(
-    func: FunctionType,
-    args: Union[Sequence[List | Tuple], Tuple, List] = (),
+    func: FunctionType | Callable,
+    args: Sequence[list | tuple] | tuple | list = (),
     enable_dask: bool = True,
     combine: bool = False,
     force_compute: bool = False,
     scheduler: str | None = "synchronous",
-    client_options: dict = {},
+    client_options: dict | None = None,
     map_equally: bool = False,
     compute_on_host: bool = False,
     workers: list[str] | str | None = None,
@@ -1119,7 +1122,7 @@ def map(
     Plugin: dask.distributed.WorkerPlugin | None = None,
     store_directory: Path | None = None,
     save_options: Mapping[str, Any] = {},
-) -> List[Any] | xr.DataArray | xr.Dataset | None:
+) -> list[Any] | xr.DataArray | xr.Dataset | None:
     """
     Applies a function to sequences of arguments, with parallel execution via Dask.
 
@@ -1177,9 +1180,10 @@ def map(
         If the `args` parameter is not a list/tuple or if the
         inner argument sequences have inconsistent lengths.
     """
+    client_options = client_options or {}
     # Ensure the main 'args' container is a list or tuple.
     if (isinstance(args, (list, tuple))) is False:
-        raise Exception("args must be a list or a tuple")
+        raise TypeError("args must be a list or a tuple")
 
     # Normalize 'args' to be a sequence of sequences. If it's a single flat list
     # (e.g., for a function with one argument), wrap it in a tuple.
@@ -1187,7 +1191,7 @@ def map(
 
     # Validate that all argument sequences have the same length for consistent mapping.
     if (all(len(_args[0]) == len(e) for e in _args)) is False:
-        raise Exception("args elements must have the same length")
+        raise ValueError("args elements must have the same length")
 
     # Define a wrapper function to ensure each execution uses the specified Dask scheduler.
     def execute_map(*args, **kwargs):
@@ -1258,7 +1262,7 @@ def map(
 def create_cluster(
     type: Literal["LOCAL", "DUMMY"] = "LOCAL",
     n_jobs: int | None = None,
-    job_memory: Union[str, int] | None = None,
+    job_memory: str | int | None = None,
     **kwargs: Any,
 ):
     """Creates a Dask LocalCluster or a dummy placeholder for serial execution.
@@ -1302,7 +1306,7 @@ def create_cluster(
     """
     # Ensure the requested cluster type is valid.
     if (type in ["LOCAL", "DUMMY"]) is False:
-        raise Exception("Invalid cluster type. Allowed types are LOCAL and DUMMY")
+        raise ValueError("Invalid cluster type. Allowed types are LOCAL and DUMMY")
 
     # If the number of jobs isn't specified, default to the number of logical CPU cores.
     if n_jobs is None:
@@ -1311,7 +1315,7 @@ def create_cluster(
     # If job memory isn't specified, calculate a sensible default.
     if job_memory is None:
         if n_jobs is None:
-            raise Exception("n_jobs is None, expected int")
+            raise TypeError("n_jobs is None, expected int")
         # Distribute 95% of total system RAM evenly among the jobs.
         job_memory = int(psutil.virtual_memory().total / n_jobs * 0.95)
         # If using threads instead of processes (processes=False), the memory
@@ -1325,7 +1329,7 @@ def create_cluster(
 
     # For a 'LOCAL' cluster, instantiate a Dask LocalCluster with the specified configuration.
     if type == "LOCAL":
-        cluster: Union[str, dask.distributed.LocalCluster] = dask.distributed.LocalCluster(
+        cluster: str | dask.distributed.LocalCluster = dask.distributed.LocalCluster(
             n_workers=n_jobs,
             memory_limit=job_memory,
             processes=kwargs.pop("processes", True),
@@ -1343,7 +1347,7 @@ def create_client(
     n_jobs: int | None = None,
     job_memory: str | int | None = None,
     **kwargs: dict,
-) -> Union[dask.distributed.client.Client, DummyClient]:
+) -> dask.distributed.client.Client | DummyClient:
     """Creates a Dask client connected to a new cluster or a dummy client.
 
     This function is a high-level factory that wraps the `create_cluster`
@@ -1377,7 +1381,7 @@ def create_client(
 
 
 def destroy_client(
-    client: Union[dask.distributed.client.Client, DummyClient],
+    client: dask.distributed.client.Client | DummyClient,
 ):
     """Safely closes a Dask client and its associated cluster.
 
@@ -1432,7 +1436,7 @@ def get_host_ips(client: dask.distributed.client.Client) -> dict[str, list[str]]
         # Extract the host IP address for the current worker.
         host = w_if["host"]
         # Group the worker addresses by their host IP.
-        if host not in host_ips.keys():
+        if host not in host_ips:
             host_ips[host] = [w_ip]
         else:
             host_ips[host].append(w_ip)
@@ -1514,9 +1518,9 @@ def get_worker_host(client: dask.distributed.client.Client | None = None) -> str
         # This error means the code is not running on a Dask worker.
         # A client is required to find other hosts in the cluster.
         if client is None:
-            raise Exception(f"Expected client, got {type(client)}")
+            raise TypeError(f"Expected client, got {type(client)}")
         # As a fallback, get all hosts from the cluster and pick the first one.
-        host = list(get_host_ips(client))[0]
+        host = next(iter(get_host_ips(client)))
     return host
 
 

@@ -54,6 +54,8 @@ typing = [
 	"pandas-stubs",
 	"types-retry",
 	"types-shapely",
+    "types-python-dateutil",
+    "types-psutil"
 ]
 formatter = ["ruff"]
 security = ["bandit"]
@@ -72,6 +74,13 @@ dev = ["ipykernel","matplotlib"]
 [tool.ruff]
 line-length = 120
 target-version = "py313"
+
+[tool.ruff.lint]
+ignore = [
+    "RUF007",
+    "C408",
+    "FURB162",
+]
 
 
 [tool.pytest.ini_options]

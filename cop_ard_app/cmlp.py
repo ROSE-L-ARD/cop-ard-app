@@ -3,13 +3,12 @@ from typing import cast
 import numpy as np
 import xarray as xr
 from cop_ard_core.cmlp import calculate_stable_dates, get_current_reference, update_drift, update_recursive_reference
-from cop_ard_core.logger import timeit
+from cop_ard_core.logger import logger, timeit
 from cop_ard_core.utils import get_normalized_interf
 
 from cop_ard_app.computation import map
 from cop_ard_app.io import Path, get_storage_options, normpath, read, save_empty_dataset, write
-from cop_ard_app.utils import slice_and_drop_coordinates, sanitize_coordinates
-from cop_ard_core.logger import logger
+from cop_ard_app.utils import sanitize_coordinates, slice_and_drop_coordinates
 
 SHORT_DIMS = ["polarization", "azimuth_time", "slant_range_time"]
 DIMS = ["polarization", "acquisition_date", "azimuth_time", "slant_range_time"]
@@ -109,7 +108,7 @@ def single_cmlp(
     if set(posting) != expected:
         raise ValueError(f"Wrong keys: {set(posting)}. Expected {expected}")
     if (not multiburst) and (reference_id is None):
-        raise ValueError(f"In single burst case, the reference_id is mandatory")
+        raise ValueError("In single burst case, the reference_id is mandatory")
 
     path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     last_reference_path = reference_database_path.append(f"{path}/current_reference")
@@ -131,7 +130,7 @@ def single_cmlp(
             last_reference = slice_and_drop_coordinates(ds, dimension_coordinates_to_keep=DIMS)
             starting_date = last_reference.attrs["starting_date"]
         except Exception as e:
-            raise ValueError(f"Failed to load current reference at {last_reference_path.path}: {e}")
+            raise ValueError(f"Failed to load current reference at {last_reference_path.path}: {e}") from e
     else:
         logger.warning(f"Current reference not found at {last_reference_path.path}. Starting from scratch.")
     stable_reference = None
@@ -151,7 +150,7 @@ def single_cmlp(
             else:
                 raise ValueError(f"No stable reference files found in {stable_reference_path.path}")
         except Exception as e:
-            raise ValueError(f"Failed to load stable references from {stable_reference_path.path}: {e}")
+            raise ValueError(f"Failed to load stable references from {stable_reference_path.path}: {e}") from e
     else:
         logger.warning(f"Stable reference not found at {stable_reference_path.path}. Starting from scratch.")
     # 3. Calculate Date Milestones
@@ -175,8 +174,8 @@ def single_cmlp(
     )
 
     # 5. Get Starting State
-    current_reference, start_date = get_current_reference(cstack_sel, last_reference, stable_reference)
-    current_reference = current_reference.drop_vars({k for k in current_reference.coords.keys() if k not in SHORT_DIMS})
+    current_reference, _ = get_current_reference(cstack_sel, last_reference, stable_reference)
+    current_reference = current_reference.drop_vars({k for k in current_reference.coords if k not in SHORT_DIMS})
     for date_idx, date in enumerate(cstack_sel.acquisition_date.values):
         slc = cstack_sel.sel(acquisition_date=date).fillna(0j)
         normalized_interf = _compute_and_save_interferogram(
@@ -285,7 +284,7 @@ def _prepare_cstack(cstack: xr.DataArray) -> tuple[xr.DataArray, dict]:
 
     chunks = {k: v[0] for k, v in cstack.chunksizes.items() if k in SHORT_DIMS}
     cstack_sel = cstack.drop_vars([k for k in cstack.coords if k not in DIMS]).sortby("acquisition_date")
-    cstack_sel = sanitize_coordinates(cstack_sel)
+    cstack_sel = cast(xr.DataArray, sanitize_coordinates(cstack_sel))
 
     return cstack_sel, chunks
 

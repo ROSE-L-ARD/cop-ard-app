@@ -1,7 +1,5 @@
 import itertools
 import os
-import re
-from typing import Any, Optional, Union
 
 import dask.distributed
 import numpy as np
@@ -12,7 +10,7 @@ import scipy.fft
 import xarray as xr
 from cop_ard_core.dem import extract_vertical_crs
 from cop_ard_core.iono_height import convert_ecef_to_llh, get_iono_height
-from cop_ard_core.logger import logger, timeit
+from cop_ard_core.logger import logger
 from cop_ard_core.utils import get_phramp_diff
 from pyproj import CRS, Transformer, datadir
 from pyproj.transformer import TransformerGroup
@@ -101,7 +99,7 @@ def get_margin(
     return margin
 
 
-def compute_chunks(chunks: dict, overlap: dict = {"y": 1, "x": 1}) -> dict:
+def compute_chunks(chunks: dict, overlap: dict | None = None) -> dict:
     """
     Compute overlapping chunk boundaries for use with `map_blocks`.
 
@@ -131,11 +129,13 @@ def compute_chunks(chunks: dict, overlap: dict = {"y": 1, "x": 1}) -> dict:
     Exception
         If the requested overlap is larger than the chunk size.
     """
+    if overlap is None:
+        overlap = {"y": 1, "x": 1}
     # --- Input Validation ---
     if (overlap["x"] < chunks["x"][0]) is False:
-        raise Exception(f"Overlap {overlap['x']} is bigger than chunk length {chunks['x'][0]}")
+        raise ValueError(f"Overlap {overlap['x']} is bigger than chunk length {chunks['x'][0]}")
     if (overlap["y"] < chunks["y"][0]) is False:
-        raise Exception(f"Overlap {overlap['y']} is bigger than chunk length {chunks['y'][0]}")
+        raise ValueError(f"Overlap {overlap['y']} is bigger than chunk length {chunks['y'][0]}")
 
     ch = {}
     # Iterate through each dimension specified in the input chunks.
@@ -318,8 +318,8 @@ def get_stack_phramp_diff(
         drg = drg_full.sel(acquisition_id=dd)
 
         if multilook is not None:
-            daz = daz.coarsen(multilook, boundary="trim").mean()  # type: ignore mean is injected dynamically
-            drg = drg.coarsen(multilook, boundary="trim").mean()  # type: ignore mean is injected dynamically
+            daz = daz.coarsen(multilook, boundary="trim").mean()  # type: ignore
+            drg = drg.coarsen(multilook, boundary="trim").mean()  # type: ignore
 
         res = get_phramp_diff(
             azimuth_time=azimuth_time,
@@ -342,7 +342,7 @@ def get_stack_phramp_diff(
 def sparse_multilook(data: xr.Dataset, cohe_th: float, multilook: dict):
     coords = list(multilook.keys())
     if not np.all([e in data.dims for e in coords]):
-        raise Exception(f"Not all {coords} in {data.dims}")
+        raise ValueError(f"Not all {coords} in {data.dims}")
 
     # set temporary linear coords
     azimuth_time = data.azimuth_time.values
@@ -436,7 +436,7 @@ def get_bbox(slcs, reference_date: str | None = None):
         for date in slc.orig if reference_date is None else [reference_date]:
             # Extract corner coordinates from the metadata.
             annot = slc.orig[date].measurements.slc.attrs
-            annot = annot[list(annot.keys())[0]]
+            annot = annot[next(iter(annot.keys()))]
             for v in annot["GeoData"]["ImageCorners"]:
                 lat.append(v["Lat"])
                 lon.append(v["Lon"])
@@ -459,7 +459,7 @@ def save_single_burst(
     reference_id: str | None = None,
 ):
     if (not multiburst) and (reference_id is None):
-        raise ValueError(f"In single burst case, the reference_id is mandatory")
+        raise ValueError("In single burst case, the reference_id is mandatory")
     path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     current_reference_path = f"{reference_db_path}/{path}/current_reference"
     stable_reference_path = f"{reference_db_path}/{path}/stable_reference"
@@ -620,7 +620,7 @@ def compute_iono_and_orb_height(
     secondary_slcs: xr.DataTree,
     wdir_path_tmp: str,
     acquisition_id: str,
-    iono_height_input: float | int | None = None,
+    iono_height_input: float | None = None,
     default_iono_height: float = 350_000.0,
     dbfile: str | None = None,
 ) -> tuple[float, float]:
@@ -672,7 +672,7 @@ def compute_iono_and_orb_height(
     if iono_height_input is None:
         try:
             h_iono = float(get_iono_height(acq_date, scp_dict, wdir_path_tmp, dbfile))
-        except Exception as err:
+        except RuntimeError as err:
             logger.warning(
                 f"Failed to fetch iono height automatically ({err}). Falling back to default: {default_iono_height} m"
             )
@@ -715,7 +715,7 @@ def get_best_pol(polarization_values: list) -> str:
     priorities = ["VV", "HH", "VH", "HV"]
     pol = next((p for p in priorities if p in available_pols), None)
     if pol is None:
-        raise Exception(f"No polarization has been found {available_pols}")
+        raise ValueError(f"No polarization has been found {available_pols}")
 
     return pol
 

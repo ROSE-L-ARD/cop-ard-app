@@ -8,7 +8,6 @@ import xarray as xr
 from cop_ard_core import detrend
 from cop_ard_core.esd import compute_azimuth_shifts, optimize_curvature
 from cop_ard_core.logger import logger
-from PIL.ImageFont import core
 
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.io import Path, generate_empty_dataset, get_storage_options, normpath, read, write
@@ -27,7 +26,7 @@ def esd_single_burst(
     next_burst_ref: xr.Dataset,
     current_burst_sec: xr.Dataset,
     next_burst_sec: xr.Dataset,
-    multilook: dict = {"azimuth_pixel": 4, "slant_range_time": 16},
+    multilook: dict | None = None,
     coherence_threshold: float = 0.7,
     enable_dask: bool = True,
     **kwargs,
@@ -43,6 +42,7 @@ def esd_single_burst(
     :param slcs_path: path to the input datatree
     :param burst_list: list of burst identifier the datatree contains
     :param c_id: identifier (e.g iw1_254) of the burst for which the ESD must be computed
+    :param multilook: multilook params, defaults to {"azimuth_pixel": 4, "slant_range_time": 16}
 
     :return: dictionary with the following structure:
              {
@@ -56,6 +56,7 @@ def esd_single_burst(
              reference_date_i image as ESD reference
 
     """
+    multilook = multilook or {"azimuth_pixel": 4, "slant_range_time": 16}
 
     def time_to_pixel_az(stack: xr.Dataset, dtaz: float, reference_time: datetime.datetime | None = None):
         if reference_time is None:
@@ -109,6 +110,8 @@ def esd_single_burst(
         enable_dask=enable_dask,
         force_compute=True,
     )
+    if not isinstance(esd, xr.Dataset):
+        raise TypeError("compute_azimuth_shifts returned wrong data type")
 
     esd = esd.expand_dims({"id": [burst_id]}).assign_coords(coords)
     return esd
@@ -160,14 +163,14 @@ def estimate(
 
     # Structure re-formatting in order to solve the global problem
     to_merge = [e.drop_vars("acquisition_date", errors="ignore") for e in esd if e is not None and len(e) > 0]
-    esd = xr.merge(
+    esd_ds = xr.merge(
         to_merge,
         compat="no_conflicts",
         combine_attrs="drop",
         join="outer",
     )
 
-    args = [esd.sel(acquisition_id=d) for d in esd.acquisition_id.values]
+    args = [esd_ds.sel(acquisition_id=d) for d in esd_ds.acquisition_id.values]  # type: ignore
     esd_opt = cast(
         list,
         map(
@@ -180,11 +183,11 @@ def estimate(
     )
     for e in esd_opt:
         d = e.acquisition_id.values
-        esd["mean_phase"].loc[:, d] = e.mean_phase
-        esd["mean_shift"].loc[:, d] = e.mean_shift
+        esd_ds["mean_phase"].loc[:, d] = e.mean_phase
+        esd_ds["mean_shift"].loc[:, d] = e.mean_shift
 
     # Auxiliary data saved as attributes of the dataset
-    return esd
+    return esd_ds
 
 
 def find_global_shift(esd: xr.Dataset, poly_degree: int = 0, norm: int = 1):
@@ -211,7 +214,6 @@ def find_global_shift(esd: xr.Dataset, poly_degree: int = 0, norm: int = 1):
 
     # rescale and center the coordinates of the points where the model is evaluated
     az = ((esd.azimuth_time - t0).astype("float64") / s_y).values
-    rg = ((esd.slant_range_time - r0).astype("float64") / s_x).values
 
     # call the global surface estimation function
     coeffs = detrend.estimate_global_surface(
@@ -228,7 +230,7 @@ def find_global_shift(esd: xr.Dataset, poly_degree: int = 0, norm: int = 1):
 def to_dataset(X, acquisition_id, t0, r0, s_y, s_x):
 
     n = len(X)
-    deg = int(round((-3 + np.sqrt(1 + 8 * n)) / 2))
+    deg = round((-3 + np.sqrt(1 + 8 * n)) / 2)
 
     def triangular_to_polygrid(coef):
 
@@ -285,14 +287,14 @@ def to_dataset_1D(X, acquisition_id, t0, r0, s_y, s_x):
 
 def stack_esd(
     slcs: xr.DataTree,
-    wdir_path: str,
+    wdir_path: str | Path,
     multiburst: bool,
     reference_id: str,
     esd_poly_degree: int = 2,
     enable_dask: bool = True,
     **kwargs,
 ):
-    wdir_path = Path(wdir_path)
+    wdir_path = Path(str(wdir_path))
 
     # estimate ESD at full-band
     if multiburst:
@@ -410,13 +412,18 @@ def map_single_phase_ramp(
         storage_options=get_storage_options(kwargs),
         skip_read=True,
     )
-    measurements = write(
+    write(
         measurements,
         measurements_path,
         mode="a",
         compute=False,
         storage_options=get_storage_options(kwargs),
-        skip_read=False,
+        skip_read=True,
+    )
+    measurements = read(
+        measurements_path,
+        storage_options=get_storage_options(kwargs),
+        as_type="xr.Dataset",
     )
 
     chunksizes = {
@@ -436,7 +443,7 @@ def map_single_phase_ramp(
         store_mapping=store_mapping,
     )
 
-    measurements = read(measurements_path, storage_options=get_storage_options(kwargs))
+    measurements = read(measurements_path, as_type="xr.Dataset", storage_options=get_storage_options(kwargs))
 
     return (burst_id, measurements)
 

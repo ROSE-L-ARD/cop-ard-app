@@ -1,4 +1,3 @@
-import os
 from typing import cast
 
 import numpy as np
@@ -12,12 +11,13 @@ from cop_ard_core.split_spectrum import (
     split_spectrum_core,
     split_spectrum_core_delta_mean,
 )
-from cop_ard_core.utils import get_azimuth_time_raw, get_best_pol
+from cop_ard_core.utils import get_azimuth_time_raw
+from numpy.polynomial.polynomial import polygrid2d
 
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.esd import estimate, find_global_shift
 from cop_ard_app.interf import get_mosaic_interf
-from cop_ard_app.io import Path, normpath, read, write
+from cop_ard_app.io import Path, read, write
 from cop_ard_app.model import get_carrier_frequency
 from cop_ard_app.utils import (
     build_coreg_poly_dict,
@@ -30,9 +30,8 @@ from cop_ard_app.utils import (
 
 
 def get_phase_corr_from_x_poly(
-    azimuth_time: xr.DataArray, slant_range_time: xr.DataArray, x_poly: xr.Dataset, freq: float
+    azimuth_time: xr.DataArray, slant_range_time: xr.DataArray, x_poly: xr.DataArray, freq: float
 ) -> xr.DataArray:
-    from numpy.polynomial.polynomial import polygrid2d
 
     out_coords = {"azimuth_time": azimuth_time.values, "slant_range_time": slant_range_time.values}
 
@@ -64,10 +63,11 @@ def separate_dispersive_spectrum_components(
     multilook: dict | None = None,
     multiburst: bool = True,
     enable_dask: bool = True,
-    chunks={"azimuth_time": 4096, "slant_range_time": 4096},
+    chunks=None,
     reference_id: str | None = None,
 ):
-
+    if chunks is None:
+        chunks = {"azimuth_time": 4096, "slant_range_time": 4096}
     # define center band frequencies
     f0 = get_carrier_frequency(reference_slcs, "coreg/measurements/cstack", multiburst=multiburst)
     f_l_tot = f0 - frequency_offset
@@ -134,19 +134,21 @@ def separate_dispersive_spectrum_components(
 
     # separate dispersive and non-dispersive components
     phase_iono, phase_nd = split_spectrum_core(phase_tot_l, phase_tot_h, f0, f_l_tot, f_h_tot)
-    phase_iono = phase_iono.to_dataset(name="phase")
+    phase_iono_ds = phase_iono.to_dataset(name="phase")
     # assign azimuth time of raw image in order to enable interpolation
-    phase_iono["azimuth_time_raw"] = mosaic_l["azimuth_time_raw"]
-    phase_iono["coherence"] = coherence
+    phase_iono_ds["azimuth_time_raw"] = mosaic_l["azimuth_time_raw"]
+    phase_iono_ds["coherence"] = coherence
 
     if wdir_path is not None:
         # save to disk
         phase_iono_path = wdir_path.append("phase_iono")
-        phase_iono = write(phase_iono, data_path=phase_iono_path, mode="w")
+        write(phase_iono_ds, data_path=phase_iono_path, mode="w", skip_read=True)
+        phase_iono_ds = read(phase_iono_path, as_type="xr.Dataset")
         phase_nd_path = wdir_path.append("phase_nd")
-        phase_nd = write(phase_nd, data_path=phase_nd_path, mode="w")
+        write(phase_nd, data_path=phase_nd_path, mode="w")
+        phase_nd = read(phase_nd_path, as_type="xr.DataArray")
 
-    return phase_iono, phase_nd
+    return phase_iono_ds, phase_nd
 
 
 @timeit
@@ -164,7 +166,7 @@ def separate_dispersive_spectrum_components_delta_mean(
     multilook: dict | None = None,
     multiburst: bool = True,
     enable_dask: bool = True,
-    chunks={"azimuth_time": 4096, "slant_range_time": 4096},
+    chunks=None,
     reference_id: str | None = None,
 ):
     """
@@ -215,6 +217,7 @@ def separate_dispersive_spectrum_components_delta_mean(
         Enable Dask-backed processing. Default is ``True``.
     chunks
         Chunking scheme used for Dask processing.
+        Defaults to {"azimuth_time": 4096, "slant_range_time": 4096}
     reference_id
         Optional identifier of the reference acquisition.
 
@@ -247,6 +250,8 @@ def separate_dispersive_spectrum_components_delta_mean(
     contribution, while the non-dispersive phase mainly contains geometric,
     deformation, and other frequency-independent signals.
     """
+    if chunks is None:
+        chunks = {"azimuth_time": 4096, "slant_range_time": 4096}
     # define center band frequencies
     f0 = get_carrier_frequency(
         reference_slcs,
@@ -336,29 +341,32 @@ def separate_dispersive_spectrum_components_delta_mean(
         f_h_tot,
     )
 
-    phase_iono = phase_iono.to_dataset(name="phase")
+    phase_iono_ds = phase_iono.to_dataset(name="phase")
 
     # assign azimuth time of raw image in order to enable interpolation
-    phase_iono["azimuth_time_raw"] = mosaic_l["azimuth_time_raw"]
-    phase_iono["coherence"] = coherence
+    phase_iono_ds["azimuth_time_raw"] = mosaic_l["azimuth_time_raw"]
+    phase_iono_ds["coherence"] = coherence
 
     if wdir_path is not None:
         # save to disk
         phase_iono_path = wdir_path.append("phase_iono")
-        phase_iono = write(
-            phase_iono,
+        write(
+            phase_iono_ds,
             data_path=phase_iono_path,
             mode="w",
         )
+        phase_iono_ds = read(phase_iono_path, as_type="xr.Dataset")
 
         phase_nd_path = wdir_path.append("phase_nd")
-        phase_nd = write(
+        write(
             phase_nd,
             data_path=phase_nd_path,
             mode="w",
+            skip_read=True,
         )
+        phase_nd = read(phase_nd_path, as_type="xr.DataArray")
 
-    return phase_iono, phase_nd
+    return phase_iono_ds, phase_nd
 
 
 def remove_iono_surface_chunk(
@@ -402,7 +410,7 @@ def remove_iono_surface_single_burst(
 ) -> tuple[str, xr.Dataset]:
 
     if (not multiburst) and (reference_id is None):
-        raise ValueError(f"In single burst case, the reference_id is mandatory")
+        raise ValueError("In single burst case, the reference_id is mandatory")
     path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     data_path = wdir_path.append(path).append("coreg_ss/measurements")
     # recontruct the surface over all points
@@ -478,8 +486,10 @@ def remove_iono_surface(
         enable_dask=enable_dask,
         combine=False,
     )
+    if not results or not isinstance(results[0], tuple) or len(results[0]) != 2:
+        raise ValueError("remove_iono_surface_single_burst returned invalid results")
 
-    for k, v in results:
+    for k, v in cast(list[tuple[str, xr.Dataset]], results):
         if multiburst:
             slcs.bursts[k].coreg.measurements["cstack"] = v.cstack
             slcs.bursts[k].coreg.measurements["phase_iono"] = v.phase_iono
@@ -506,7 +516,7 @@ def split_spectrum(
     x_poly: xr.Dataset | None = None,
     dbfile: str | None = None,
 ):
-    wdir_path = Path(wdir_path)
+    wdir_path = str(Path(wdir_path).path)
     reference_slcs, secondary_slcs = split_slc_datatrees(
         slcs=slcs,
         reference_id=reference_id,
@@ -542,7 +552,7 @@ def split_spectrum(
         y_poly = None
 
     # separate dispersive and non-dispersive components
-    phase_iono, phase_nd = separate_dispersive_spectrum_components_delta_mean(
+    phase_iono, _ = separate_dispersive_spectrum_components_delta_mean(
         reference_slcs,
         secondary_slcs,
         frequency_offset=frequency_offset,

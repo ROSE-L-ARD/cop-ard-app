@@ -1,4 +1,5 @@
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 import botocore.exceptions
 import dask.array as da
@@ -137,8 +138,6 @@ def map_shadow_projection(
         store_mapping={0: save_options},
     )
 
-    return
-
 
 def map_shadow(
     slc: xr.DataArray,
@@ -181,7 +180,7 @@ def map_shadow(
 
     # Load global values (chunk sizes, bounding box) from the static path
     # Extract annotation metadata from the SLC
-    annot = slc.attrs[list(slc.attrs.keys())[0]]
+    annot = slc.attrs[next(iter(slc.attrs.keys()))]
 
     # Calculate time differentials for azimuth and range
     dt = {
@@ -239,7 +238,6 @@ def map_shadow(
         combine=False,  # Results are written to disk
         store_mapping={0: save_options},
     )
-    return
 
 
 def mask_shadow_single_burst(
@@ -298,7 +296,7 @@ def mask_shadow_single_burst(
         This function saves the shadow mask to disk.
     """
     if (not multiburst) and (reference_id is None):
-        raise ValueError(f"In single burst case, the reference_id is mandatory")
+        raise ValueError("In single burst case, the reference_id is mandatory")
     # Define the data path based on whether it's multiburst or single data mode
     path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     data_path = normpath(f"{wdir_path_static}/{path}")
@@ -335,7 +333,6 @@ def mask_shadow_single_burst(
     else:
         # Skip computation if completion file exists and recompute is False
         logger.info(f"Found existing mask files for burst {burst_id}")
-    return
 
 
 @timeit
@@ -407,8 +404,6 @@ def stack_mask(
         enable_dask=kwargs.get("enable_dask", True),
         Plugin=GeoEnvPlugin(in_proj=in_proj, out_proj="EPSG:4978"),
     )
-
-    return
 
 
 def map_rasterization_and_rtc_ap(
@@ -572,7 +567,7 @@ def map_rasterization_and_rtc_ap(
         enable_dask=enable_dask,
         combine=False,
         store_mapping=store_mapping,
-        region_callback=region_callback,
+        region_callback=region_callback,  # type: ignore
     )
     store_mapping = {
         0: {
@@ -613,7 +608,7 @@ def map_rasterization_and_rtc_ap(
         enable_dask=enable_dask,
         combine=False,
         store_mapping=store_mapping,
-        region_callback=region_callback,
+        region_callback=region_callback,  # type: ignore
     )
 
     # --- Convert Sparse Results to Dense ---
@@ -666,7 +661,6 @@ def map_rasterization_and_rtc_ap(
         combine=False,
         store_mapping={0: save_options},
     )
-    return
 
 
 def single_burst_geometry(
@@ -726,9 +720,9 @@ def single_burst_geometry(
     """
     # Type check for the SLC input
     if not isinstance(slc, xr.DataArray):
-        raise Exception(f"Expected xr.DataArray, got {type(slc)}")
+        raise TypeError(f"Expected xr.DataArray, got {type(slc)}")
     if (not multiburst) and (reference_id is None):
-        raise ValueError(f"In single burst case, the reference_id is mandatory")
+        raise ValueError("In single burst case, the reference_id is mandatory")
     # Define paths based on whether it's multiburst or single data mode
     path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     data_path_static = normpath(f"{wdir_path_static}/{path}")
@@ -784,7 +778,6 @@ def single_burst_geometry(
     else:
         # Skip computation if completion file exists and recompute is False
         logger.info(f"Found existing area_projection files for burst {burst_id}")
-    return
 
 
 def stack_geometry(
@@ -876,8 +869,6 @@ def stack_geometry(
         combine=False,  # Results are written to disk, not combined
         enable_dask=enable_dask,
     )
-
-    return
 
 
 def blockwise_rtc_ap(
@@ -975,7 +966,7 @@ def blockwise_rtc_ap(
 
 
 def sparse_to_dense(
-    A: xr.Dataset, files_A, files_l1, files_l2, data_path: str, chunk: dict = {}, **kwargs
+    A: xr.Dataset, files_A, files_l1, files_l2, data_path: str, chunk: dict | None = None, **kwargs
 ) -> xr.Dataset:
     """
     Converts and accumulates sparse matrix blocks into a single dense xr.DataArray
@@ -1008,6 +999,7 @@ def sparse_to_dense(
     xr.Dataset
         The accumulated dense 'anf' and 'layover' arrays as an xr.Dataset.
     """
+    chunk = chunk or {}
     # Extract the radar grid boundaries for this target dense chunk
     rg_min = chunk["slant_range_time"].start
     rg_max = chunk["slant_range_time"].stop
@@ -1068,12 +1060,12 @@ def sparse_to_dense(
     l2_blocks = l2_blocks > 1 + 1e-7
 
     # Convert the dense ANF array to an xr.DataArray with correct dims
-    A_blocks = xr.DataArray(A_blocks, dims=["azimuth_time", "slant_range_time"])
+    A_blocks_da = xr.DataArray(A_blocks, dims=["azimuth_time", "slant_range_time"])
     # Combine the two layover masks
     layover_blocks = xr.DataArray(l1_blocks + l2_blocks, dims=["azimuth_time", "slant_range_time"])
 
     # Create the final dataset for the radar grid chunk
-    radar_data = xr.Dataset(data_vars={"anf": A_blocks, "layover": layover_blocks})
+    radar_data = xr.Dataset(data_vars={"anf": A_blocks_da, "layover": layover_blocks})
 
     # Write the dense dataset to disk for the specified chunk region
     return radar_data
@@ -1085,7 +1077,7 @@ def blockwise_geocoded_mask(
     xsize_global: int,
     data_path_static: str,
     threshold: float = 0.3,
-    chunk: dict = {},
+    chunk: dict | None = None,
     **kwargs,
 ) -> xr.Dataset:
     """
@@ -1131,6 +1123,7 @@ def blockwise_geocoded_mask(
     xr.Dataset
         Geocoded mask data for this chunk.
     """
+    chunk = chunk or {}
     so = get_storage_options(kwargs)
     # Get the geogrid dimensions for this chunk (e.g., 512x512)
     dim_x, dim_y = empty_data.x.size - 1, empty_data.y.size - 1
@@ -1162,15 +1155,15 @@ def blockwise_geocoded_mask(
             output_shape=(dim_y, dim_x),
             threshold=threshold,
         )
-        geocoded_mask = xr.Dataset(data_vars={"mask": (["y", "x"], geocoded_mask)})
+        geocoded_mask_ds = xr.Dataset(data_vars={"mask": (["y", "x"], geocoded_mask)})
     else:
         # If no weights were provided, create an empty boolean mask
         size = {k: v.stop - v.start for k, v in chunk.items()}
-        geocoded_mask = xr.Dataset(
+        geocoded_mask_ds = xr.Dataset(
             data_vars={"mask": (["y", "x"], np.zeros((size["y"] - 1, size["x"] - 1), dtype="int32"))}
         )
 
-    return geocoded_mask
+    return geocoded_mask_ds
 
 
 def blockwise_rasterization(

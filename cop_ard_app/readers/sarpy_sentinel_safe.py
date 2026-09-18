@@ -1,4 +1,4 @@
-# type: ignore  # placeholder
+# type: ignore
 # MIT License
 
 # Copyright (c) 2018-2021 National Geospatial-Intelligence Agency
@@ -32,7 +32,7 @@ __author__ = ("Thomas McCullough", "Daniel Haverporth")
 import logging
 import os
 from datetime import datetime
-from typing import Any, List, Optional, Tuple, Union, cast
+from typing import Any, cast
 from xml.etree import ElementTree
 
 import numpy
@@ -71,9 +71,7 @@ logger = logging.getLogger(__name__)
 # helper functions
 
 
-def _parse_xml(
-    file_name: str, without_ns: bool = False
-) -> Union[ElementTree.Element, Tuple[dict, ElementTree.Element]]:
+def _parse_xml(file_name: str, without_ns: bool = False) -> ElementTree.Element | tuple[dict, ElementTree.Element]:
     root_node = ElementTree.parse(file_name).getroot()
     if without_ns:
         return root_node
@@ -88,10 +86,10 @@ def _parse_xml(
 def find_string(root_node, path) -> str:
     node = root_node.find(path)
     if not isinstance(node, ElementTree.Element):
-        raise Exception(f"Expected Element for {path}")
+        raise TypeError(f"Expected Element for {path}")
     text = node.text
     if text is None:
-        raise Exception(f"Expected str for {path} got None")
+        raise TypeError(f"Expected str for {path} got None")
     return text
 
 
@@ -99,8 +97,8 @@ def find_string(root_node, path) -> str:
 # parser and interpreter for sentinel-1 manifest.safe file
 
 
-class SentinelDetails(object):
-    __slots__ = ("_file_name", "_directory_name", "_root_node", "_ns", "_satellite", "_product_type", "_base_sicd")
+class SentinelDetails:
+    __slots__ = ("_base_sicd", "_directory_name", "_file_name", "_ns", "_product_type", "_root_node", "_satellite")
 
     def __init__(self, file_name: str):
         """
@@ -115,23 +113,23 @@ class SentinelDetails(object):
             if os.path.exists(t_file_name):
                 file_name = t_file_name
         if not os.path.exists(file_name) or not os.path.isfile(file_name):
-            raise SarpyIOError("path {} does not exist or is not a file".format(file_name))
+            raise SarpyIOError(f"path {file_name} does not exist or is not a file")
         if os.path.split(file_name)[1] != "manifest.safe":
-            raise SarpyIOError("The sentinel file is expected to be named manifest.safe, got path {}".format(file_name))
+            raise SarpyIOError(f"The sentinel file is expected to be named manifest.safe, got path {file_name}")
         self._file_name = file_name
         absolute_path = os.path.abspath(file_name)
         self._directory_name, _ = os.path.split(absolute_path)
 
         parsed_xml = _parse_xml(file_name)
         if not isinstance(parsed_xml, tuple):
-            raise Exception(f"Expeted tuple, got {type(parsed_xml)}")
+            raise TypeError(f"Expeted tuple, got {type(parsed_xml)}")
         self._ns: dict[Any, Any] = parsed_xml[0]
         self._root_node = parsed_xml[1]
         # note that the manifest.safe apparently does not have a default namespace,
         # so we have to explicitly enter no prefix in the namespace dictionary
 
         if not isinstance(self._ns, dict):
-            raise Exception(f"Expected dict, got {type(self._ns)}")
+            raise TypeError(f"Expected dict, got {type(self._ns)}")
         self._ns[""] = ""
         _satellite = self._find(
             './metadataSection/metadataObject[@ID="platform"]/metadataWrap/xmlData/safe:platform/safe:familyName'
@@ -140,7 +138,7 @@ class SentinelDetails(object):
         self._satellite = _satellite.text if _satellite is not None else None
         if self._satellite != "SENTINEL-1":
             raise ValueError(
-                "The platform in the manifest.safe file is required to be SENTINEL-1, got {}".format(self._satellite)
+                f"The platform in the manifest.safe file is required to be SENTINEL-1, got {self._satellite}"
             )
 
         _product_type = self._find(
@@ -156,7 +154,7 @@ class SentinelDetails(object):
 
         if self._product_type != "SLC":
             raise ValueError(
-                'The product type in the manifest.safe file is required to be "SLC", got {}'.format(self._product_type)
+                f'The product type in the manifest.safe file is required to be "SLC", got {self._product_type}'
             )
         self._base_sicd = self._get_base_sicd()
 
@@ -208,7 +206,7 @@ class SentinelDetails(object):
         res = self._root_node.find(tag, self._ns)
         return res
 
-    def _findall(self, tag: str) -> List[ElementTree.Element]:
+    def _findall(self, tag: str) -> list[ElementTree.Element]:
         """
         Pass through to ElementTree.Element.findall(tag, ns).
 
@@ -225,9 +223,9 @@ class SentinelDetails(object):
 
     @staticmethod
     def _parse_pol(str_in: str) -> str:
-        return "{}:{}".format(str_in[0], str_in[1])
+        return f"{str_in[0]}:{str_in[1]}"
 
-    def _get_file_sets(self) -> List[dict]:
+    def _get_file_sets(self) -> list[dict]:
         """
         Extracts paths for measurement and metadata files from a Sentinel manifest.safe file.
         These files will be grouped according to "measurement data unit" implicit in the
@@ -244,7 +242,7 @@ class SentinelDetails(object):
                     tids,
                 ]
             for tid in tids:
-                do = self._find('dataObjectSection/dataObject[@repID="{}"]/[@ID="{}"]'.format(schema_type, tid))
+                do = self._find(f'dataObjectSection/dataObject[@repID="{schema_type}"]/[@ID="{tid}"]')
                 if do is None:
                     continue
                 return os.path.join(base_path, do.find("./byteStream/fileLocation").attrib["href"])
@@ -266,9 +264,7 @@ class SentinelDetails(object):
             # get the ids for product, noise, and calibration associated with this measurement data unit
             ids = mdu.attrib["dmdID"].split()
             # translate these ids to data object ids=file ids for the data files
-            _fids = [
-                self._find('./metadataSection/metadataObject[@ID="{}"]/dataObjectPointer'.format(did)) for did in ids
-            ]
+            _fids = [self._find(f'./metadataSection/metadataObject[@ID="{did}"]/dataObjectPointer') for did in ids]
             fids = [fid.attrib["dataObjectID"] if fid is not None else None for fid in _fids]
             # NB: there is (at most) one of these per measurement data unit
             fnames["product"] = get_file_location("s1Level1ProductSchema", fids)
@@ -291,7 +287,7 @@ class SentinelDetails(object):
         # CollectionInfo
         platform = self._find('./metadataSection/metadataObject[@ID="platform"]/metadataWrap/xmlData/safe:platform')
         if platform is None:
-            raise Exception("Platform is None")
+            raise TypeError("Platform is None")
         family_name = cast(ElementTree.Element, platform.find("safe:familyName", self._ns)).text
         safe_number = cast(ElementTree.Element, platform.find("safe:number", self._ns)).text
         collector_name = f"{family_name}{safe_number}"
@@ -315,14 +311,14 @@ class SentinelDetails(object):
             './metadataSection/metadataObject[@ID="processing"]/metadataWrap/xmlData/safe:processing'
         )
         if processing is None:
-            raise Exception("Processing is None")
+            raise TypeError("Processing is None")
         facility = cast(ElementTree.Element, processing.find("safe:facility", self._ns))
         software = cast(ElementTree.Element, facility.find("safe:software", self._ns))
         image_creation = ImageCreationType(
             Application="{name} {version}".format(**software.attrib),
             DateTime=processing.attrib["stop"],
             Site="{name}, {site}, {country}".format(**facility.attrib),
-            Profile="sarpy {}".format(__version__),
+            Profile=f"sarpy {__version__}",
         )
         # RadarCollection
         polarizations = self._findall(
@@ -342,7 +338,7 @@ class SentinelDetails(object):
         )
         return SICDType(CollectionInfo=collection_info, ImageCreation=image_creation, RadarCollection=radar_collection)
 
-    def _parse_product_sicd(self, product_file_name: str) -> Union[SICDType, List[SICDType]]:
+    def _parse_product_sicd(self, product_file_name: str) -> SICDType | list[SICDType]:
         """
 
         Parameters
@@ -357,7 +353,7 @@ class SentinelDetails(object):
         DT_FMT = "%Y-%m-%dT%H:%M:%S.%f"
         root_node = _parse_xml(product_file_name, without_ns=True)
         if not isinstance(root_node, ElementTree.Element):
-            raise Exception(f"Expected root_node type: ElementTree.Element. Got {type(root_node)}")
+            raise TypeError(f"Expected root_node type: ElementTree.Element. Got {type(root_node)}")
         burst_list = root_node.findall("./swathTiming/burstList/burst")
         # parse the geolocation information - for SCP calculation
         geo_grid_point_list = root_node.findall("./geolocationGrid/geolocationGridPointList/geolocationGridPoint")
@@ -389,7 +385,7 @@ class SentinelDetails(object):
                 pixel_type = "RE16I_IM16I"
             else:
                 # NB: we only handle SLC
-                raise ValueError("SLC data should be 16-bit complex, got pixelValue = {}.".format(_pv))
+                raise ValueError(f"SLC data should be 16-bit complex, got pixelValue = {_pv}.")
             if len(burst_list) > 0:
                 # should be TOPSAR
                 num_rows = int(find_string(root_node, "./swathTiming/samplesPerBurst"))
@@ -424,7 +420,7 @@ class SentinelDetails(object):
                 "./imageAnnotation/processingInformation/swathProcParamsList/swathProcParams/rangeProcessing"
             )
             if not isinstance(range_proc, ElementTree.Element):
-                raise Exception(f"Expected range_proc Element, got {type(range_proc)}")
+                raise TypeError(f"Expected range_proc Element, got {type(range_proc)}")
             delta_tau_s = 1.0 / float(
                 find_string(root_node, "./generalAnnotation/productInformation/rangeSamplingRate")
             )
@@ -453,7 +449,7 @@ class SentinelDetails(object):
                 "./imageAnnotation/processingInformation/swathProcParamsList/swathProcParams/azimuthProcessing"
             )
             if not isinstance(az_proc, ElementTree.Element):
-                raise Exception(f"Expected az_proc Element, got {type(az_proc)}")
+                raise TypeError(f"Expected az_proc Element, got {type(az_proc)}")
             col_ss = float(find_string(root_node, "./imageAnnotation/imageInformation/azimuthPixelSpacing"))
             dop_bw = float(find_string(az_proc, "./processingBandwidth"))  # Doppler bandwidth
             ss_zd_s = get_image_col_spacing_zdt()
@@ -661,7 +657,7 @@ class SentinelDetails(object):
             # type: (SICDType, datetime, int) -> None
             t_slice = int(get_slice())
             swath = get_swath()
-            sicd.CollectionInfo.CoreName = "{0:s}{1:s}{2:s}_{3:02d}_{4:s}_{5}".format(
+            sicd.CollectionInfo.CoreName = "{:s}{:s}{:s}_{:02d}_{:s}_{}".format(
                 start_dt.strftime("%d%b%y"),
                 find_string(root_node, "./adsHeader/missionId"),
                 find_string(root_node, "./adsHeader/missionDataTakeId"),
@@ -773,9 +769,9 @@ class SentinelDetails(object):
             )
             logger.debug(
                 "The phase polynomial fit details:\n\t"
-                "root mean square residuals = {}\n\t"
-                "rank = {}\n\t"
-                "singular values = {}".format(residuals, rank, sing_values)
+                f"root mean square residuals = {residuals}\n\t"
+                f"rank = {rank}\n\t"
+                f"singular values = {sing_values}"
             )
 
             # DeltaKCOAPoly is derivative of phase in azimuth/Col direction
@@ -803,9 +799,9 @@ class SentinelDetails(object):
             )
             logger.debug(
                 "The TimeCOAPoly fit details:\n\t"
-                "root mean square residuals = {}\n\t"
-                "rank = {}\n\t"
-                "singular values = {}".format(residuals, rank, sing_values)
+                f"root mean square residuals = {residuals}\n\t"
+                f"rank = {rank}\n\t"
+                f"singular values = {sing_values}"
             )
             grid.TimeCOAPoly = Poly2DType(Coefs=time_coa_poly)
             if return_time_dets:
@@ -853,7 +849,7 @@ class SentinelDetails(object):
                 (im_dat.NumRows - 1, 0),
             )
             downlink_info = "./generalAnnotation/downlinkInformationList/downlinkInformation"
-            start_dt = datetime.strptime(
+            start_dt = datetime.strptime(  # noqa: DTZ007
                 find_string(root_node, f"{downlink_info}/firstLineSensingTime"),
                 DT_FMT,
             )
@@ -926,13 +922,13 @@ class SentinelDetails(object):
 
                 # This is the first and last zero doppler times of the columns in the burst.
                 # Not really CollectStart and CollectDuration in SICD (first last pulse time)
-                start_dt = datetime.strptime(find_string(burst, "./azimuthTime"), DT_FMT)
+                start_dt = datetime.strptime(find_string(burst, "./azimuthTime"), DT_FMT)  # noqa: DTZ007
                 start = numpy.datetime64(start_dt, "us")
                 set_core_name(t_sicd, start_dt, burst_id)
                 set_position(t_sicd, start)
                 res = update_rma_and_grid(t_sicd, 0, start, return_time_dets=True)
                 if res is None:
-                    raise Exception(f"Expected res tuple, got {type(res)}")
+                    raise TypeError(f"Expected res tuple, got {type(res)}")
                 early, late = res
                 new_start = start + numpy.timedelta64(numpy.int64(early * 1e6), "us")
                 duration = late - early
@@ -960,7 +956,7 @@ class SentinelDetails(object):
         else:
             return finalize_stripmap()
 
-    def _refine_using_calibration(self, cal_file_name: str, sicds: Union[SICDType, List[SICDType]]) -> None:
+    def _refine_using_calibration(self, cal_file_name: str, sicds: SICDType | list[SICDType]) -> None:
         """
 
         Parameters
@@ -978,7 +974,7 @@ class SentinelDetails(object):
             return
         root_node = _parse_xml(cal_file_name, without_ns=True)
         if not isinstance(root_node, ElementTree.Element):
-            raise Exception(f"Expected Element, got {type(root_node)}")
+            raise TypeError(f"Expected Element, got {type(root_node)}")
 
         if isinstance(sicds, SICDType):
             sicds = [
@@ -1002,7 +998,7 @@ class SentinelDetails(object):
             ) * sicd.Grid.Col.SS
             # NB: coords_rg = (valid_count, M) and coords_az = (valid_count, )
             if not isinstance(pixel, numpy.ndarray):
-                raise Exception(f"Expected type(pixel)=numpy.ndarray, got {type(pixel)}")
+                raise TypeError(f"Expected type(pixel)=numpy.ndarray, got {type(pixel)}")
             coords_az = numpy.repeat(coords_az, pixel.shape[1])
             if valid_count > 1:
                 coords_az = coords_az.reshape((valid_count, -1))
@@ -1019,21 +1015,21 @@ class SentinelDetails(object):
                     rcond=1e-35,
                 )
                 logger.debug(
-                    "The {} polynomial fit details:\n\t"
-                    "root mean square residuals = {}\n\t"
-                    "rank = {}\n\t"
-                    "singular values = {}".format(poly_name, residuals, rank, sing_values)
+                    f"The {poly_name} polynomial fit details:\n\t"
+                    f"root mean square residuals = {residuals}\n\t"
+                    f"rank = {rank}\n\t"
+                    f"singular values = {sing_values}"
                 )
                 return Poly2DType(Coefs=poly)
 
             if sicd.Radiometric is None:
                 sicd.Radiometric = RadiometricType()
             if not isinstance(sigma, numpy.ndarray):
-                raise Exception(f"Expected sigma np.ndaraay, got {type(sigma)}")
+                raise TypeError(f"Expected sigma np.ndarray, got {type(sigma)}")
             if not isinstance(beta, numpy.ndarray):
-                raise Exception(f"Expected beta np.ndaraay, got {type(beta)}")
+                raise TypeError(f"Expected beta np.ndarray, got {type(beta)}")
             if not isinstance(gamma, numpy.ndarray):
-                raise Exception(f"Expected sigma np.ndaraay, got {type(sigma)}")
+                raise TypeError(f"Expected sigma np.ndarray, got {type(sigma)}")
 
             sicd.Radiometric.SigmaZeroSFPoly = create_poly(
                 sigma[valid_lines, :], poly_order=2, poly_name="SigmaZeroSFPoly"
@@ -1068,7 +1064,7 @@ class SentinelDetails(object):
         for ind, sic in enumerate(sicds):
             update_sicd(sic, ind)
 
-    def _refine_using_noise(self, noise_file_name: str, sicds: Union[SICDType, List[SICDType]]) -> None:
+    def _refine_using_noise(self, noise_file_name: str, sicds: SICDType | list[SICDType]) -> None:
         """
 
         Parameters
@@ -1086,7 +1082,7 @@ class SentinelDetails(object):
             return
         root_node = _parse_xml(noise_file_name, without_ns=True)
         if not isinstance(root_node, ElementTree.Element):
-            raise Exception(f"Expected Element, got {type(root_node)}")
+            raise TypeError(f"Expected Element, got {type(root_node)}")
         if isinstance(sicds, SICDType):
             sicds = [
                 sicds,
@@ -1101,7 +1097,7 @@ class SentinelDetails(object):
             lines = []
             pixels = []
             noises = []
-            noise_vector_list = root_node.findall("./{0:s}VectorList/{0:s}Vector".format(stem))
+            noise_vector_list = root_node.findall(f"./{stem:s}VectorList/{stem:s}Vector")
             for i, noise_vector in enumerate(noise_vector_list):
                 line = numpy.fromstring(find_string(noise_vector, "./line"), dtype=numpy.int64, sep=" ")
                 # some datasets have noise vectors for negative lines - ignore these
@@ -1112,15 +1108,13 @@ class SentinelDetails(object):
                     pixel = numpy.fromstring(str(pixel_node.text), dtype=numpy.int64, sep=" ")
                 else:
                     pixel = None
-                noise = numpy.fromstring(
-                    find_string(noise_vector, "./{}Lut".format(stem)), dtype=numpy.float64, sep=" "
-                )
+                noise = numpy.fromstring(find_string(noise_vector, f"./{stem}Lut"), dtype=numpy.float64, sep=" ")
                 # some datasets do not have any noise data (all 0's) - skipping these will throw things into disarray
                 if not numpy.all(noise == 0):
                     # convert noise to dB - what about -inf values?
                     noise = 10 * numpy.log10(noise)
                 if not isinstance(noise, numpy.ndarray):
-                    raise Exception(f"Expected noise numpy.ndarray, got {type(noise)}")
+                    raise TypeError(f"Expected noise numpy.ndarray, got {type(noise)}")
 
                 # do some validity checks
                 if (mode_id == "IW") and numpy.any((line % lines_per_burst) != 0) and (i != len(noise_vector_list) - 1):
@@ -1140,7 +1134,7 @@ class SentinelDetails(object):
             # NB: the default order was 7 before refactoring...that seems excessive.
 
             if not isinstance(range_pixel[0], numpy.ndarray):
-                raise Exception(f"Expected numpy.ndarray, got {type(range_pixel)}")
+                raise TypeError(f"Expected numpy.ndarray, got {type(range_pixel)}")
             rg_poly_order = min(5, range_pixel[0].size - 1)
             if sicd.CollectionInfo.RadarMode.ModeID[0] == "S":
                 # STRIPMAP - all LUTs apply
@@ -1165,9 +1159,9 @@ class SentinelDetails(object):
                 )
                 logger.debug(
                     "NoisePoly fit details:\n\t"
-                    "root mean square residuals = {}\n\t"
-                    "rank = {}\n\t"
-                    "singular values = {}".format(res, rank, sing_vals)
+                    f"root mean square residuals = {res}\n\t"
+                    f"rank = {rank}\n\t"
+                    f"singular values = {sing_vals}"
                 )
             else:
                 # TOPSAR has single LUT per burst
@@ -1175,10 +1169,8 @@ class SentinelDetails(object):
                 if index >= len(range_pixel):
                     logger.error(
                         "We have run out of noise information.\n\t"
-                        "Current index = {}, length of noise array = {}.\n\t"
-                        "The previous noise information will be used to populate the NoisePoly.".format(
-                            index, len(range_pixel)
-                        )
+                        f"Current index = {index}, length of noise array = {len(range_pixel)}.\n\t"
+                        "The previous noise information will be used to populate the NoisePoly."
                     )
                 rp_array = range_pixel[min(index, len(range_pixel) - 1)]
                 rn_array = range_noise[min(index, len(range_pixel) - 1)]
@@ -1187,7 +1179,7 @@ class SentinelDetails(object):
                 az_poly = None
                 if azimuth_noise is not None:
                     if not isinstance(azimuth_line, numpy.ndarray):
-                        raise Exception(f"Expected numpy.ndarray, got {type(azimuth_line)}")
+                        raise TypeError(f"Expected numpy.ndarray, got {type(azimuth_line)}")
                     line0 = lines_per_burst * index
                     coords_az = (azimuth_line[0] - line0 - sicd.ImageData.SCPPixel.Col) * sicd.Grid.Col.SS
                     valid_lines = (azimuth_line[0] >= line0) & (azimuth_line[0] < line0 + lines_per_burst)
@@ -1213,14 +1205,14 @@ class SentinelDetails(object):
         if root_node.find("./noiseVectorList") is not None:
             # probably prior to March 2018
             range_line, range_pixel, range_noise = extract_vector("noise")
-            azimuth_line, azimuth_pixel, azimuth_noise = None, None, None
+            azimuth_line, _, azimuth_noise = None, None, None
         else:
             # noiseRange and noiseAzimuth fields began in March 2018
             range_line, range_pixel, range_noise = extract_vector("noiseRange")
-            azimuth_line, azimuth_pixel, azimuth_noise = extract_vector("noiseAzimuth")
+            azimuth_line, _, azimuth_noise = extract_vector("noiseAzimuth")
             try:
                 azimuth_line = numpy.concatenate(azimuth_line, axis=0)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 # Fallback for test cases or missing metadata.
                 logger.warning(f"Error: {e.__class__.__name__}")
                 azimuth_line = None
@@ -1230,7 +1222,7 @@ class SentinelDetails(object):
             populate_noise(sic, ind)
 
     @staticmethod
-    def _derive(sicds: Union[SICDType, List[SICDType]]) -> None:
+    def _derive(sicds: SICDType | list[SICDType]) -> None:
         if isinstance(sicds, SICDType):
             sicds.derive()
             sicds.populate_rniirs(override=False)
@@ -1239,7 +1231,7 @@ class SentinelDetails(object):
                 sicd.derive()
                 sicd.populate_rniirs(override=False)
 
-    def get_sicd_collection(self) -> List[Tuple[str, Union[SICDType, List[SICDType]]]]:
+    def get_sicd_collection(self) -> list[tuple[str, SICDType | list[SICDType]]]:
         """
         Get the data file location(s) and corresponding sicd collection for each file.
 
@@ -1272,9 +1264,9 @@ class SentinelReader(SICDTypeReader):
     **Changed in version 1.3.0** for reading changes.
     """
 
-    __slots__ = ("_sentinel_details", "_parent_segments")
+    __slots__ = ("_parent_segments", "_sentinel_details")
 
-    def __init__(self, sentinel_details: Union[str, SentinelDetails]):
+    def __init__(self, sentinel_details: str | SentinelDetails):
         """
 
         Parameters
@@ -1345,9 +1337,8 @@ class SentinelReader(SICDTypeReader):
                 while len(self._parent_segments) > 0:
                     segment = self._parent_segments.pop()
                     segment.close()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning(f"Exception is: {e.__class__.__name__}")
-                pass
             self._parent_segments = None
 
 
@@ -1355,7 +1346,7 @@ class SentinelReader(SICDTypeReader):
 # base expected functionality for a module with an implemented Reader
 
 
-def is_a(file_name: str) -> Optional[SentinelReader]:
+def is_a(file_name: str) -> SentinelReader | None:
     """
     Tests whether a given file_name corresponds to a Sentinel file. Returns a reader instance, if so.
 
@@ -1375,7 +1366,14 @@ def is_a(file_name: str) -> Optional[SentinelReader]:
 
     try:
         sentinel_details = SentinelDetails(file_name)
-        logger.debug("Path {} is determined to be or contain a Sentinel-1 manifest.safe file.".format(file_name))
+        logger.debug(f"Path {file_name} is determined to be or contain a Sentinel-1 manifest.safe file.")
         return SentinelReader(sentinel_details)
     except (SarpyIOError, AttributeError, SyntaxError, ElementTree.ParseError):
         return None
+
+
+__all__ = [
+    "SentinelDetails",
+    "SentinelReader",
+    "is_a",
+]

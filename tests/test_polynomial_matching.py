@@ -21,10 +21,9 @@
 import numpy as np
 import pytest
 import xarray as xr
-from scipy.ndimage import map_coordinates
-
 from cop_ard_core.detrend import fit_2d_poly, get_model_matrix
 from cop_ard_core.matching import compute_pearson_coefficient
+from scipy.ndimage import map_coordinates
 
 SIZE = 256
 PATCH_HALF = 32  # patch side is 2 * PATCH_HALF = 64 pixels
@@ -128,8 +127,7 @@ def _fit_surface(xs, ys, data, degree, yy, xx):
     return (model @ coeffs.x).reshape(yy.shape)
 
 
-class TestPolynomialMatching():
-
+class TestPolynomialMatching:
     @pytest.mark.unit
     @pytest.mark.parametrize("degree", [1, 2])
     def test_secondary_shifted_by_polynomial_is_recovered(self, degree):
@@ -160,12 +158,10 @@ class TestPolynomialMatching():
             # (1) the polynomial is identified pointwise within a tolerance margin
             max_err = float(np.abs(err).max())
             assert max_err <= ABS_TOL_PX, (
-                f"degree {degree}, axis {axis}: max disparity error "
-                f"{max_err:.3f} px exceeds tolerance {ABS_TOL_PX} px"
+                f"degree {degree}, axis {axis}: max disparity error {max_err:.3f} px exceeds tolerance {ABS_TOL_PX} px"
             )
             # (2) the spatial pattern of the polynomial is captured (not degenerate)
             corr = float(np.corrcoef(rec, tru)[0, 1])
             assert corr > CORR_TOL, (
-                f"degree {degree}, axis {axis}: recovered pattern correlation "
-                f"{corr:.3f} is below tolerance {CORR_TOL}"
+                f"degree {degree}, axis {axis}: recovered pattern correlation {corr:.3f} is below tolerance {CORR_TOL}"
             )

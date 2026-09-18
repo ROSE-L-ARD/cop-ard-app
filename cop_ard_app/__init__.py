@@ -17,3 +17,7 @@ cop-ard-app Python module.
 
 # Define the package version string.
 __version__ = "0.0.1"
+
+import cop_ard_app.readers  # noqa: F401
+
+__all__ = []

@@ -1,8 +1,8 @@
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from typing import Any, Union, cast
-from xml.etree.ElementTree import Element, ElementTree
+from typing import Any, cast
+from xml.etree.ElementTree import ElementTree
 
 import dateutil
 import numpy as np
@@ -17,7 +17,7 @@ from cop_ard_app.slc import overwrite_orbit_coefficients, update_slcs
 
 def read_orbit_file(orbit_path: Path) -> ElementTree:
     local_orbit_path = orbit_path.ensure_local()
-    return ET.parse(local_orbit_path.path)
+    return ET.parse(local_orbit_path.path)  # type: ignore
 
 
 def import_orbit(
@@ -25,7 +25,7 @@ def import_orbit(
     start_time: np.datetime64 | None = None,
     end_time: np.datetime64 | None = None,
     **kwargs,
-) -> Union[xr.Dataset | None]:
+) -> xr.Dataset | None:
     """
     Import and filter orbit data from specified files for a given time interval.
 
@@ -53,7 +53,7 @@ def import_orbit(
     if (orbit_paths is not None) and all(e is not None for e in orbit_paths):
         logger.info(f"For the time interval {start_time} - {end_time} these orbit files will be used: {orbit_paths}")
         # Read the raw orbit data from the specified file(s).
-        orbit = build_orbit_dataset([read_orbit_file(orbit_path) for orbit_path in orbit_paths])
+        orbit = build_orbit_dataset([read_orbit_file(orbit_path) for orbit_path in orbit_paths])  # type: ignore
     else:
         # If no paths are given, log the information and return None.
         logger.info(f"For the time interval {start_time} - {end_time} no external orbits have been found")
@@ -78,7 +78,7 @@ def update_orbit(
     orbit_paths: list[Path] | None = None,
     multiburst: bool = True,
     poly_degree: int = 10,
-    border: np.timedelta64 = np.timedelta64(100, "s"),
+    border: np.timedelta64 | None = None,
     enable_dask: bool = True,
     **kwargs,
 ):
@@ -112,8 +112,10 @@ def update_orbit(
         The updated `slcs` DataTree with new orbit information.
     """
 
+    border = border or np.timedelta64(100, "s")
+
     def get_reference_time_from_attrs(attrs: dict):
-        return attrs[list(attrs)[0]]["Timeline"]["CollectStart"]
+        return attrs[next(iter(attrs))]["Timeline"]["CollectStart"]
 
     slcs_info: dict[str, Any] = {}
     # --- Step 1: Collect SLC Time Intervals and Metadata ---
@@ -124,14 +126,14 @@ def update_orbit(
             if orbit_paths is None:
                 try:
                     orb_file = v.conditions.ETAD.attrs.get("orbit_file", None)
-                except Exception as e:
+                except (AttributeError, KeyError) as e:
                     logger.warning(f"type is: {e.__class__.__name__}")
                     logger.warning("Orbit file not found")
                     orb_file = None
             else:
                 orb_file = None
             # Extract metadata and the start/end azimuth times.
-            annot = v.measurements.slc.attrs[list(v.measurements.slc.attrs.keys())[0]]
+            annot = v.measurements.slc.attrs[next(iter(v.measurements.slc.attrs.keys()))]
             info = [
                 [
                     annot["CollectionInfo"]["CollectorName"],
@@ -168,11 +170,11 @@ def update_orbit(
 
     # --- Step 3: Import Orbit Data in Parallel ---
     dates = list(slcs_info)
-    args = [[slcs_info[e][i] for e in dates] for i in range(1, 4)]
+    args = [tuple([slcs_info[e][i] for e in dates]) for i in range(1, 4)]
     orbits = map(import_orbit, args=args, kwargs=kwargs, combine=False, enable_dask=False)
     if not isinstance(orbits, list):
-        raise Exception(f"Expected list, got {type(orbits)}")
-    orbits = {d: o for d, o in zip(dates, orbits)}
+        raise TypeError(f"Expected list, got {type(orbits)}")
+    orbits = {d: o for d, o in zip(dates, orbits)}  # type: ignore
 
     # --- Step 4: Refit Polynomials and Update Metadata in Parallel ---
     # Prepare arguments for the `refit_orbit_coefficients` worker function.
@@ -275,8 +277,8 @@ def import_ORBIT(
                 raise ValueError(f"No validity dates found in filename: {o.name}")
 
             # Convert extracted strings directly to numpy datetime objects
-            valid_start = np.datetime64(datetime.strptime(match.group(1), "%Y%m%dT%H%M%S"))
-            valid_stop = np.datetime64(datetime.strptime(match.group(2), "%Y%m%dT%H%M%S"))
+            valid_start = np.datetime64(datetime.strptime(match.group(1), "%Y%m%dT%H%M%S"))  # noqa: DTZ007
+            valid_stop = np.datetime64(datetime.strptime(match.group(2), "%Y%m%dT%H%M%S"))  # noqa: DTZ007
             # Add the orbit file if it completely covers the acquisition time window
             if valid_start <= start_time and end_time <= valid_stop:
                 orbit_paths.append(o)

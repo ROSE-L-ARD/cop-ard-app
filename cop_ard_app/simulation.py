@@ -1,4 +1,4 @@
-from typing import Any, Dict, cast
+from typing import Any, cast
 
 import numpy as np
 import xarray as xr
@@ -33,7 +33,7 @@ def dem_to_radar(
     dem: xr.DataArray,
     orbits: xr.DataArray,
     working_dir: str,
-    chunks: dict = {"x": 1024, "y": 1024, "acquisition_id": 1},
+    chunks: dict | None = None,
     skip_read: bool = True,
     enable_dask: bool = True,
     **kwargs,
@@ -56,6 +56,7 @@ def dem_to_radar(
         A path to a directory for storing intermediate and final results.
     chunks : dict
         A dictionary defining the chunk sizes for Dask processing.
+        Defaults to {"x": 1024, "y": 1024, "acquisition_id": 1}
     skip_read : bool
         If True, the function will not read and return the final dataset,
         useful for workflows that only need to ensure the data is written.
@@ -67,8 +68,9 @@ def dem_to_radar(
     xr.Dataset or None
         The final simulation dataset read from disk if `skip_read` is False, otherwise None.
     """
-    if (set(chunks.keys()) == set((*SPATIAL_DIMS_, "acquisition_id"))) is False:
-        raise Exception("Chunks must contains x, y and acquisition_id keys")
+    chunks = chunks or {"x": 1024, "y": 1024, "acquisition_id": 1}
+    if (set(chunks.keys()) == {*SPATIAL_DIMS_, "acquisition_id"}) is False:
+        raise ValueError("Chunks must contains x, y and acquisition_id keys")
     # Define the path for the simulation output.
     data_path = f"{working_dir}/simulation"
     acquisition_ids = orbits.acquisition_id.values
@@ -79,7 +81,7 @@ def dem_to_radar(
     simulation = init_simulation_dataset(acquisition_ids, dem.rio.crs, x, y, xy_chunks, data_path, **kwargs)
 
     if not isinstance(simulation, xr.Dataset):
-        raise Exception(f"Expected xr.Dataset, got {type(simulation)}")
+        raise TypeError(f"Expected xr.Dataset, got {type(simulation)}")
 
     resampled_dem = dem.to_dataset(name="z")
     # --- Step 2: Populate with Elevation Data ---
@@ -110,7 +112,7 @@ def dem_to_radar(
 
 
 def update_elevation(
-    simulation: xr.Dataset, resampled_dem: xr.Dataset, xy_chunks: Dict[str, Any], data_path: str, **kwargs
+    simulation: xr.Dataset, resampled_dem: xr.Dataset, xy_chunks: dict[str, Any], data_path: str, **kwargs
 ) -> xr.Dataset:
     """
     Update the simulation dataset with elevation data from the DEM.
@@ -162,7 +164,7 @@ def update_elevation(
     )
 
     if not isinstance(simulation, xr.Dataset):
-        raise Exception(f"Expected xr.Dataset, got {type(simulation)}")
+        raise TypeError(f"Expected xr.Dataset, got {type(simulation)}")
     return simulation
 
 
@@ -171,7 +173,7 @@ def init_simulation_dataset(
     crs: CRS,
     x: np.ndarray,
     y: np.ndarray,
-    xy_chunks: Dict[str, Any],
+    xy_chunks: dict[str, Any],
     data_path: str,
     **kwargs,
 ) -> xr.Dataset:
@@ -210,14 +212,16 @@ def init_simulation_dataset(
     simulation = simulation.chunk({**xy_chunks, "acquisition_id": 1, "axis": -1})
 
     # Save the simulation to a Zarr store on disk.
-    simulation = write(
+    write(
         simulation,
         data_path=normpath(data_path),
         storage_options=get_storage_options(kwargs),
+        skip_read=True,
     )
+    simulation = read(normpath(data_path), as_type="xr.Dataset", storage_options=get_storage_options(kwargs))
 
     if not isinstance(simulation, xr.Dataset):
-        raise ValueError(f"Expected is xr.Dataset, got {type(simulation)}")
+        raise TypeError(f"Expected is xr.Dataset, got {type(simulation)}")
     return simulation
 
 
@@ -228,7 +232,7 @@ def single_simulation(
     orbits: xr.DataArray,
     working_directory: str,
     master_image: bool = False,
-    chunks: dict = {"x": 1024, "y": 1024, "acquisition_id": 1},
+    chunks: dict | None = None,
     reference_id: str | None = None,
     recompute: bool = False,
     enable_dask: bool = True,
@@ -270,9 +274,10 @@ def single_simulation(
     tuple
         A tuple containing the burst_id (str) and the resulting simulation Dataset (xr.Dataset).
     """
+    chunks = chunks or {"x": 1024, "y": 1024, "acquisition_id": 1}
     # Define the relative path for this burst's data.
     if (not multiburst) and (reference_id is None):
-        raise ValueError(f"In single burst case, the reference_id is mandatory")
+        raise ValueError("In single burst case, the reference_id is mandatory")
     path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     data_path = normpath(f"{working_directory}/{path}")
     # Define a path for a "done" file to check for completion.
@@ -327,7 +332,7 @@ def stack_simulation(
     multiburst: bool,
     working_directory: str,
     reference_id: str | None = None,
-    chunks: dict = {"x": 1024, "y": 1024, "acquisition_id": 1},
+    chunks: dict | None = None,
     master_image: bool = False,
     recompute: bool = False,
     **kwargs,
@@ -363,6 +368,7 @@ def stack_simulation(
     xr.DataTree
         An xarray.DataTree containing the simulation results for all bursts/scenes.
     """
+    chunks = chunks or {"x": 1024, "y": 1024, "acquisition_id": 1}
     # Prepare the arguments for the parallel map operation.
     for k, d in (dem_tree.bursts if multiburst else {"data": dem_tree}).items():
         in_proj = d.z.rio.crs
@@ -509,7 +515,7 @@ def initialize_simulation(
     """
     # --- Extract Metadata and Calculate Parameters ---
     # Get metadata from the first polarization's attributes.
-    annot = slc.attrs[list(slc.attrs.keys())[0]]
+    annot = slc.attrs[next(iter(slc.attrs.keys()))]
     # Calculate azimuth time step (in seconds) and slant range time step.
     dt_az = annot["Grid"]["Col"]["SS"] * annot["RMA"]["INCA"]["TimeCAPoly"]["Coefs"][1]
     dt_rg = 2 * annot["Grid"]["Row"]["SS"] / speed_of_light
@@ -536,7 +542,7 @@ def initialize_simulation(
         simulation, simulation.acquisition_id.values[0], bbox_radar, bbox_geo
     ).squeeze()  # Remove singleton dimensions.
     # Get the geographic bounding box of the selected simulation subset.
-    bbox_geo = [selection.x.min().values, selection.y.min().values, selection.x.max().values, selection.y.max().values]
+    bbox_geo = (selection.x.min().values, selection.y.min().values, selection.x.max().values, selection.y.max().values)
 
     # --- Calculate Radar Pixel Coordinates ---
     # Convert the simulation's azimuth and range times into pixel coordinates relative to the SLC grid origin.
@@ -635,7 +641,7 @@ def single_simulation_ml(
     """
     # Define the relative path for this burst's data.
     if (not multiburst) and (reference_id is None):
-        raise ValueError(f"In single burst case, the reference_id is mandatory")
+        raise ValueError("In single burst case, the reference_id is mandatory")
     path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     data_path = normpath(f"{working_directory}/{path}")
     # Define a path for a "done" file to check for completion.
@@ -645,7 +651,7 @@ def single_simulation_ml(
         # If recomputing, delete the "done" file.
         delete(simulation_ml_path, allow_non_existent=True, **kwargs)
         # --- Run the Multilooking Extraction ---
-        chunks = dict(x=simulation.chunksizes["x"][0], y=simulation.chunksizes["y"][0])
+        chunks = {"x": simulation.chunksizes["x"][0], "y": simulation.chunksizes["y"][0]}
         simulation_ml = extract_simulation_ml(
             simulation=simulation,
             reference_id=reference_id,
