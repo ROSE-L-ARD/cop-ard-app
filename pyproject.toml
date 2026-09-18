@@ -80,4 +80,4 @@ markers = ["integration", "unit", "need_files"]
 url = "https://pypi.org/simple"
 
 [tool.uv.sources]
-cop-ard-core = { git = "git+ssh://git@github.com/bopen/cop-ard-core.git" }
+cop-ard-core = { git = "https://github.com/bopen/cop-ard-core.git" }
