@@ -520,7 +520,7 @@ provides-extras = ["complexity", "dev", "doc", "doc-cov", "formatter", "linter",
 [[package]]
 name = "cop-ard-core"
 version = "0.0.1"
-source = { git = "https://github.com/bopen/cop-ard-core.git#73e788573470180f44a01339f65826714d02cb30" }
+source = { git = "https://github.com/bopen/cop-ard-core.git#a51ad1b4bf0508513f04c79bc2cfdd7fe341f6d6" }
 dependencies = [
     { name = "astropy" },
     { name = "dask" },
