@@ -1,0 +1,61 @@
+name: Python Quality Checks
+
+# This tells GitHub to run the workflow on pushes to main,
+# and whenever a Pull Request is opened against main.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    # env and steps must align directly under runs-on
+    env:
+      SOURCES: "cop_ard_app"
+      TESTS: "tests"
+      COVERAGE_THRESHOLD: "70"
+      COMMENT_THRESHOLD: "20"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Linting
+        run: uv run --extra linter --frozen ruff check --no-fix $SOURCES $TESTS
+
+      - name: Formatting
+        run: uv run --extra formatter --frozen ruff format --check $SOURCES $TESTS
+
+      - name: Typing
+        run: uv run --extra typing --frozen mypy $SOURCES $TESTS
+
+      - name: Unit tests
+        run: uv run --extra tests --frozen pytest -s -vv $TESTS
+
+      - name: Unit test coverage
+        run: NUMBA_DISABLE_JIT=1 uv run --extra tests --frozen pytest --cov=cop_ard_app --cov-report= --cov-fail-under=$COVERAGE_THRESHOLD $TESTS
+
+      - name: Documentation coverage
+        run: uv run --extra doc-cov --frozen docstr-coverage $SOURCES
+
+      - name: Comment coverage
+        run: >
+          uv run --extra doc-cov --frozen radon raw -s $SOURCES | tail -n12 | grep 'C % S' | awk -v thres=$COMMENT_THRESHOLD -F': ' -f comment_coverage.awk
+
+      - name: Code complexity
+        run: uv run --extra complexity --frozen python -m xenon --max-average b --max-modules c --max-absolute d $SOURCES
+
+      - name: Vulnerability scanning
+        run: uv run --extra security --frozen python -m bandit -c bandit.yml -r $SOURCES

@@ -46,6 +46,27 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+tests = ["pytest", "pytest-cov"]
+linter = ["ruff"]
+typing = [
+	"mypy",
+	"types-PyYAML",
+	"pandas-stubs",
+	"types-retry",
+	"types-shapely",
+]
+formatter = ["ruff"]
+security = ["bandit"]
+doc = [
+    "sphinx",
+    "numpydoc",
+    "sphinxcontrib-mermaid",
+    "sphinxcontrib-plantuml",
+    "sphinxcontrib-spelling",
+    "sphinx-test-reports",
+]
+complexity = ["xenon"]
+doc-cov = ["radon", "docstr-coverage"]
 dev = ["ipykernel","matplotlib"]
 
 [tool.ruff]
