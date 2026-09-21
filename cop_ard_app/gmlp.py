@@ -17,14 +17,13 @@ import numpy as np
 import xarray as xr
 from cop_ard_core.dem import compute_shape_and_off
 from cop_ard_core.gmlp import get_radar_spacing, warp_cmlp
-from cop_ard_core.griddata import interp_dataset_scaled, interp_dataset
-from cop_ard_core.logger import timeit
+from cop_ard_core.griddata import interp_dataset, interp_dataset_scaled
+from cop_ard_core.logger import logger, timeit
 from cop_ard_core.simul import extract_simul_on_radar_chunk, get_geo_from_radar_bbox, get_radar_bbox
 from cop_ard_core.warp import extract_rg_az, sinc
 
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.io import get_storage_options, normpath, read, save_empty_dataset
-from cop_ard_core.logger import logger
 
 DIMS = ["polarization", "y", "x"]
 LONG_DIMS = ["polarization", "past_reference_date", "y", "x"]
@@ -578,14 +577,13 @@ def blockwise_interp_cmlp(
     chunk: dict = {},
     **kwargs,
 ) -> xr.Dataset:
-    """
-    Warp coregistered SLC and phase data to a ground-projected geographical grid.
+    """Warp coregistered SLC and phase data to a ground-projected geographical grid.
 
-    This function performs blockwise geocoding by projecting radar-space coordinates
-    (slant range and azimuth times) onto a regular output spatial grid (y, x).
-    Multilooked CMLP variables are resampled using high-precision sinc interpolation,
-    while full-resolution phase model variables are interpolated using scaled
-    grid interpolation (`interp_dataset_scaled`).
+    This function performs blockwise geocoding by projecting radar-space
+    coordinates (slant range and azimuth times) onto a regular output spatial
+    grid (y, x). Multilooked CMLP variables are resampled using high-precision
+    sinc interpolation, while full-resolution phase model variables are
+    interpolated using scaled grid interpolation (`interp_dataset_scaled`).
 
     Parameters
     ----------
@@ -600,9 +598,11 @@ def blockwise_interp_cmlp(
         (e.g., `phase`, `short_term_coh`).
     phase : xr.Dataset
         Full-resolution phase model dataset (e.g., `phase_model`).
-    kernel : dict
-        Configuration dictionary containing parameters for the sinc interpolator
-        (e.g., `kernel_shape`).
+    mask : xr.Dataset, optional
+        Quality mask dataset in ground dimensions. Defaults to None.
+    kernel : dict, optional
+        Configuration dictionary containing parameters for the sinc
+        interpolator (e.g., `kernel_shape`).
     dtaz_cmlp : float
         Azimuth sampling step for CMLP data in nanoseconds.
     dtrg_cmlp : float
@@ -612,11 +612,13 @@ def blockwise_interp_cmlp(
     dtrg_slc : float
         Slant range sampling step for full-resolution SLC data in seconds.
     margin : int, optional
-        Bounding box expansion margin in pixels for simulation slicing. Defaults to 5.
+        Bounding box expansion margin in pixels for simulation slicing.
+        Defaults to 5.
     method : str, optional
-        Interpolation method for spatial grid coordinates ('linear', 'cubic'). Defaults to "linear".
+        Interpolation method for spatial grid coordinates ('linear', 'cubic').
+        Defaults to "linear".
     chunk : dict, optional
-        Dask chunking specifications if applicable. Defaults to {}.
+        Dask chunking specifications if applicable. Defaults to None.
     **kwargs
         Additional keyword arguments passed to underlying functions.
 
@@ -628,16 +630,20 @@ def blockwise_interp_cmlp(
     shape = image.shape
 
     # --- 1. Simulation Bounding Box & Subsetting ---
-    spacing_in = np.abs(simulation.rio.resolution(recalc=True))
-    spacing_out = image.rio.resolution(recalc=True)
+    # Extract pixel resolution from target image (ground space)
+    spacing_out = np.abs(image.rio.resolution(recalc=True))
 
-    xmin_sim = image.x.min().values - margin * spacing_in[0]
-    xmax_sim = image.x.max().values + margin * spacing_in[0]
-    ymin_sim = image.y.min().values - margin * spacing_in[1]
-    ymax_sim = image.y.max().values + margin * spacing_in[1]
+    xmin_sim = image.x.min().values - margin * spacing_out[0]
+    xmax_sim = image.x.max().values + margin * spacing_out[0]
+    ymin_sim = image.y.min().values - margin * spacing_out[1]
+    ymax_sim = image.y.max().values + margin * spacing_out[1]
 
-    xslice = slice(xmin_sim, xmax_sim) if spacing_out[0] > 0 else slice(xmax_sim, xmin_sim)
-    yslice = slice(ymin_sim, ymax_sim) if spacing_out[1] > 0 else slice(ymax_sim, ymin_sim)
+    # Check actual axis direction (ascending vs. descending) to prevent empty slices
+    sim_x_asc = simulation.x.values[0] < simulation.x.values[-1]
+    sim_y_asc = simulation.y.values[0] < simulation.y.values[-1]
+
+    xslice = slice(xmin_sim, xmax_sim) if sim_x_asc else slice(xmax_sim, xmin_sim)
+    yslice = slice(ymin_sim, ymax_sim) if sim_y_asc else slice(ymax_sim, ymin_sim)
 
     simulation_sub = simulation.sel(x=xslice, y=yslice)
     x_grid, y_grid = np.meshgrid(image.x, image.y)
@@ -646,7 +652,10 @@ def blockwise_interp_cmlp(
     # Convert absolute azimuth timestamps into relative float seconds from t0
     t0 = simulation_sub.azimuth_time.min().values
     az_sec = (simulation_sub.azimuth_time.values - t0).astype("timedelta64[ns]").astype(float) / 1e9
-    simulation_sub["azimuth_time_sec"] = (simulation_sub.azimuth_time.dims, az_sec)
+    simulation_sub["azimuth_time_sec"] = (
+        simulation_sub.azimuth_time.dims,
+        az_sec,
+    )
 
     # --- 3. Spatial Coordinate Interpolation onto Target Grid ---
     simul_out = interp_dataset(
@@ -667,16 +676,17 @@ def blockwise_interp_cmlp(
     offset_az_cmlp = (t0 - cmlp.azimuth_time.min().values).astype("timedelta64[ns]").astype(float) / 1e9
     offset_az_phase = (t0 - phase.azimuth_time.min().values).astype("timedelta64[ns]").astype(float) / 1e9
 
-    # Pixel coordinates for CMLP (multilooked) grid
+    # Floating-point pixel coordinates for CMLP (multilooked) grid
     az_cmlp = (offset_az_cmlp + az_sec_interp) / dtaz_cmlp_sec
     rg_cmlp = (rg_time_interp - cmlp.slant_range_time.min().values) / dtrg_cmlp
 
-    # Pixel coordinates for Phase (full-resolution) grid
+    # Floating-point pixel coordinates for Phase (full-resolution) grid
     az_phase = (offset_az_phase + az_sec_interp) / dtaz_slc_sec
     rg_phase = (rg_time_interp - phase.slant_range_time.min().values) / dtrg_slc
 
     # --- 5. Valid Pixel Masking (Excluding Interpolation Kernel Margins) ---
-    kernel_margin = kernel["kernel_shape"] // 2 + 1
+    kernel_shape = np.array(kernel.get("kernel_shape", [2, 2]))
+    kernel_margin = kernel_shape // 2 + 1
 
     valid_mask = (
         (rg_cmlp >= kernel_margin[1])
@@ -703,11 +713,17 @@ def blockwise_interp_cmlp(
         # A. Resample CMLP variables using Sinc Warping
         x_pts, y_pts = rg_cmlp[ind], az_cmlp[ind]
 
-        # Safe bounding box cropping
+        # Safe bounding box cropping using integer pixel indices
         xmin = max(0, int(np.floor(x_pts.min() - kernel_margin[1])))
-        xmax = min(cmlp.slant_range_time.size, int(np.ceil(x_pts.max() + kernel_margin[1])))
+        xmax = min(
+            cmlp.slant_range_time.size,
+            int(np.ceil(x_pts.max() + kernel_margin[1])),
+        )
         ymin = max(0, int(np.floor(y_pts.min() - kernel_margin[0])))
-        ymax = min(cmlp.azimuth_time.size, int(np.ceil(y_pts.max() + kernel_margin[0])))
+        ymax = min(
+            cmlp.azimuth_time.size,
+            int(np.ceil(y_pts.max() + kernel_margin[0])),
+        )
 
         x_rel = x_pts - xmin
         y_rel = y_pts - ymin
@@ -730,35 +746,75 @@ def blockwise_interp_cmlp(
                 is_coherence=("coh" in name_str),
             )
 
-        # B. Resample Phase Dataset variables using Scaled Grid Interpolation
-        if len(phase.data_vars) > 0:
-            phase_grid_points = (
-                np.arange(phase.azimuth_time.size, dtype=float),
-                np.arange(phase.slant_range_time.size, dtype=float),
-            )
+    # B. Resample Phase Dataset variables using Scaled Grid Interpolation
+    if len(phase.data_vars) > 0:
+        logger.critical(f"phase: {list(phase.data_vars)}")
 
-            # Interpolate full-res phase variables directly onto target (y, x) coordinates
-            phase_interp = interp_dataset_scaled(
-                data=phase,
-                xi=(az_phase, rg_phase),
-                common_dims=("azimuth_time", "slant_range_time"),
-                points=phase_grid_points,
-                method=method,
-                fill_value=0.0,
-            ).rename({"azimuth_time": "y", "slant_range_time": "x"})
+        # Safety boundary margin to prevent NaN/zeros at edges during linear/cubic interp
+        phase_margin = 2 if method == "linear" else 4
 
-            for name in phase.data_vars:
-                name_str = str(name)
-                ds[name_str] = phase_interp[name_str]
-        if mask is not None:
-            mask_sub = mask.sel(x=xslice, y=yslice)
-            mask_interp = interp_dataset(
-                data=mask_sub,
-                xi=(y_grid, x_grid),
-                common_dims=("y", "x"),
-                method="nearest",
-                fill_value=0,
-            )
-            ds["mask"] = mask_interp["mask"].astype(np.int8)
+        # Calculate safe integer index bounds
+        az_min_idx = max(0, int(np.floor(az_phase.min())) - phase_margin)
+        az_max_idx = min(
+            phase.azimuth_time.size,
+            int(np.ceil(az_phase.max())) + phase_margin,
+        )
+        rg_min_idx = max(0, int(np.floor(rg_phase.min())) - phase_margin)
+        rg_max_idx = min(
+            phase.slant_range_time.size,
+            int(np.ceil(rg_phase.max())) + phase_margin,
+        )
+
+        # Slice phase dataset using integer index positions (.isel)
+        phase_sub = phase.isel(
+            azimuth_time=slice(az_min_idx, az_max_idx),
+            slant_range_time=slice(rg_min_idx, rg_max_idx),
+        )
+
+        # Relative grid points matching phase_sub dimensions
+        phase_grid_points = (
+            np.arange(phase_sub.azimuth_time.size, dtype=float),
+            np.arange(phase_sub.slant_range_time.size, dtype=float),
+        )
+
+        # Shift query pixel coordinates to match phase_sub relative origin
+        az_phase_rel = az_phase - az_min_idx
+        rg_phase_rel = rg_phase - rg_min_idx
+
+        # Interpolate full-res phase variables directly onto target (y, x) coordinates
+        phase_interp = interp_dataset_scaled(
+            data=phase_sub,
+            xi=(az_phase_rel, rg_phase_rel),
+            common_dims=("azimuth_time", "slant_range_time"),
+            points=phase_grid_points,
+            method=method,
+            fill_value=0.0,
+        ).rename({"azimuth_time": "y", "slant_range_time": "x"})
+
+        for name in phase.data_vars:
+            name_str = str(name)
+            ds[name_str] = phase_interp[name_str]
+
+    # --- 8. Mask Interpolation ---
+    if mask is not None:
+        # Check coordinate direction for mask dataset
+        mask_x_asc = mask.x.values[0] < mask.x.values[-1]
+        mask_y_asc = mask.y.values[0] < mask.y.values[-1]
+
+        mask_xslice = slice(xmin_sim, xmax_sim) if mask_x_asc else slice(xmax_sim, xmin_sim)
+        mask_yslice = slice(ymin_sim, ymax_sim) if mask_y_asc else slice(ymax_sim, ymin_sim)
+
+        mask_sub = mask.sel(x=mask_xslice, y=mask_yslice)
+        logger.critical(f"mask vars: {list(mask_sub.data_vars)}")
+        logger.critical(f"mask_sub: {mask_sub.mask.shape}")
+
+        mask_interp = interp_dataset(
+            data=mask_sub,
+            xi=(y_grid, x_grid),
+            common_dims=("y", "x"),
+            method="nearest",
+            fill_value=0,
+        )
+        ds["mask"] = mask_interp["mask"].astype(np.int8)
 
     return ds

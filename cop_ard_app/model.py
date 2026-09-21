@@ -84,6 +84,13 @@ beam_ids = {
     "IW": ["IW1", "IW2", "IW3"],  # Interferometric Wide (3 sub-swaths)
     "EW": ["EW1", "EW2", "EW3", "EW4", "EW5"],  # Extra Wide (5 sub-swaths)
     "SM": ["S1", "S2", "S3", "S4", "S5", "S6"],  # Stripmap (6 overlapping beams)
+    # Individual Stripmap beams
+    "S1": ["S1"],
+    "S2": ["S2"],
+    "S3": ["S3"],
+    "S4": ["S4"],
+    "S5": ["S5"],
+    "S6": ["S6"],
 }
 
 
@@ -203,12 +210,6 @@ ATTRS_RADAR = {
         "long_name": "Orbital data accuracy",
         "units": "n/a",
     },
-}
-
-beam_ids = {
-    "IW": ["IW1", "IW2", "IW3"],  # Interferometric Wide (3 sub-swaths)
-    "EW": ["EW1", "EW2", "EW3", "EW4", "EW5"],  # Extra Wide (5 sub-swaths)
-    "SM": ["S1", "S2", "S3", "S4", "S5", "S6"],  # Stripmap (6 overlapping beams)
 }
 
 
@@ -1238,6 +1239,8 @@ def update_cslc_container(bursts: xr.DataTree):
     stac["geometry"]["coordinates"] = [coords]
     try:
         instrument_mode = stac["properties"]["sar:instrument_mode"]
+        logger.critical(f"instrument mode: {instrument_mode}")
+        logger.critical(f"beam_ids: {beam_ids[instrument_mode]}")
         stac["properties"]["sar:beam_ids"] = beam_ids[instrument_mode]
     except (KeyError, TypeError) as err:
         logger.warning(f"Failed to set 'sar:beam_ids': missing key or invalid mapping ({err})")
