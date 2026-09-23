@@ -716,18 +716,17 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
             orb_type = "AUX_ANNOTATED"
         acquisition_date_orbit_type[acquisition_date] = orb_type
 
-    quality = quality.assign(
-        coreg_qlt(
-            slc.coreg.measurements.ds,
-            daz_drg,
-            scpcoa_incidence_angle=scpcoa_incidence_angle,
-            coreg_arp_coeffs=coreg_arp_coeffs,
-            t0=t0,
-            acquisition_date_arp_coeffs=acquisition_date_arp_coeffs,
-            acquisition_date_orbit_type=acquisition_date_orbit_type,
-            acquisition_date_t0=acquisition_date_t0,
-        )
+    quality["crg_accuracy"] = coreg_qlt(
+        slc.coreg.measurements.ds,
+        daz_drg,
+        scpcoa_incidence_angle=scpcoa_incidence_angle,
+        coreg_arp_coeffs=coreg_arp_coeffs,
+        t0=t0,
+        acquisition_date_arp_coeffs=acquisition_date_arp_coeffs,
+        acquisition_date_orbit_type=acquisition_date_orbit_type,
+        acquisition_date_t0=acquisition_date_t0,
     )
+
     # Generate the updated Noise LUT for the coregistered grid.
 
     if path_to_dict(annot, "Radiometric.NoiseLevel.NoisePoly.Coefs") is not None:

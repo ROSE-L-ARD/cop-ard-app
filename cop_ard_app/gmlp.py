@@ -748,8 +748,6 @@ def blockwise_interp_cmlp(
 
     # B. Resample Phase Dataset variables using Scaled Grid Interpolation
     if len(phase.data_vars) > 0:
-        logger.critical(f"phase: {list(phase.data_vars)}")
-
         # Safety boundary margin to prevent NaN/zeros at edges during linear/cubic interp
         phase_margin = 2 if method == "linear" else 4
 
@@ -805,8 +803,6 @@ def blockwise_interp_cmlp(
         mask_yslice = slice(ymin_sim, ymax_sim) if mask_y_asc else slice(ymax_sim, ymin_sim)
 
         mask_sub = mask.sel(x=mask_xslice, y=mask_yslice)
-        logger.critical(f"mask vars: {list(mask_sub.data_vars)}")
-        logger.critical(f"mask_sub: {mask_sub.mask.shape}")
 
         mask_interp = interp_dataset(
             data=mask_sub,

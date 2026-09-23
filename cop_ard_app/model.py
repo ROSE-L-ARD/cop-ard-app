@@ -1233,8 +1233,6 @@ def update_cslc_container(bursts: xr.DataTree):
     stac["geometry"]["coordinates"] = [coords]
     try:
         instrument_mode = stac["properties"]["sar:instrument_mode"]
-        logger.critical(f"instrument mode: {instrument_mode}")
-        logger.critical(f"beam_ids: {beam_ids[instrument_mode]}")
         stac["properties"]["sar:beam_ids"] = beam_ids[instrument_mode]
     except (KeyError, TypeError) as err:
         logger.warning(f"Failed to set 'sar:beam_ids': missing key or invalid mapping ({err})")
