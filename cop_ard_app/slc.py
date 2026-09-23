@@ -5,6 +5,7 @@ from typing import Any, Hashable, Sequence, cast
 import numpy as np
 import sarpy.io.complex.sentinel
 import xarray as xr
+from cop_ard_core.griddata import interp_dataset_scaled, interpolate
 from cop_ard_core.logger import logger, timeit
 from cop_ard_core.slc import (
     amplitude_calibration,
@@ -16,7 +17,6 @@ from cop_ard_core.slc import (
     noise_removal,
 )
 from cop_ard_core.utils import sync_sicd_metadata
-from cop_ard_core.griddata import interpolate
 
 import cop_ard_app.readers
 from cop_ard_app.computation import init_zarr_groups, map, map_blocks
@@ -44,7 +44,6 @@ from cop_ard_app.model import (
     get_coefficients,
     get_footprint,
 )
-from cop_ard_core.griddata import interp_dataset_scaled
 from cop_ard_app.utils import get_best_pol
 
 cop_ard_app.readers.__file__
@@ -182,8 +181,13 @@ def import_image(
     collector_name = str(path_to_dict(annot[best_pol], "CollectionInfo.CollectorName"))
     acquisition_date = str(path_to_dict(annot[best_pol], "Timeline.CollectStart")).replace("Z", "")
     if multiburst:
+        # Attempt to extract the absolute orbit number for multiburst products
         absolute_number = str(path_to_dict(annot[best_pol], "CollectionInfo.Parameters.ABSOLUTE_ORBIT"))
+        if absolute_number is None:
+            # Fallback to acquisition date if metadata parsing fails
+            absolute_number = acquisition_date[:10]
     else:
+        # Use acquisition date directly when multiburst is False
         absolute_number = acquisition_date
 
     acquisition_id = f"{collector_name}_{absolute_number}"
@@ -345,7 +349,13 @@ def group_discover(
         if multiburst:
             # Get acquisition date and polarization from metadata.
             Parameters = annot.CollectionInfo.Parameters.to_dict()
-            absolute_number = str(Parameters["ABSOLUTE_ORBIT"])
+            try:
+                # Attempt to extract the absolute orbit number for multiburst products
+                absolute_number = str(Parameters["ABSOLUTE_ORBIT"])
+            except (KeyError, TypeError, AttributeError):
+                # Fallback to acquisition date if metadata parsing fails
+                acquisition_date = str(annot.Timeline.CollectStart)[:10]
+                absolute_number = acquisition_date
             collector_name = str(annot.CollectionInfo.CollectorName)
             acquisition_id = f"{collector_name}_{absolute_number}"
 

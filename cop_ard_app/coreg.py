@@ -81,7 +81,7 @@ def init_single_coreg_stack(
     }
     shape_dict = {"cstack": shape, "phase_model": shape[1:]}
     dtype = {"cstack": "complex64", "phase_model": "float64"}
-    chunks = {k: (slc.chunksizes[k][0] if k in slc.dims else v[0]) for k, v in slc_sec.chunksizes.items()}
+    chunks = {k: v[0] for k, v in slc_sec.chunksizes.items()}
 
     coords = {
         "polarization": ("polarization", list(all_pols)),
