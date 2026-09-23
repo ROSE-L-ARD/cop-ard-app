@@ -487,7 +487,7 @@ typing = [
 [package.metadata]
 requires-dist = [
     { name = "bandit", marker = "extra == 'security'" },
-    { name = "cop-ard-core", git = "ssh://git@github.com/bopen/cop-ard-core.git" },
+    { name = "cop-ard-core", git = "https://github.com/bopen/cop-ard-core.git" },
     { name = "dask" },
     { name = "distributed", specifier = ">=2026.3.0" },
     { name = "docstr-coverage", marker = "extra == 'doc-cov'" },
@@ -516,7 +516,7 @@ provides-extras = ["complexity", "dev", "doc", "doc-cov", "formatter", "linter",
 [[package]]
 name = "cop-ard-core"
 version = "0.0.1"
-source = { git = "ssh://git@github.com/bopen/cop-ard-core.git#62a00612c853144f4a4c098d24444842dfa2cfe6" }
+source = { git = "https://github.com/bopen/cop-ard-core.git#707e959144d8e37fb23be3dacf24a8e5bad861f8" }
 dependencies = [
     { name = "astropy" },
     { name = "dask" },

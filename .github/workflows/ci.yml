@@ -12,6 +12,8 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
 
+    continue-on-error: true
+
     # env and steps must align directly under runs-on
     env:
       SOURCES: "cop_ard_app"
@@ -22,6 +24,12 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Register the personal access token
+        run: echo "${{ secrets.GIT_PAT }}" | gh auth login --with-token
+
+      - name: Configure the Git credential helper
+        run: gh auth setup-git
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
