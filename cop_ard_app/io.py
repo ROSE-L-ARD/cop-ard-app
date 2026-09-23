@@ -175,7 +175,13 @@ def read_slc_static(
         annot = annot[list(annot)[0]]
         collector_name = str(annot["CollectionInfo"]["CollectorName"])
         if burst_id != "data":
-            absolute_number = str(annot["CollectionInfo"]["Parameters"]["ABSOLUTE_ORBIT"])
+            try:
+                # Attempt to extract the absolute orbit number for multiburst products
+                absolute_number = str(annot["CollectionInfo"]["Parameters"]["ABSOLUTE_ORBIT"])
+            except (KeyError, TypeError, AttributeError):
+                # Fallback to acquisition date if metadata parsing fails
+                acquisition_date = str(annot["Timeline"]["CollectStart"][:10])
+                absolute_number = acquisition_date
         else:
             absolute_number = str(annot["Timeline"]["CollectStart"]).replace("Z", "")
 
