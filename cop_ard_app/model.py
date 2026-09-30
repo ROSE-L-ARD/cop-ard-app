@@ -1206,6 +1206,17 @@ def add_acquisition_date(ds: xr.Dataset | None, ref_measurements: xr.Dataset) ->
     if ds is None or "acquisition_id" not in ds.dims:
         return ds
 
+    id_map = {}
+    for ref_id in ref_measurements.acquisition_id.values:
+        ref_id_str = str(ref_id)
+        id_map[ref_id_str] = ref_id_str
+        if ref_id_str.endswith("_sec"):
+            base_id = ref_id_str.removesuffix("_sec")
+            id_map[base_id] = ref_id_str
+
+    updated_ids = [id_map.get(str(k), str(k)) for k in ds.acquisition_id.values]
+    ds = ds.assign_coords(acquisition_id=updated_ids)
+
     dates = ref_measurements.acquisition_date.sel(acquisition_id=ds.acquisition_id.values)
 
     return ds.assign_coords(acquisition_date=("acquisition_id", dates.values))
