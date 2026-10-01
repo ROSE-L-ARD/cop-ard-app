@@ -206,12 +206,6 @@ ATTRS_RADAR = {
     },
 }
 
-beam_ids = {
-    "IW": ["IW1", "IW2", "IW3"],  # Interferometric Wide (3 sub-swaths)
-    "EW": ["EW1", "EW2", "EW3", "EW4", "EW5"],  # Extra Wide (5 sub-swaths)
-    "SM": ["S1", "S2", "S3", "S4", "S5", "S6"],  # Stripmap (6 overlapping beams)
-}
-
 
 def extract_orbits(
     slcs: xr.DataTree,
@@ -560,7 +554,8 @@ def update_container(dt: xr.DataTree, dt_name, cslc_id):
     stac["properties"]["end_datetime"] = end_str
     stac["bbox"] = bbox
     stac["geometry"]["coordinates"] = [coords]
-    stac["properties"]["sar:beam_ids"] = beam_ids[stac["properties"]["sar:instrument_mode"]]
+    instrument = stac["properties"]["sar:instrument_mode"]
+    stac["properties"]["sar:beam_ids"] = beam_ids.get(instrument, [instrument])
     stac["assets"] = assets
     stac["stac_extensions"] = [i for i in stac["stac_extensions"] if i.split("/")[-3] not in ["view", "projection"]]
     id = get_id_product(stac)
@@ -702,28 +697,55 @@ def clean_gslc(gslc, slc, acquisition_id):
     orbit = slc.coreg.conditions.orbit.to_dataset().drop_vars(
         ["orbit_files", "reference_time", "type"], errors="ignore"
     )
-
-    mask = gslc.measurements.mask.to_dataset(name="distortion_mask").drop_vars(["acquisition_date", "acquisition_id"])
+    aq_size = gslc.measurements.acquisition_date.size
+    mask = gslc.measurements.mask.to_dataset(name="distortion_mask").drop_vars(
+        ["acquisition_date", "acquisition_id"], errors="ignore"
+    )
     look_vector = gslc.conditions.look_vector
-    measurements = (
-        gslc.measurements.to_dataset()
-        .drop_vars([k for k in gslc.measurements.data_vars if "phase" not in k])
-        .expand_dims(acquisition_id=1)
-        .transpose("polarization", "acquisition_id", "y", "x")
-    )
-    measurements = measurements.assign_coords(
-        acquisition_date=("acquisition_id", np.atleast_1d(measurements.acquisition_date.values))
-    )
-    coherence = (
-        gslc.measurements.to_dataset()
-        .drop_vars([k for k in gslc.measurements.data_vars if "coh" not in k])
-        .expand_dims(acquisition_id=1)
-        .transpose("polarization", "acquisition_id", "y", "x")
-    )
-    coherence = coherence.assign_coords(
-        acquisition_date=("acquisition_id", np.atleast_1d(measurements.acquisition_date.values))
+
+    # --- Measurements ---
+    measurements = gslc.measurements.to_dataset().drop_vars(
+        [k for k in gslc.measurements.data_vars if "phase" not in k]
     )
 
+    # Ensure past_reference_date is completely removed from measurements
+    if "past_reference_date" in measurements.dims:
+        measurements = measurements.isel(past_reference_date=0, drop=True)
+    if "past_reference_date" in measurements.coords:
+        measurements = measurements.drop_vars("past_reference_date")
+
+    measurements = measurements.expand_dims(acquisition_id=1).transpose("polarization", "acquisition_id", "y", "x")
+    measurements = measurements.assign_coords(
+        acquisition_date=(
+            "acquisition_id",
+            np.atleast_1d(measurements.acquisition_date.values),
+        )
+    )
+
+    # --- Coherence ---
+    coherence = gslc.measurements.to_dataset().drop_vars([k for k in gslc.measurements.data_vars if "coh" not in k])
+    coherence = coherence.expand_dims(acquisition_id=1)
+
+    # Dynamically handle transpose depending on whether past_reference_date exists
+    if "past_reference_date" in coherence.dims:
+        coh_dims = (
+            "polarization",
+            "acquisition_id",
+            "past_reference_date",
+            "y",
+            "x",
+        )
+    else:
+        coh_dims = ("polarization", "acquisition_id", "y", "x")
+
+    coherence = coherence.transpose(*coh_dims).assign_coords(
+        acquisition_date=(
+            "acquisition_id",
+            np.atleast_1d(measurements.acquisition_date.values),
+        )
+    )
+
+    # --- DataTree Assembly ---
     if "etad" in gslc.conditions:
         etad = gslc.conditions.etad.to_dataset()
         etad = add_acquisition_date(etad, measurements)
@@ -1185,6 +1207,17 @@ def add_acquisition_date(ds: xr.Dataset | None, ref_measurements: xr.Dataset) ->
     """
     if ds is None or "acquisition_id" not in ds.dims:
         return ds
+
+    id_map = {}
+    for ref_id in ref_measurements.acquisition_id.values:
+        ref_id_str = str(ref_id)
+        id_map[ref_id_str] = ref_id_str
+        if ref_id_str.endswith("_sec"):
+            base_id = ref_id_str.removesuffix("_sec")
+            id_map[base_id] = ref_id_str
+
+    updated_ids = [id_map.get(str(k), str(k)) for k in ds.acquisition_id.values]
+    ds = ds.assign_coords(acquisition_id=updated_ids)
 
     dates = ref_measurements.acquisition_date.sel(acquisition_id=ds.acquisition_id.values)
 

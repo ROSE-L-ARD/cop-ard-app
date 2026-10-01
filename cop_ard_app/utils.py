@@ -470,14 +470,11 @@ def save_single_burst(
     # 2. Write stable references only if they exist
     if stable_reference is not None:
         # Use acquisition_id to iterate and slice safely, avoiding datetime string formatting KeyError
-        for acq_id in stable_reference.acquisition_id.values:
+        for acq_date in stable_reference.acquisition_date.values:
             # Safely extract the slice for this specific acquisition
-            s_ref_slice = stable_reference.sel(acquisition_id=acq_id)
+            s_ref_slice = stable_reference.sel(acquisition_date=[acq_date])
 
-            # Extract the raw date value to keep the folder naming consistent with the past
-            date_val = s_ref_slice.acquisition_date.values
-
-            write(s_ref_slice, f"{stable_reference_path}/{date_val}")
+            write(s_ref_slice, f"{stable_reference_path}/{acq_date}")
 
 
 def update_reference_database(

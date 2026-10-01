@@ -81,7 +81,7 @@ def init_single_coreg_stack(
     }
     shape_dict = {"cstack": shape, "phase_model": shape[1:]}
     dtype = {"cstack": "complex64", "phase_model": "float64"}
-    chunks = {k: (slc.chunksizes[k][0] if k in slc.dims else v[0]) for k, v in slc_sec.chunksizes.items()}
+    chunks = {k: v[0] for k, v in slc_sec.chunksizes.items()}
 
     coords = {
         "polarization": ("polarization", list(all_pols)),
@@ -716,18 +716,17 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
             orb_type = "AUX_ANNOTATED"
         acquisition_date_orbit_type[acquisition_date] = orb_type
 
-    quality = quality.assign(
-        coreg_qlt(
-            slc.coreg.measurements.ds,
-            daz_drg,
-            scpcoa_incidence_angle=scpcoa_incidence_angle,
-            coreg_arp_coeffs=coreg_arp_coeffs,  # type: ignore
-            t0=t0,
-            acquisition_date_arp_coeffs=acquisition_date_arp_coeffs,
-            acquisition_date_orbit_type=acquisition_date_orbit_type,
-            acquisition_date_t0=acquisition_date_t0,
-        )
+    quality["crg_accuracy"] = coreg_qlt(
+        slc.coreg.measurements.ds,
+        daz_drg,
+        scpcoa_incidence_angle=scpcoa_incidence_angle,
+        coreg_arp_coeffs=coreg_arp_coeffs,
+        t0=t0,
+        acquisition_date_arp_coeffs=acquisition_date_arp_coeffs,
+        acquisition_date_orbit_type=acquisition_date_orbit_type,
+        acquisition_date_t0=acquisition_date_t0,
     )
+
     # Generate the updated Noise LUT for the coregistered grid.
 
     if path_to_dict(annot, "Radiometric.NoiseLevel.NoisePoly.Coefs") is not None:
@@ -1026,27 +1025,55 @@ def finalize_coreg(
         if exists(current_reference_path, storage_options=storage_options):
             coreg_ds = v.coreg.measurements.to_dataset()
             cr_ds = read(current_reference_path, as_type="xr.Dataset", storage_options=storage_options)
+            target_node = slcs[path] if multiburst else slcs
+            # -------------------------------------------------------------
+            # HANDLE COLLISION: Rename reference_id -> reference_id_sec + WARNING
+            # -------------------------------------------------------------
+            sec_ref_id = f"{reference_id}_sec"
+            c_ids = [str(x) for x in coreg_ds.acquisition_id.values]
+
+            if reference_id in c_ids:
+                logger.warning(
+                    f"Reference ID '{reference_id}' already present in node"
+                    f" '{k}'. Renaming previous reference entry to"
+                    f" '{sec_ref_id}' to prevent collision."
+                )
+
+                # 1. Update acquisition_id list
+                c_ids = [sec_ref_id if x == reference_id else x for x in c_ids]
+
+                # 2. Rename child node under orig DataTree if it exists
+                if reference_id in target_node.orig.children:
+                    target_node.orig[sec_ref_id] = target_node.orig[reference_id]
+                    del target_node.orig[reference_id]
+
+            # Format new incoming reference dataset
             r_val = str(
                 cr_ds.acquisition_date.values.item()
                 if cr_ds.acquisition_date.ndim == 0
                 else cr_ds.acquisition_date.values[0]
             )
+
             cr_ds = cr_ds.assign_coords(
-                acquisition_id=("acquisition_id", [reference_id]), acquisition_date=("acquisition_id", [r_val])
+                acquisition_id=("acquisition_id", [reference_id]),
+                acquisition_date=("acquisition_id", [r_val]),
+                azimuth_m=("azimuth_time", coreg_ds.azimuth_m.values),
+                slant_range_m=("slant_range_time", coreg_ds.slant_range_m.values),
             )
-            c_ids = [str(x) for x in coreg_ds.acquisition_id.values]
+
             c_dates = [str(x) for x in coreg_ds.acquisition_date.values]
             coreg_ds = coreg_ds.assign_coords(
                 acquisition_id=("acquisition_id", c_ids), acquisition_date=("acquisition_id", c_dates)
             )
+            # Safely concatenate without coordinate duplicate issues
             new_coreg_ds = xr.concat([coreg_ds, cr_ds], dim="acquisition_id").sortby("acquisition_date")
 
             if multiburst:
                 slcs[path].coreg.measurements = new_coreg_ds
-                slcs[path].orig[reference_id].measurements["slc"] = cr_ds.cstack
+                slcs[f"{path}/orig/{reference_id}/measurements"] = cr_ds.rename({"cstack": "slc"})
             else:
                 slcs.coreg.measurements = new_coreg_ds
-                slcs.orig[reference_id].measurements["slc"] = cr_ds.cstack
+                slcs[f"orig/{reference_id}/measurements"] = cr_ds.rename({"cstack": "slc"})
         else:
             bursts_to_remove.append(k)
 
@@ -1054,6 +1081,9 @@ def finalize_coreg(
         for k in bursts_to_remove:
             logger.warning(f"Current reference missing for burst {k}. Dropping burst from DataTree.")
             del slcs.bursts[k]
+
+        if len(slcs.bursts.children) == 0:
+            raise ValueError("Current reference missing for all bursts. DataTree is empty.")
     else:
         if bursts_to_remove:
             raise ValueError("Current reference missing for the datatake. DataTree might be empty.")
