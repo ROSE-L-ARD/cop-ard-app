@@ -697,7 +697,6 @@ def clean_gslc(gslc, slc, acquisition_id):
     orbit = slc.coreg.conditions.orbit.to_dataset().drop_vars(
         ["orbit_files", "reference_time", "type"], errors="ignore"
     )
-    aq_size = gslc.measurements.acquisition_date.size
     mask = gslc.measurements.mask.to_dataset(name="distortion_mask").drop_vars(
         ["acquisition_date", "acquisition_id"], errors="ignore"
     )

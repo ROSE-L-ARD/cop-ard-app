@@ -720,7 +720,8 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
         slc.coreg.measurements.ds,
         daz_drg,
         scpcoa_incidence_angle=scpcoa_incidence_angle,
-        coreg_arp_coeffs=coreg_arp_coeffs,
+        # coeffs cannot be None, ValueError would have been raised above
+        coreg_arp_coeffs=coreg_arp_coeffs,  # type: ignore
         t0=t0,
         acquisition_date_arp_coeffs=acquisition_date_arp_coeffs,
         acquisition_date_orbit_type=acquisition_date_orbit_type,
