@@ -1,3 +1,11 @@
+"""
+Coregistration of SAR image stacks for interferometric ARD products.
+
+Warps original SLC images onto a common reference radar grid, updates the
+lookup tables (LUTs) for radiometric and phase-demodulation parameters, and
+maintains the coregistration conditions and quality metadata.
+"""
+
 import os
 from typing import cast
 
@@ -754,6 +762,29 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
 
 
 def update_LUT(daz_drg: xr.Dataset, LUT_coords: xr.Dataset):
+    """
+    Scatter one chunk of computed daz/drg shifts into the coarse LUT grid.
+
+    Selects the coarse-grid points falling inside the spatial extent of the
+    given daz/drg chunk and copies the corresponding azimuth and range
+    displacements into an otherwise-zero dataset shaped like ``LUT_coords``.
+    The per-chunk results are summed by the caller to build the full lookup
+    table.
+
+    Parameters
+    ----------
+    daz_drg : xr.Dataset
+        Chunk of the computed azimuth (``daz``) and range (``drg``)
+        displacement grids on the fine grid.
+    LUT_coords : xr.Dataset
+        Coarse lookup-table coordinate grid to be updated.
+
+    Returns
+    -------
+    xr.Dataset
+        Zero-valued dataset shaped like ``LUT_coords`` carrying the
+        ``daz``/``drg`` values of this chunk at the overlapping points.
+    """
     mask = (
         (LUT_coords.azimuth_time >= daz_drg.azimuth_time.min())
         & (LUT_coords.azimuth_time <= daz_drg.azimuth_time.max())
@@ -1009,6 +1040,52 @@ def finalize_coreg(
     enable_dask: bool = True,
     **kwargs,
 ) -> xr.DataTree:
+    """
+    Inject the stored current reference image into the coregistered stack.
+
+    When at least one of the ``do_image_matching``, ``do_split_spectrum`` or
+    ``do_esd`` flags is enabled, loads the previously stored current
+    reference for each burst or slice and concatenates it along the
+    ``acquisition_id`` dimension into the coregistration measurements,
+    sorted by acquisition date. If the reference id already exists in a
+    node, the previous entry is renamed to ``{reference_id}_sec`` to avoid
+    a collision, including its node under ``orig``. The reference image is
+    also added as an ``orig`` SLC entry. Bursts without a current
+    reference are dropped from the DataTree.
+
+    Parameters
+    ----------
+    slcs : xr.DataTree
+        Coregistered SLC DataTree to be extended with the reference image.
+    working_directory : str
+        Root directory containing the product stores, including the
+        ``current_reference`` stores.
+    reference_id : str
+        Acquisition id to be assigned to the loaded current reference.
+    do_image_matching : bool, optional
+        Feature flag; when all flags are false the step is skipped.
+        Defaults to False.
+    do_split_spectrum : bool, optional
+        Feature flag for the split-spectrum step. Defaults to False.
+    do_esd : bool, optional
+        Feature flag for the ESD step. Defaults to False.
+    enable_dask : bool, optional
+        Whether Dask may be used for sub-tasks. Defaults to True.
+    **kwargs : dict
+        Extra storage options used for reading the product stores.
+
+    Returns
+    -------
+    xr.DataTree
+        The DataTree with the current reference appended to the coregistration
+        measurements and registered as an original SLC input.
+
+    Raises
+    ------
+    ValueError
+        If no current reference can be found for any burst or for the
+        single data take, leaving an empty DataTree.
+    """
     if not (do_image_matching or do_split_spectrum or do_esd):
         logger.info("Image matching and split spectrum disabled. Skipping current_reference loading.")
         return slcs

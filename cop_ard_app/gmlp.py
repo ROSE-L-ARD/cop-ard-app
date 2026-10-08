@@ -11,6 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+cop-ard-app GMLP module.
+
+Geocode a stack of coregistered SLCs onto a regular geographic grid, warping
+the data block by block with sinc interpolation over the simulation grid.
+"""
+
 from typing import cast
 
 import numpy as np

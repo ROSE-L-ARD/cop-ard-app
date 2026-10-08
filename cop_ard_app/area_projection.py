@@ -1,3 +1,10 @@
+"""
+cop-ard-app area projection module.
+
+Compute the geocoded Gamma Naught image and the layover/shadow masks through
+rasterization and Radiometric Terrain Correction (RTC) by area projection.
+"""
+
 from collections.abc import Mapping
 from typing import Any
 
@@ -108,6 +115,25 @@ def map_shadow_projection(
     args = [chunk_length, slc.shape[-1], data_path_static, threshold]
 
     def region_callback(region: Mapping[str, slice], kwargs: dict) -> Mapping[str, slice]:
+        """
+        Remap a geogrid chunk region for writing to the output store.
+
+        Shortens the 'y' and 'x' slices by one position, since the grid
+        coordinates define cell edges rather than centers, and rejects any
+        unexpected dimension.
+
+        Parameters
+        ----------
+        region : Mapping[str, slice]
+            The chunk region, keyed by dimension name ('y' and 'x').
+        kwargs : dict
+            Keyword arguments supplied by the mapping framework (unused).
+
+        Returns
+        -------
+        Mapping[str, slice]
+            The region with trimmed 'y' and 'x' slices.
+        """
         out = {}
         for k, v in region.items():
             if k in ["y", "x"]:
@@ -531,6 +557,26 @@ def map_rasterization_and_rtc_ap(
     }
 
     def output_callback(region: dict[str, slice], kwargs: dict[str, Any]) -> dict[str, slice] | None:
+        """
+        Map a chunk's local region to its position in the global geogrid.
+
+        Derives the chunk's row and column indices in the global grid from the
+        linear `job_id` and shifts the 'y'/'x' slices to the corresponding
+        global positions, trimming one trailing edge coordinate.
+
+        Parameters
+        ----------
+        region : dict[str, slice]
+            The local chunk region, keyed by 'y' and 'x'.
+        kwargs : dict[str, Any]
+            Keyword arguments provided by the mapping framework; `job_id` is
+            used to locate the chunk in the global grid.
+
+        Returns
+        -------
+        dict[str, slice] | None
+            The region expressed in global geogrid coordinates.
+        """
         # Determine the chunk's row and column position in the global grid using the job_id
         row_number = kwargs["job_id"] // (np.ceil(dim_x_global / chunk_length).astype(int))
         column_number = kwargs["job_id"] % (np.ceil(dim_x_global / chunk_length).astype(int))

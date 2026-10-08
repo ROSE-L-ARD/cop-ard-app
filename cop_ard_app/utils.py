@@ -1,3 +1,11 @@
+"""
+Utility helpers shared by the cop_ard_app processing modules.
+
+It provides data selection, chunk, and multilook aggregation helpers, SAR
+metadata and geodesy conversions, coregistration polynomial serialization, and
+reference database management for the ARD pipeline.
+"""
+
 import itertools
 import os
 
@@ -22,6 +30,16 @@ from cop_ard_app.model import get_az_rg_times, get_coefficients
 
 
 class GeoEnvPlugin(dask.distributed.WorkerPlugin):
+    """
+    Dask `WorkerPlugin` provisioning and validating the geospatial stack.
+
+    On each worker it pins the pyproj data directory, forces offline mode,
+    sets `GDAL_DATA` from the installed rasterio package, and strictly checks
+    that the PROJ grids for the configured CRS transformation are available and
+    that a vertical (geoid) shift is actually applied, raising `RuntimeError`
+    otherwise.
+    """
+
     name = "patch_gdal_proj_env"
 
     def __init__(
@@ -87,6 +105,34 @@ def get_margin(
     slant_range_time_spacing: float,
     border: int = 10,
 ):
+    """
+    Computes the data selection margins needed to avoid edge effects.
+
+    The azimuth margin comes from the TimeCAPoly linear coefficient times the
+    column spacing, converted to a time step; the range margin comes from the
+    row spacing converted to a two-way light time. Both are scaled by the
+    requested border width in pixels.
+
+    Parameters
+    ----------
+    time_ca_polynomial_coefficients : np.ndarray
+        Time caption polynomial coefficients (`RMA.INCA.TimeCAPoly.Coefs`);
+        the linear coefficient gives the azimuth time increment per scene
+        coordinate unit.
+    azimuth_time_spacing : float
+        Column scene-coordinate spacing (`Grid.Col.SS`), in meters.
+    slant_range_time_spacing : float
+        Row scene-coordinate spacing (`Grid.Row.SS`), in meters.
+    border : int, optional
+        Width of the margin, in pixels. Defaults to 10.
+
+    Returns
+    -------
+    dict
+        Dictionary with keys `azimuth_time` (`numpy.timedelta64`) and
+        `slant_range_time` (float, seconds) holding the margin of each
+        dimension.
+    """
     step = {
         "azimuth_time": np.timedelta64(
             round((time_ca_polynomial_coefficients[1] * azimuth_time_spacing) * 1e9),
@@ -164,7 +210,31 @@ def compute_chunks(chunks: dict, overlap: dict | None = None) -> dict:
 
 # @timeit
 def extract_subband(cslc: xr.DataArray, bw: float, f0: float, dim_transf: str = "slant_range_time") -> xr.DataArray:
+    """
+    Extracts a frequency subband along one dimension via a Fourier transform.
 
+    The input complex raster is FFT-shifted along `dim_transf`, masked to keep
+    only the frequencies within `[f0 - bw/2, f0 + bw/2]`, and inverse
+    transformed back to the original domain.
+
+    Parameters
+    ----------
+    cslc : xr.DataArray
+        Complex raster data (e.g. a co-registered SLC stack) to be filtered.
+    bw : float
+        Width of the frequency subband to keep.
+    f0 : float
+        Center frequency of the subband, in frequency units of the
+        transformed dimension.
+    dim_transf : str, optional
+        Name of the dimension to transform. Defaults to "slant_range_time".
+
+    Returns
+    -------
+    xr.DataArray
+        The filtered data with the original dimensions; the `slant_range_m`
+        and `azimuth_m` coordinates are dropped from the result.
+    """
     dim = cslc.dims
     freq_dim = [f"freq_{e}" if e == dim_transf else e for e in cslc.dims]
     axis = cslc.get_axis_num(dim_transf)
@@ -276,6 +346,27 @@ def get_spacing(slcs: xr.DataTree, path: str) -> list:
 
 
 def get_poly(poly, poly_type: str, dd: str):
+    """
+    Normalizes the attributes of a polynomial dataset parsed from JSON.
+
+    The time offset stored in the top-level `offset` attribute and in the
+    `dd` attribute group is converted to `numpy.datetime64` (nanoseconds),
+    while the offsets and scale factors are converted to numpy arrays.
+
+    Parameters
+    ----------
+    poly : xr.Dataset
+        Dataset holding coregistration polynomials and their attributes.
+    poly_type : str
+        Type of the polynomial. Currently unused by the implementation.
+    dd : str
+        Name of the polynomial attribute group to normalize.
+
+    Returns
+    -------
+    xr.Dataset
+        The same dataset with numpy and datetime64 attribute values.
+    """
     poly.attrs["offset"][0] = np.datetime64(poly.attrs[dd]["offset"][0], "ns")
     poly.attrs[dd]["offset"][1] = np.array(poly.attrs[dd]["offset"][1])
     poly.attrs[dd]["scale_fact"][0] = np.array(int(poly.attrs[dd]["scale_fact"][0].split()[0]))
@@ -295,6 +386,51 @@ def get_stack_phramp_diff(
     y_poly: xr.Dataset,
     multilook: dict | None = None,
 ):
+    """
+    Computes the ESD phase ramp difference for every acquisition in a stack.
+
+    For each acquisition ID, the corresponding SICD annotation is looked up,
+    the azimuth and slant range times of the SCP pixel are evaluated with
+    `get_az_rg_times`, the TimeCAPoly and DeltaKCOA coefficients are read
+    from the annotation, and `cop_ard_core.get_phramp_diff` is called on the
+    `daz`/`drg` displacement fields (optionally coarsened and averaged over
+    the multilook window) together with the matching ESD polynomial.
+
+    Parameters
+    ----------
+    acquisition_id : xr.DataArray
+        One-dimensional coordinate listing the acquisition IDs of the stack.
+    azimuth_time : xr.DataArray
+        Azimuth time coordinate of the stack.
+    slant_range_time : xr.DataArray
+        Slant range time coordinate of the stack.
+    drg_full : xr.DataArray
+        Range component of the geometric displacement fields for the full
+        stack, indexed by `acquisition_id`.
+    daz_full : xr.DataArray
+        Azimuth component of the geometric displacement fields for the full
+        stack, indexed by `acquisition_id`.
+    annot : dict
+        SICD-format annotations keyed by acquisition date, holding the
+        `RMA`, `Grid` and `ImageData` metadata sections.
+    y_poly : xr.Dataset
+        Azimuth (ESD) polynomial data variables keyed by acquisition date.
+    multilook : dict, optional
+        Coarsening window used to average `daz` and `drg` over multilook
+        cells. Defaults to ``None`` (no coarsening).
+
+    Returns
+    -------
+    xr.DataArray
+        Phase ramp differences (radians) concatenated along a new
+        `acquisition_id` dimension.
+
+    Raises
+    ------
+    ValueError
+        If the TimeCAPoly or DeltaKCOA polynomial coefficients are missing
+        in the annotation for an acquisition date.
+    """
     ph_ramp_diff_list = []
 
     for k, dd in enumerate(acquisition_id.values):
@@ -340,6 +476,36 @@ def get_stack_phramp_diff(
 
 
 def sparse_multilook(data: xr.Dataset, cohe_th: float, multilook: dict):
+    """
+    Performs a sparse multilook aggregation over an acquisition-parameter stack.
+
+    The `azimuth_time` and `slant_range_time` coordinates are converted to
+    temporary linear pixel coordinates (`y_`, `x_`), `sparse_multilook_core`
+    aggregates the cells of the multilook window, and the original
+    coordinates are reconstructed from the aggregated cell positions.
+
+    Parameters
+    ----------
+    data : xr.Dataset
+        Stack of per-acquisition parameters, with `azimuth_time`,
+        `slant_range_time` and a `coherence` variable.
+    cohe_th : float
+        Minimum coherence of the pixels aggregated by multilook.
+    multilook : dict
+        Dictionary mapping the dimensions `azimuth_time` and
+        `slant_range_time` to the multilook window sizes.
+
+    Returns
+    -------
+    xr.Dataset
+        Multilooked dataset indexed by the reconstructed
+        `azimuth_time`/`slant_range_time` coordinates.
+
+    Raises
+    ------
+    ValueError
+        If the multilook dimensions are not all dimensions of `data`.
+    """
     coords = list(multilook.keys())
     if not np.all([e in data.dims for e in coords]):
         raise ValueError(f"Not all {coords} in {data.dims}")
@@ -376,6 +542,32 @@ def sparse_multilook(data: xr.Dataset, cohe_th: float, multilook: dict):
 
 
 def sparse_multilook_core(data: xr.Dataset, cohe_th: float, multilook: dict):
+    """
+    Aggregates, per multilook cell, the parameters of coherent stack points.
+
+    Points whose coherence is above `cohe_th` are stacked along a `points`
+    dimension, mapped to the multilook cell index `ind` obtained by integer
+    division of the linear coordinates by the window sizes, and grouped: each
+    variable is reduced to the median of its cell and the coordinates to
+    their mean.
+
+    Parameters
+    ----------
+    data : xr.Dataset
+        Dataset indexed by the two coordinates listed in `multilook` (in the
+        wrapped helper these are the linear coordinates `y_` and `x_`) and
+        holding a `coherence` variable.
+    cohe_th : float
+        Coherence threshold; only points above it are aggregated.
+    multilook : dict
+        Dictionary mapping the coordinate names to the window sizes.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with a stacked `points` dimension, one row per non-empty
+        multilook cell, holding the per-cell medians and mean coordinates.
+    """
     coords = list(multilook.keys())
 
     x_size_ml = data[coords[1]].size // multilook[coords[1]] + 1
@@ -458,6 +650,38 @@ def save_single_burst(
     multiburst,
     reference_id: str | None = None,
 ):
+    """
+    Writes the current and stable references of a single burst to disk.
+
+    The current reference is always written to
+    `<reference_db_path>/<path>/current_reference`; when a stable reference
+    is provided, it is sliced per `acquisition_date` and each slice is
+    written under `<reference_db_path>/<path>/stable_reference/<acq_date>`.
+    The node path is `bursts/<burst_id>` in the multiburst case and
+    `data/<reference_id>` otherwise.
+
+    Parameters
+    ----------
+    burst_id : str
+        Identifier of the burst (used as the node path in a multiburst tree).
+    current_reference : xr.Dataset
+        Current reference cstack to write.
+    stable_reference : xr.Dataset
+        Stable (EOPF) reference cstack indexed by `acquisition_date`; it is
+        skipped when ``None``.
+    reference_db_path : str
+        Root path of the reference database.
+    multiburst : bool
+        Whether the data are organized in a multiburst tree.
+    reference_id : str, optional
+        Data node identifier, mandatory when `multiburst` is False. Defaults
+        to ``None``.
+
+    Raises
+    ------
+    ValueError
+        If `multiburst` is False and no `reference_id` is given.
+    """
     if (not multiburst) and (reference_id is None):
         raise ValueError("In single burst case, the reference_id is mandatory")
     path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
@@ -480,6 +704,29 @@ def save_single_burst(
 def update_reference_database(
     current_reference_tree, stable_references_tree, reference_db_path, reference_id: str | None = None
 ):
+    """
+    Dispatches `save_single_burst` over every node of the reference trees.
+
+    The `measurements/cstack` of each current reference and of the matching
+    stable reference are extracted; the stable cstack falls back to ``None``
+    when the stable tree is the dummy placeholder created to bypass EOPF
+    errors (flagged by the `is_empty` attribute of its `status` node) or the
+    corresponding node is missing. The collected arguments are then mapped
+    over `save_single_burst`, optionally with dask.
+
+    Parameters
+    ----------
+    current_reference_tree : xr.DataTree
+        DataTree of current references, either a multiburst tree or a single
+        node.
+    stable_references_tree : xr.DataTree
+        DataTree of stable (EOPF) references, or ``None``.
+    reference_db_path : str
+        Root path of the reference database.
+    reference_id : str, optional
+        Data node identifier used in the single-node case. Defaults to
+        ``None``.
+    """
     multiburst = "bursts" in current_reference_tree
 
     # 1. Check if the stable_references_tree is the dummy one we created to bypass EOPF errors
@@ -685,6 +932,23 @@ def compute_iono_and_orb_height(
 
 
 def sanitize_coordinates(ds: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
+    """
+    Re-assigns the non-dimensional coordinates of a dataset or array.
+
+    Coordinates whose name is not one of the object's dimensions are rebuilt
+    from their dimensions and values, leaving the index (dimension)
+    coordinates untouched.
+
+    Parameters
+    ----------
+    ds : xr.Dataset | xr.DataArray
+        Input object whose coordinates are to be sanitized.
+
+    Returns
+    -------
+    xr.Dataset | xr.DataArray
+        The same object with sanitized non-dimensional coordinates.
+    """
     clean_coords = {}
     for coord_name, coord_var in ds.coords.items():
         if coord_name not in ds.dims:
@@ -737,10 +1001,29 @@ def build_coreg_poly_dict(description, y_poly=None, x_poly=None, iono_poly=None)
     }
 
     def _to_float(val) -> float:
+        """
+        Returns a scalar-like value as a Python float.
+        """
         return float(np.asarray(val).flat[0])
 
     # Funzione interna per processare un singolo dataset e aggiornare out_dict
     def _process_dataset(poly_dataset, direction_name):
+        """
+        Copies one direction of polynomial data into the coregistration dict.
+
+        Each data variable is taken as the polynomial of one acquisition
+        (identified by its name) and its flattened coefficients, shape,
+        offsets, scale factors and time reference are stored in
+        `out_dict["acquisitions"]` under the given direction name.
+
+        Parameters
+        ----------
+        poly_dataset : xr.Dataset
+            Dataset of polynomial data variables named by acquisition ID.
+        direction_name : str
+            Direction key used in the output dictionary ("azimuth", "range"
+            or "ionosphere").
+        """
         for acq_id, poly_data in poly_dataset.data_vars.items():
             acq_id_str = str(acq_id)
             time_ref = str(poly_data.attrs.get("off_y", ""))

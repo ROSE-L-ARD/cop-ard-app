@@ -1,3 +1,10 @@
+"""
+CMLP time-series metrics for ARD products.
+
+Computes per-acquisition short-term coherence and phase products against a
+rolling reference stack and maintains stable references for drift correction.
+"""
+
 from typing import cast
 
 import numpy as np
@@ -30,6 +37,51 @@ def stack_cmlp(
     reference_id: str | None = None,
     **kwargs,
 ):
+    """
+    Compute the CMLP time-series products for a whole SLC stack.
+
+    Builds the per-burst arguments from the SLC DataTree, maps
+    :func:`single_cmlp` across them to compute per-acquisition coherence and
+    phase products, and reassembles the results into three DataTrees: the
+    CMLP products (one node per acquisition date), the current reference and
+    the stable references. An empty placeholder is created for the stable
+    references when none are produced, so that output expectations stay
+    consistent.
+
+    Parameters
+    ----------
+    slcs : xr.DataTree
+        SLC DataTree with the coregistration measurements stack to process.
+    posting : dict
+        Posting factors per spatial dimension (multilook is 2 * posting).
+    working_directory : str
+        Root directory where the product stores are read and written.
+    memory_param : float, optional
+        Memory factor for the recursive reference update. Defaults to 0.95.
+    coherence_threshold : float, optional
+        Minimum coherence for drift-correction pixel selection. Defaults to 0.1.
+    stable_interval_days : int, optional
+        Interval [days] between stable reference acquisitions. Defaults to 365.
+    max_past_stable_history : int, optional
+        Maximum number of past stable references kept. Defaults to 100.
+    reference_database_path : Path or None, optional
+        Location of the persistent current/stable reference stores.
+    enable_dask : bool, optional
+        Whether to use Dask for the computation. Defaults to True.
+    save_metrics : bool, optional
+        Whether to persist the coherence/phase metrics. Defaults to True.
+    reference_id : str or None, optional
+        Identifier of the reference acquisition, mandatory in single-slice
+        mode. Defaults to None.
+    **kwargs : dict
+        Extra storage options passed through to the workers.
+
+    Returns
+    -------
+    tuple[xr.DataTree, xr.DataTree, xr.DataTree]
+        The CMLP product tree, the current reference tree and the stable
+        reference tree.
+    """
     multiburst = "bursts" in slcs
     args = []
     for k, v in (slcs.bursts if multiburst else {"data": slcs}).items():
@@ -103,6 +155,64 @@ def single_cmlp(
     reference_id: str | None = None,
     **kwargs,
 ):
+    """
+    Compute the CMLP products and update the reference states for one burst.
+
+    Loads any previously stored current and stable references from the
+    reference database, computes the stable reference acquisition dates,
+    initializes the output Zarr stores and then iterates over the
+    acquisitions: for each date it computes the normalized interferogram
+    against the rolling reference (short-term coherence and phase), updates
+    the recursive reference with the memory factor, refreshes the stable
+    reference at stable dates and applies a long-term drift correction
+    estimated against the stable reference history. The resulting current
+    reference is persisted back to the reference database.
+
+    Parameters
+    ----------
+    burst_id : str
+        Identifier of the burst being processed (ignored in single-slice mode).
+    cstack : xr.DataArray
+        Coregistration complex stack for this burst.
+    reference_database_path : Path
+        Location of the persistent current/stable reference stores.
+    posting : dict
+        Posting factors per spatial dimension (multilook is 2 * posting).
+    multiburst : bool
+        Whether the data are organized as a mosaic of bursts.
+    working_directory : str
+        Root directory where the product stores are read and written.
+    memory_param : float, optional
+        Memory factor for the recursive reference update. Defaults to 0.95.
+    coherence_threshold : float, optional
+        Minimum coherence for drift-correction pixel selection. Defaults to 0.1.
+    stable_interval_days : int, optional
+        Interval [days] between stable reference acquisitions. Defaults to 365.
+    max_past_stable_history : int, optional
+        Maximum number of past stable references kept. Defaults to 100.
+    save_metrics : bool, optional
+        Whether to persist the coherence/phase metrics. Defaults to True.
+    reference_id : str or None, optional
+        Identifier of the reference acquisition, mandatory in single-slice
+        mode. Defaults to None.
+    **kwargs : dict
+        Extra storage options used for reading and writing datasets.
+
+    Returns
+    -------
+    tuple[str, list, xr.DataArray, xr.DataArray | None]
+        The burst identifier, a list of ``(date, dataset)`` pairs with the
+        per-acquisition CMLP products (or ``None`` entries when
+        ``save_metrics`` is False), the final current reference and the
+        updated stable reference history with previously existing entries
+        removed, if any.
+
+    Raises
+    ------
+    ValueError
+        If the ``posting`` keys do not match the expected spatial dimensions,
+        or if ``multiburst`` is False and no ``reference_id`` is given.
+    """
     # 1. Setup paths and validation
     expected = set(DIMS[2:])
     if set(posting) != expected:
