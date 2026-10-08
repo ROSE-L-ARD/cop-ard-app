@@ -694,7 +694,7 @@ def update_quality(slc: xr.DataTree, daz_drg: xr.Dataset, quality: xr.Dataset) -
     annot = annot[next(iter(annot.keys()))]
     scpcoa_incidence_angle = annot["SCPCOA"]["IncidenceAng"]
     coreg_arp_coeffs = {e: get_coefficients(f"Position.ARPPoly.{e}.Coefs", annot) for e in ["X", "Y", "Z"]}
-    if None in coreg_arp_coeffs.values():
+    if any(coeff is None for coeff in coreg_arp_coeffs.values()):
         raise ValueError("Missing ARP polynomial coefficients in metadata.")
     t0 = np.datetime64(annot["Timeline"]["CollectStart"].rstrip("Z|z"), "ns")
     acquisition_date_arp_coeffs = {}
