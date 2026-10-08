@@ -5,7 +5,7 @@ from xml.etree import ElementTree
 
 import pytest
 
-from cop_ard_app.readers.sarpy_sentinel_safe import (
+from cop_ard_app.readers.sarpy_sentinel_safe import (  # type: ignore
     _parse_xml,
     find_string,
     is_a,

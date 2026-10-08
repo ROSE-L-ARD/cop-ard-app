@@ -158,7 +158,7 @@ def _geo_grid(data_path: str, lia: float) -> None:
         {"lia": ["y", "x"], "anf": ["y", "x"], "nlooks": ["y", "x"], "mask": ["y", "x"]},
         {"lia": [GEO_N, GEO_N], "anf": [GEO_N, GEO_N], "nlooks": [GEO_N, GEO_N], "mask": [GEO_N, GEO_N]},
         {"y": CHUNK_XY, "x": CHUNK_XY},
-        {"lia": np.float32, "anf": np.float32, "nlooks": np.float32, "mask": np.int32},
+        {"lia": np.float32, "anf": np.float32, "nlooks": np.float32, "mask": np.int32},  # type: ignore
         f"{data_path}/geo_grid",
         crs="EPSG:4326",
         coords={"y": geo_y, "x": geo_x},
@@ -183,7 +183,7 @@ def _radar_grid(data_path: str) -> None:
         {k: ["azimuth_time", "slant_range_time"] for k in ["anf", "layover", "shadow"]},
         {k: [N_AZ, N_PRG] for k in ["anf", "layover", "shadow"]},
         {"azimuth_time": CHUNK_AZ, "slant_range_time": CHUNK_RG},
-        {"anf": np.float32, "layover": bool, "shadow": bool},
+        {"anf": np.float32, "layover": bool, "shadow": bool},  # type: ignore
         f"{data_path}/radar_grid",
         coords={"azimuth_time": azimuth_time, "slant_range_time": slant_range_time},
     )
@@ -243,7 +243,7 @@ def _weights_store(data_path: str, block_id: str) -> None:
         WEIGHTS_DATA,
         WEIGHTS_INDICES,
         np.array([0, WEIGHTS_DATA.size], dtype="int64"),
-        [2, 2],
+        [2, 2],  # type: ignore
         "CSR",
         WEIGHTS_DATA.size,
         f"{data_path}/w/{block_id}",
