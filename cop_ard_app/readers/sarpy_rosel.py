@@ -8,6 +8,8 @@ This implementation intentionally targets the supplied AresysXmlDoc 2.1
 layout rather than attempting to support arbitrary ROSE-L products.
 """
 
+from typing import Any
+
 __classification__ = "UNCLASSIFIED"
 __author__ = "ROSE-L GPP adaptation"
 
@@ -16,16 +18,12 @@ import glob
 import logging
 import os
 import re
-import scipy
+from collections.abc import Sequence
 from datetime import datetime
-from typing import List, Optional, Sequence, Tuple, Union
 from xml.etree import ElementTree
 
 import numpy
-from numpy.polynomial import polynomial
-from scipy.constants import speed_of_light
-from scipy.optimize import least_squares
-
+import scipy
 from sarpy.io.complex.base import SICDTypeReader
 from sarpy.io.complex.sicd_elements.blocks import Poly1DType, Poly2DType
 from sarpy.io.complex.sicd_elements.CollectionInfo import CollectionInfoType, RadarModeType
@@ -48,6 +46,8 @@ from sarpy.io.complex.utils import fit_position_xvalidation, fit_time_coa_polyno
 from sarpy.io.general.base import SarpyIOError
 from sarpy.io.general.data_segment import NumpyMemmapSegment, SubsetSegment
 from sarpy.io.general.utils import get_seconds, is_file_like
+from scipy.constants import speed_of_light
+from scipy.optimize import least_squares
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ _WGS84_A = 6378137.0
 _WGS84_B = 6356752.314245179
 
 
-def _clean_text(value: Optional[str], keep_not_available: bool = True) -> Optional[str]:
+def _clean_text(value: str | None, keep_not_available: bool = True) -> str | None:
     if value is None:
         return None
     value = value.strip()
@@ -72,13 +72,13 @@ def poly_fit_2d(
     z: numpy.ndarray,
     x_order: int = 2,
     y_order: int = 2,
-    rcond: Optional[float] = None,
-) -> Tuple[numpy.ndarray, numpy.ndarray, int, numpy.ndarray]:
+    rcond: float | None = None,
+) -> tuple[numpy.ndarray, numpy.ndarray, int, numpy.ndarray]:
     # --- Input Validation ---
     if (isinstance(x, numpy.ndarray) and isinstance(y, numpy.ndarray) and isinstance(z, numpy.ndarray)) is False:
-        raise Exception("x, y, z must be numpy arrays")
+        raise TypeError("x, y, z must be numpy arrays")
     if ((x.size == z.size) and (y.size == z.size)) is False:
-        raise Exception("x, y, z must have the same cardinality size.")
+        raise ValueError("x, y, z must have the same cardinality size.")
     # --- Data Normalization ---
     # Scale coordinates to the range [0, 1] to improve numerical stability of the fit.
     x_scale = 1.0 / x.max()
@@ -108,7 +108,7 @@ def poly_fit_2d(
     return sol, residuals, rank, sing_values
 
 
-def parse_timestring(time_string: str, precision: str = "us") -> Optional[numpy.datetime64]:
+def parse_timestring(time_string: str, precision: Any = "us") -> numpy.datetime64 | None:
     """Parse timestamps such as ``31-DEC-1999 23:59:58.077657806819``."""
     value = _clean_text(time_string, keep_not_available=False)
     if value is None:
@@ -120,7 +120,7 @@ def parse_timestring(time_string: str, precision: str = "us") -> Optional[numpy.
         except (TypeError, ValueError):
             return None
     day, mon, year, hms, frac = match.groups()
-    base = datetime.strptime(f"{day}-{mon.upper()}-{year} {hms}", "%d-%b-%Y %H:%M:%S")
+    base = datetime.strptime(f"{day}-{mon.upper()}-{year} {hms}", "%d-%b-%Y %H:%M:%S")  # noqa: DTZ007
     # numpy can preserve more precision than datetime. Build an ISO string directly.
     iso = base.strftime("%Y-%m-%dT%H:%M:%S")
     if frac:
@@ -145,18 +145,24 @@ def _required(node: ElementTree.Element, path: str) -> ElementTree.Element:
 
 
 def _float(node: ElementTree.Element, path: str) -> float:
-    return float(_required(node, path).text)
+    node_text = _required(node, path).text
+    if node_text is None:
+        raise TypeError("Expected text, got None")
+    return float(node_text)
 
 
 def _int(node: ElementTree.Element, path: str) -> int:
-    return int(_required(node, path).text)
+    node_text = _required(node, path).text
+    if node_text is None:
+        raise TypeError("Expected text, got None")
+    return int(node_text)
 
 
 def _vals(node: ElementTree.Element, path: str) -> numpy.ndarray:
-    return numpy.asarray([float(entry.text) for entry in node.findall(path)], dtype="float64")
+    return numpy.asarray([float(entry.text) for entry in node.findall(path)], dtype="float64")  # type: ignore
 
 
-def _polarization(value: str) -> Tuple[str, str, str]:
+def _polarization(value: str) -> tuple[str, str, str]:
     parts = [part.strip().upper() for part in value.replace(":", "/").split("/")]
     if len(parts) != 2:
         raise SarpyIOError(f"Unexpected ROSE-L polarization {value!r}")
@@ -233,21 +239,30 @@ class ROSELSwathDetails:
 
     @property
     def swath(self) -> str:
-        return _required(self._root_node, "./Channel/SwathInfo/Swath").text.strip()
+        swath_node = _required(self._root_node, "./Channel/SwathInfo/Swath").text
+        if swath_node is None:
+            raise TypeError()
+        return swath_node.strip()
 
     @property
     def polarization(self) -> str:
-        return _required(self._root_node, "./Channel/SwathInfo/Polarization").text.strip()
+        pol_node = _required(self._root_node, "./Channel/SwathInfo/Polarization").text
+        if pol_node is None:
+            raise TypeError()
+        return pol_node.strip()
 
     @property
-    def bursts(self) -> List[dict]:
+    def bursts(self) -> list[dict]:
         return copy.deepcopy(self._bursts)
 
     @property
     def binary_file(self) -> str:
-        name = _required(self._root_node, "./Channel/RasterInfo/FileName").text.strip()
+        name = _required(self._root_node, "./Channel/RasterInfo/FileName").text
+        if name is None:
+            raise TypeError()
+        name = name.strip()
         candidates = [os.path.join(self.directory_name, name)]
-        root, ext = os.path.splitext(name)
+        _, ext = os.path.splitext(name)
         if not ext:
             candidates.extend(os.path.join(self.directory_name, name + suffix) for suffix in (".bin", ".raw", ".dat"))
         for candidate in candidates:
@@ -265,15 +280,20 @@ class ROSELSwathDetails:
         declared = _int(self._root_node, "./Channel/StateVectorData/nSV_n")
         if n != declared:
             raise SarpyIOError(f"StateVectorData declares {declared} vectors but contains {n}")
-        start = parse_timestring(_required(self._root_node, "./Channel/StateVectorData/t_ref_Utc").text, "us")
+        ref_time_node = _required(self._root_node, "./Channel/StateVectorData/t_ref_Utc").text
+        if ref_time_node is None:
+            raise TypeError()
+        start = parse_timestring(ref_time_node, "us")
         step = _float(self._root_node, "./Channel/StateVectorData/dtSV_s")
         self._state_time = start + numpy.rint(numpy.arange(n) * step * 1e6).astype("timedelta64[us]")
-        self._state_position = pos.reshape((-1, 3))
-        self._state_velocity = vel.reshape((-1, 3))
+        self._state_position = pos.reshape((-1, 3))  # type: ignore
+        self._state_velocity = vel.reshape((-1, 3))  # type: ignore
 
     def _lines_per_burst(self, burst_number: int) -> int:
         changes = []
         for entry in self._root_node.findall("./Channel/BurstInfo/LinesPerBurstChangeList/Lines"):
+            if entry.text is None:
+                raise TypeError()
             changes.append((int(entry.attrib.get("FromBurst", "1")), int(entry.text)))
         if not changes:
             total_lines = _int(self._root_node, "./Channel/RasterInfo/Lines")
@@ -286,22 +306,27 @@ class ROSELSwathDetails:
                 value = lines
         return value
 
-    def _parse_bursts(self) -> List[dict]:
+    def _parse_bursts(self) -> list[dict]:
         bursts = []
         line_offset = 0
         samples = _int(self._root_node, "./Channel/RasterInfo/Samples")
         for entry in self._root_node.findall("./Channel/BurstInfo/Burst"):
             number = int(entry.attrib["N"])
             lines = self._lines_per_burst(number)
+            range_start_time = _required(entry, "./RangeStartTime").text
+            azimuth_start_time = _required(entry, "./AzimuthStartTime").text
+            center_shift = _required(entry, "./BurstCenterAzimuthShift").text
+            if range_start_time is None or azimuth_start_time is None or center_shift is None:
+                raise TypeError()
             bursts.append(
                 {
                     "number": number,
                     "line_offset": line_offset,
                     "num_lines": lines,
                     "num_samples": samples,
-                    "range_start_time": float(_required(entry, "./RangeStartTime").text),
-                    "azimuth_start_time": parse_timestring(_required(entry, "./AzimuthStartTime").text, "us"),
-                    "center_shift": float(_required(entry, "./BurstCenterAzimuthShift").text),
+                    "range_start_time": float(range_start_time),
+                    "azimuth_start_time": parse_timestring(azimuth_start_time, "us"),
+                    "center_shift": float(center_shift),
                 }
             )
             line_offset += lines
@@ -313,6 +338,8 @@ class ROSELSwathDetails:
         return bursts
 
     def _position(self, collect_start: numpy.datetime64) -> PositionType:
+        if self._state_time is None:
+            raise TypeError()
         times = numpy.asarray(
             [get_seconds(entry, collect_start, precision="us") for entry in self._state_time], dtype="float64"
         )
@@ -321,15 +348,18 @@ class ROSELSwathDetails:
         )
         return PositionType(ARPPoly=XYZPolyType(X=px, Y=py, Z=pz))
 
-    def _doppler_entries(self, tag: str) -> List[dict]:
-        output = []
+    def _doppler_entries(self, tag: str) -> list[dict]:
+        output: list[dict] = []
         for node in self._root_node.findall(f"./Channel/{tag}"):
+            time_node = _required(node, "./taz0_Utc").text
+            if time_node is None:
+                raise TypeError("Expected text, got None")
             output.append(
                 {
                     "number": int(node.attrib.get("Number", len(output) + 1)),
                     "coeffs": _vals(node, "./pol/val"),
                     "range_ref": _float(node, "./trg0_s"),
-                    "az_time": parse_timestring(_required(node, "./taz0_Utc").text, "us"),
+                    "az_time": parse_timestring(time_node, "us"),
                 }
             )
         if not output:
@@ -341,7 +371,10 @@ class ROSELSwathDetails:
         return min(entries, key=lambda item: abs(get_seconds(item["az_time"], time, precision="us")))
 
     def _collection_info(self, burst: dict) -> CollectionInfoType:
-        mode_id = _required(self._root_node, "./Channel/DataSetInfo/AcquisitionMode").text.strip()
+        mode_id_node = _required(self._root_node, "./Channel/DataSetInfo/AcquisitionMode")
+        if mode_id_node.text is None:
+            raise TypeError("Expected string, got None")
+        mode_id = mode_id_node.text.strip()
         # A single ScanSAR burst is spotlight-like in SICD's formation geometry.
         mode_type = "SPOTLIGHT" if mode_id.upper() == "SCANSAR" else "STRIPMAP"
         date = burst["azimuth_start_time"].astype(datetime).strftime("%Y%m%dT%H%M%S")
@@ -361,13 +394,18 @@ class ROSELSwathDetails:
         )
 
     def _image_creation(self) -> ImageCreationType:
-        processing = parse_timestring(_required(self._root_node, "./Channel/DataSetInfo/ProcessingDate").text, "ms")
+        processing_date = _required(self._root_node, "./Channel/DataSetInfo/ProcessingDate").text
+        if processing_date is None:
+            raise TypeError("Expected string, got None")
+        processing = parse_timestring(processing_date, "ms")
         return ImageCreationType(Application="ROSE-L GPP", DateTime=processing, Site="N/A", Profile="sarpy")
 
     def _image_data(self, burst: dict) -> ImageDataType:
         samples = _int(self._root_node, "./Channel/RasterInfo/Samples")
-        total_lines = _int(self._root_node, "./Channel/RasterInfo/Lines")
-        cell_type = _required(self._root_node, "./Channel/RasterInfo/CellType").text.strip().upper()
+        cell_type_node = _required(self._root_node, "./Channel/RasterInfo/CellType")
+        if cell_type_node.text is None:
+            raise TypeError("Expected text, got None")
+        cell_type = cell_type_node.text.strip().upper()
         if cell_type != "FLOAT_COMPLEX":
             raise SarpyIOError(f"Only FLOAT_COMPLEX is supported, got {cell_type}")
         return ImageDataType(
@@ -411,8 +449,8 @@ class ROSELSwathDetails:
         line_step = _float(self._root_node, "./Channel/RasterInfo/LinesStep")
         duration = burst["num_lines"] * line_step
         prf_node = self._root_node.find("./Channel/AcquisitionTimeLine/PRF_changes_values/val")
-        prf = float(prf_node.text) if prf_node is not None else 1.0 / line_step
-        ipp_end = max(int(round(duration * prf)) - 1, 0)
+        prf = float(prf_node.text) if prf_node is not None and prf_node.text is not None else 1.0 / line_step
+        ipp_end = max(round(duration * prf) - 1, 0)
         ipp = IPPSetType(
             index=1,
             TStart=0.0,
@@ -480,7 +518,7 @@ class ROSELSwathDetails:
         image_data: ImageDataType,
         position: PositionType,
         collection_info: CollectionInfoType,
-    ) -> Tuple[GridType, RMAType, GeoDataType, SCPCOAType]:
+    ) -> tuple[GridType, RMAType, GeoDataType, SCPCOAType]:
         center_frequency = _float(self._root_node, "./Channel/DataSetInfo/fc_hz")
         sample_time = _float(self._root_node, "./Channel/RasterInfo/SamplesStep")
         row_ss = 0.5 * speed_of_light * sample_time
@@ -492,7 +530,10 @@ class ROSELSwathDetails:
         r_ca_scp = 0.5 * speed_of_light * scp_range_time  # Range in meters corresponding to the SCP
         arp = position.ARPPoly(time_ca)
         vel = position.ARPPoly.derivative_eval(time_ca, der_order=1)
-        side = _required(self._root_node, "./Channel/DataSetInfo/SideLooking").text.strip().upper()
+        side_node = _required(self._root_node, "./Channel/DataSetInfo/SideLooking")
+        if side_node.text is None:
+            raise TypeError("Expected text, got None")
+        side = side_node.text.strip().upper()
         scp_ecf = _ecf_scp_from_zero_doppler(arp, vel, r_ca_scp, side)
         geo = GeoDataType(SCP=SCPType(ECF=scp_ecf))
         scpcoa = SCPCOAType(SideOfTrack=side[0])
@@ -588,7 +629,7 @@ class ROSELSwathDetails:
         azimuth_m = t_a / line_step * grid.Col.SS - (image_data.SCPPixel.Col * grid.Col.SS)
         slant_range_m = t_r / sample_time * grid.Row.SS - (image_data.SCPPixel.Row * grid.Row.SS)
 
-        coeffs, residuals, rank, sing_values = poly_fit_2d(slant_range_m, azimuth_m, phi_demod, 2, 3)
+        coeffs, _, _, _ = poly_fit_2d(slant_range_m, azimuth_m, phi_demod, 2, 3)
 
         grid.Col.DeltaKCOAPoly = Poly2DType(
             Coefs=numpy.polynomial.polynomial.polyder(coeffs / (2 * numpy.pi), 1, axis=1)
@@ -605,7 +646,7 @@ class ROSELSwathDetails:
             else:
                 grid.TimeCOAPoly = time_coa
                 inca.DopCentroidCOA = True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Could not fit Grid.TimeCOAPoly: %s", exc)
             grid.TimeCOAPoly = Poly2DType(Coefs=((time_ca,),))
             if collection_info.RadarMode.ModeType == "SPOTLIGHT":
@@ -613,9 +654,9 @@ class ROSELSwathDetails:
 
         return grid, RMAType(RMAlgoType="OMEGA_K", INCA=inca), geo, scpcoa
 
-    def get_sicds(self) -> List[SICDType]:
+    def get_sicds(self) -> list[SICDType]:
         output = []
-        tx, _, tx_rcv = _polarization(self.polarization)
+        _, _, tx_rcv = _polarization(self.polarization)
         radar_collection = self._radar_collection()
         image_creation = self._image_creation()
         for burst in self._bursts:
@@ -653,7 +694,7 @@ class ROSELSwathDetails:
             output.append(sicd)
         return output
 
-    def get_data_segments(self) -> List[SubsetSegment]:
+    def get_data_segments(self) -> list[SubsetSegment]:
         path = self.binary_file
         if not os.path.isfile(path):
             raise SarpyIOError(f"Binary raster declared by {self.file_name} was not found: {path}")
@@ -663,7 +704,10 @@ class ROSELSwathDetails:
         row_prefix = _int(self._root_node, "./Channel/RasterInfo/RowPrefixBytes")
         if row_prefix != 0:
             raise SarpyIOError("RowPrefixBytes other than zero is not currently supported")
-        byte_order = _required(self._root_node, "./Channel/RasterInfo/ByteOrder").text.strip().upper()
+        byte_order_node = _required(self._root_node, "./Channel/RasterInfo/ByteOrder")
+        if byte_order_node.text is None:
+            raise TypeError("Expected text, got None")
+        byte_order = byte_order_node.text.strip().upper()
         dtype = numpy.dtype("<c8" if byte_order == "LITTLEENDIAN" else ">c8")
         parent = NumpyMemmapSegment(
             path,
@@ -717,10 +761,10 @@ class ROSELDetails:
         return self._directory_name
 
     @property
-    def swaths(self) -> Tuple[ROSELSwathDetails, ...]:
+    def swaths(self) -> tuple[ROSELSwathDetails, ...]:
         return tuple(self._swaths)
 
-    def get_sicds(self) -> List[SICDType]:
+    def get_sicds(self) -> list[SICDType]:
         return [sicd for detail in self._swaths for sicd in detail.get_sicds()]
 
 
@@ -729,7 +773,7 @@ class ROSELReader(SICDTypeReader):
 
     __slots__ = ("_rosel_details",)
 
-    def __init__(self, rosel_details: Union[str, ROSELDetails]):
+    def __init__(self, rosel_details: str | ROSELDetails):
         if isinstance(rosel_details, str):
             rosel_details = ROSELDetails(rosel_details)
         if not isinstance(rosel_details, ROSELDetails):
@@ -756,7 +800,7 @@ class ROSELReader(SICDTypeReader):
         return self._rosel_details.directory_name
 
 
-def is_a(file_name: str) -> Optional[ROSELReader]:
+def is_a(file_name: str) -> ROSELReader | None:
     """Return a reader when *file_name* is a ROSE-L GPP XML/folder, else None."""
     if is_file_like(file_name):
         return None
@@ -768,9 +812,9 @@ def is_a(file_name: str) -> Optional[ROSELReader]:
 
 
 __all__ = [
-    "ROSELSwathDetails",
     "ROSELDetails",
     "ROSELReader",
-    "parse_timestring",
+    "ROSELSwathDetails",
     "is_a",
+    "parse_timestring",
 ]

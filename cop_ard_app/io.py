@@ -5,11 +5,12 @@ import posixpath
 import secrets
 import shutil
 import warnings
+from collections.abc import Mapping
 from datetime import datetime
 from hashlib import md5
 from json import dumps
 from tempfile import TemporaryDirectory
-from typing import Any, Literal, Mapping, Union, cast, overload
+from typing import Any, Literal, cast, overload
 from unittest import mock
 
 import dask.array as da
@@ -25,13 +26,14 @@ import zarr.storage
 from cop_ard_core.logger import logger
 
 
-class SentinelSarpyObj(object):
+class SentinelSarpyObj:
     """
     A wrapper class to handle Sentinel-1 metadata extraction using Sarpy,
     especially for data stored on S3 where partial file reads are needed.
     """
 
-    def __init__(self, in_path, storage_options={}):
+    def __init__(self, in_path, storage_options=None):
+        storage_options = storage_options or {}
         # Check if the input is already a DataTree.
         self._is_dt = isinstance(in_path, xr.DataTree)
         if not self._is_dt:
@@ -51,7 +53,7 @@ class SentinelSarpyObj(object):
 
         if self._is_dt:
             # If input is a DataTree, Sarpy can read its metadata directly.
-            self._sentinel_details = sarpy.io.complex.sentinel.SentinelDetails(self._input)  # ty:ignore[invalid-argument-type]
+            self._sentinel_details = sarpy.io.complex.sentinel.SentinelDetails(self._input)
         else:
             # For file paths (especially S3), copy essential metadata files locally.
             for j in ["manifest.safe", "annotation"]:
@@ -62,13 +64,13 @@ class SentinelSarpyObj(object):
 
         # Extract the collection of SICD (Sensor Independent Complex Data) metadata objects.
         try:
-            self.sicd_meta = [j for k, v in self._sentinel_details.get_sicd_collection() for j in v]  # ty:ignore[not-iterable]
-        except Exception as e:
+            self.sicd_meta = [j for k, v in self._sentinel_details.get_sicd_collection() for j in v]
+        except Exception as e:  # noqa: BLE001
             logger.info(f"{e.__class__.__name__}: No bursts have been found.")
             self.sicd_meta = [v for k, v in self._sentinel_details.get_sicd_collection()]
 
 
-def sarpy_open(in_path: str | xr.DataTree, allowed_partial_open: bool = False, storage_options: dict = {}):
+def sarpy_open(in_path: str | xr.DataTree, allowed_partial_open: bool = False, storage_options: dict | None = None):
     """
     A robust wrapper to open various SAR data formats using the Sarpy library.
 
@@ -85,7 +87,7 @@ def sarpy_open(in_path: str | xr.DataTree, allowed_partial_open: bool = False, s
     Returns:
         A Sarpy reader object.
     """
-    ds = None
+    storage_options = storage_options or {}
     try:
         # Handle in-memory DataTree by computing it first.
         if isinstance(in_path, xr.DataTree):
@@ -97,7 +99,7 @@ def sarpy_open(in_path: str | xr.DataTree, allowed_partial_open: bool = False, s
     except sarpy.io.general.base.SarpyIOError:
         # If standard open fails, it might be an S3 path that Sarpy can't handle directly.
         if not isinstance(in_path, str):
-            raise ValueError(f"Expected str, got {type(in_path)}")
+            raise TypeError(f"Expected str, got {type(in_path)}")
         try:
             # Try opening the path with fsspec first.
             ds = sarpy.io.open(open(in_path))
@@ -153,7 +155,7 @@ def read_slc_static(
         `xr.Datatree` itself.
     """
     if (burst_id == "data") and (reference_id is None):
-        raise ValueError(f"In single burst case, the reference_id is mandatory")
+        raise ValueError("In single burst case, the reference_id is mandatory")
     path = f"bursts/{burst_id}" if burst_id != "data" else f"data/{reference_id}"
     path_ok = burst_id if burst_id != "data" else f"data/{reference_id}"
     storage_opts = get_storage_options(kwargs)
@@ -162,7 +164,7 @@ def read_slc_static(
 
     if not exists(slc_path, storage_options=storage_opts):
         logger.info(f"Missing reference SLC marker for burst {burst_id}.")
-        ds: Union[int, xr.DataTree] = 0
+        ds: int | xr.DataTree = 0
     else:
         ds = cast(
             xr.DataTree,
@@ -172,7 +174,7 @@ def read_slc_static(
             ),
         )
         annot = ds.measurements.slc.attrs
-        annot = annot[list(annot)[0]]
+        annot = annot[next(iter(annot))]
         collector_name = str(annot["CollectionInfo"]["CollectorName"])
         if burst_id != "data":
             try:
@@ -242,7 +244,6 @@ def save_slc_static(burst_id: str, slc: xr.DataTree, working_directory: str, ref
         **kwargs,
     )
     touch(slc_path, **kwargs)
-    return
 
 
 def open_copdem30m(minx: float, miny: float, maxx: float, maxy: float) -> xr.Dataset:
@@ -275,7 +276,7 @@ def open_copdem30m(minx: float, miny: float, maxx: float, maxy: float) -> xr.Dat
         mask_and_scale=False,
     )
     if not isinstance(dem.rio.crs, rasterio.crs.CRS):
-        raise Exception(f"Expected rasterio.crs.CRS, got {type(dem.rio.crs)}")
+        raise TypeError(f"Expected rasterio.crs.CRS, got {type(dem.rio.crs)}")
     # Clip the global DEM to the specified bounding box.
     dem = dem.rio.clip_box(minx, miny, maxx, maxy, crs="EPSG:4326")
     # Rename coordinates to the standard 'y' and 'x'.
@@ -359,11 +360,11 @@ def assign_attrs(_data: xr.Dataset | xr.DataTree, _data_attrs: dict) -> xr.Datas
 
 
 def check_write_arguments(
-    data: Union[xr.Dataset, xr.DataArray, xr.DataTree],
+    data: xr.Dataset | xr.DataArray | xr.DataTree,
     data_path: str,
     mode: Literal["w", "w-", "a", "a-", "r+", "r"] = "w",
     region: Mapping[str, slice] | None = None,
-) -> tuple[Literal["w", "w-", "a", "a-", "r+", "r"], str, Union[xr.Dataset, xr.DataTree], str]:
+) -> tuple[Literal["w", "w-", "a", "a-", "r+", "r"], str, xr.Dataset | xr.DataTree, str]:
     """
     Validate and prepare arguments for the main `write` function.
     """
@@ -384,11 +385,11 @@ def check_write_arguments(
         _data = data.to_dataset(name=data.name or "v")
 
     if not isinstance(_data, (xr.Dataset, xr.DataTree)):
-        raise ValueError(f"Expected xr.Dataset or xr.DataTree, got {type(_data)}")
+        raise TypeError(f"Expected xr.Dataset or xr.DataTree, got {type(_data)}")
     return mode, _file_path, _data, _data_type
 
 
-def validate_encoding(data: Union[xr.Dataset, xr.DataTree], encoding: dict | None) -> dict | None:
+def validate_encoding(data: xr.Dataset | xr.DataTree, encoding: dict | None) -> dict | None:
     """
     Validates a user-provided encoding dictionary against the data object.
     Strips out invalid variables and warns on unknown encoding parameters.
@@ -400,9 +401,9 @@ def validate_encoding(data: Union[xr.Dataset, xr.DataTree], encoding: dict | Non
     if isinstance(data, xr.DataTree):
         valid_vars: set[str] = set()
         for node in data.descendants:
-            valid_vars.update([str(k) for k in node.ds.variables.keys()])
+            valid_vars.update([str(k) for k in node.ds.variables])
     else:
-        valid_vars = set([str(k) for k in data.variables.keys()])
+        valid_vars = {str(k) for k in data.variables}
 
     validated_encoding = {}
 
@@ -445,7 +446,7 @@ def save_sparse_array(
     chunks: int,
     data_path: str,
     skip_read: bool = True,
-    attrs: dict = {},
+    attrs: dict | None = None,
     **kwargs,
 ):
     """
@@ -489,9 +490,10 @@ def save_sparse_array(
     Exception
         If the specified format is not "COO" or "CSR".
     """
+    attrs = attrs or {}
     # Validate that the specified sparse format is supported.
     if format not in ["COO", "CSR"]:
-        raise Exception(f"Expected COO or CSR format, got {format}")
+        raise ValueError(f"Expected COO or CSR format, got {format}")
     # Initialize a dictionary to hold the data variables for the xarray Dataset.
     data_vars = {
         "data": ("point", data),
@@ -532,7 +534,7 @@ def generate_empty_dataset(
     shape: dict[Any, list[int]],
     chunks: dict[Any, int],
     dtype: dict[Any, str],
-    crs: Union[str, Any, None] = None,
+    crs: str | Any | None = None,
     coords: dict[Any, Any] | None = None,
     attrs: dict[Any, Any] | None = None,
     attrs_data_vars: dict[Any, Any] | None = None,
@@ -575,7 +577,7 @@ def save_empty_dataset(
     chunks: dict[Any, int],
     dtype: dict[Any, str],
     data_path: str,
-    crs: Union[str, Any, None] = None,
+    crs: str | Any | None = None,
     coords: dict[Any, Any] | None = None,
     attrs: dict[Any, Any] | None = None,
     attrs_data_vars: dict[Any, Any] | None = None,
@@ -649,7 +651,7 @@ class Path:
 
     def __init__(
         self,
-        path: Union[str, pathlib.Path],
+        path: str | pathlib.Path,
         temp_dir: TemporaryDirectory | str | None = None,
         storage_options: dict | None = None,
     ):
@@ -957,7 +959,7 @@ def decorator(func):
         method.
     """
 
-    def wrapper(path: Union[list, tuple, str], **kwargs):
+    def wrapper(path: list | tuple | str, **kwargs):
         # 1. TRICK: Call the original function just to trigger coverage.
         # Since it is a 'pass' function, this does nothing but run the line.
         func(path, **kwargs)
@@ -997,7 +999,7 @@ def decorator(func):
         # Special handling for `glob` to ensure consistent output format.
         if func.__name__ == "glob":
             if not isinstance(path, str):
-                raise Exception(f"Expected str, got {type(path)}")
+                raise TypeError(f"Expected str, got {type(path)}")
             # Add the 's3://' prefix back to results from S3, as fsspec removes it.
             if path.startswith("s3://"):
                 res = [f"s3://{e}" for e in res]
@@ -1019,49 +1021,41 @@ def decorator(func):
 @decorator
 def exists(pathname: str, **kwargs):
     """Check if a path exists."""
-    pass
 
 
 @decorator
 def isdir(pathname: str, **kwargs):
     """Check if a path is a directory."""
-    pass
 
 
 @decorator
 def isfile(pathname: str, **kwargs):
     """Check if a path is a file."""
-    pass
 
 
 @decorator
 def touch(pathname: str, **kwargs):
     """Create an empty file at the given path."""
-    pass
 
 
 @decorator
 def delete(pathname: str, recursive=False, maxdepth=None, allow_non_existent=False, **kwargs):
     """Delete files or directories."""
-    pass
 
 
 @decorator
 def makedirs(pathname: str, exist_ok: bool = False, **kwargs):
     """Create a directory and any necessary parent directories."""
-    pass
 
 
 @decorator
 def glob(pattern: str, sort: bool = False, **kwargs):
     """Find files matching a pattern."""
-    pass
 
 
 @decorator
 def open(pathname: str, mode: str = "rb", **kwargs):
     """Open a file for reading or writing."""
-    pass
 
 
 def normpath(pathname: str, **kwargs) -> str:
@@ -1119,7 +1113,7 @@ def _fop(
     dst: str,
     recursive: bool = False,
     only_if_different_fs: bool = False,
-    storage_options: dict | None = {},
+    storage_options: dict | None = None,
 ) -> str:
     """
     A private helper function for file operations (move or copy).
@@ -1149,8 +1143,7 @@ def _fop(
     str
         The final destination path.
     """
-    if storage_options is None:
-        storage_options = {}
+    storage_options = storage_options or {}
     # Check if the source and destination paths are on S3.
     src_flag, dst_flag = [is_s3_path(e) for e in [src, dst]]
 
@@ -1181,7 +1174,7 @@ def copy(
     dst: str,
     recursive: bool = False,
     only_if_different_fs: bool = False,
-    storage_options: dict | None = {},
+    storage_options: dict | None = None,
 ) -> str:
     """Copy src to dst src and dst can be both local and remote (S3) data.
 
@@ -1202,6 +1195,7 @@ def copy(
     -------
     str
     """
+    storage_options = storage_options or {}
     return _fop(
         "copy",
         src,
@@ -1217,7 +1211,7 @@ def move(
     dst: str,
     recursive: bool = False,
     only_if_different_fs: bool = False,
-    storage_options: dict = {},
+    storage_options: dict | None = None,
 ) -> str:
     """Move src to dst src and dst can be both local and remote (S3) data.
     when src or dst is a remote (S3) path the src file will be copied
@@ -1239,6 +1233,7 @@ def move(
     -------
     str
     """
+    storage_options = storage_options or {}
     result = _fop(
         "move",
         src,
@@ -1317,7 +1312,7 @@ def get_polarization_code(polarizations: list, product_level: bool = True) -> st
                               If False, they map to 'HH'/'VV' (extracted components).
     """
     # Convert to an uppercase set to make it order-independent and case-insensitive
-    pols = set(p.upper() for p in polarizations)
+    pols = {p.upper() for p in polarizations}
 
     if pols == {"VV", "VH"}:
         return "DV"
@@ -1347,6 +1342,7 @@ def get_duration(attrs):
 
 def get_id_product(stac, burst_id: str | None = None, tile_name: str | None = None):
     import copy
+
     attrs = copy.deepcopy(stac)
     attrs["properties"].pop("created", None)
     attrs["properties"].pop("processing:datetime", None)
@@ -1419,7 +1415,7 @@ def read(
     consolidate_metadata: bool = False,
     storage_options: dict | None = None,
     **kwargs: Any,
-) -> Union[xr.DataArray, xr.Dataset, xr.DataTree]: ...
+) -> xr.DataArray | xr.Dataset | xr.DataTree: ...
 
 
 def read(
@@ -1430,7 +1426,7 @@ def read(
     consolidate_metadata: bool = False,
     storage_options: dict | None = None,
     **kwargs,
-) -> Union[xr.DataArray, xr.Dataset, xr.DataTree]:
+) -> xr.DataArray | xr.Dataset | xr.DataTree:
     """
     Read an xarray object from a Zarr V3 store.
     """
@@ -1439,13 +1435,12 @@ def read(
         data_path = str(data_path)
     # bypass s3fs cache
     so = is_local(data_path, storage_options)
-    with zarr.storage.FsspecStore.from_url(url=data_path, storage_options=so) as store:
-        # Consolidate metadata for faster access, especially on cloud storage.
-        with warnings.catch_warnings():
-            # Ignore the specific consolidated metadata warning
-            warnings.filterwarnings("ignore", message=".*Consolidated metadata is currently not part.*")
-            if consolidate_metadata:
-                zarr.consolidate_metadata(store)
+    with zarr.storage.FsspecStore.from_url(url=data_path, storage_options=so) as store, warnings.catch_warnings():
+        # Ignore the specific consolidated metadata warning
+        warnings.filterwarnings("ignore", message=".*Consolidated metadata is currently not part.*")
+        if consolidate_metadata:
+            # Consolidate metadata for faster access, especially on cloud storage.
+            zarr.consolidate_metadata(store)
 
     # --- Read Dataset or DataArray ---
     # If we know we just want a flat Dataset or DataArray, open it directly.
@@ -1458,7 +1453,7 @@ def read(
         if as_type == "xr.DataArray":
             if len(ds.data_vars) == 1:
                 # Unpack the single variable back into a DataArray
-                var = list(ds.data_vars)[0]
+                var = next(iter(ds.data_vars))
                 dr = ds[var]
                 dr.attrs["store_path"] = f"{data_path}/{var}"
                 return dr
@@ -1512,7 +1507,7 @@ def drop_encodings(data):
 
 
 def write(
-    data: Union[xr.Dataset, xr.DataArray, xr.DataTree],
+    data: xr.Dataset | xr.DataArray | xr.DataTree,
     data_path: str | Path,
     region: Mapping[str, slice] | None = None,
     consolidated: bool = True,
@@ -1521,7 +1516,7 @@ def write(
     skip_read: bool = False,
     storage_options: dict | None = None,
     encoding: dict | None = None,
-) -> Union[xr.DataTree, xr.Dataset, xr.DataArray, None]:
+) -> xr.DataTree | xr.Dataset | xr.DataArray | None:
     if isinstance(data_path, Path):
         storage_options = data_path.storage_options
         data_path = str(data_path)
@@ -1543,7 +1538,7 @@ def write(
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*Consolidated metadata is currently not part.*")
         warnings.filterwarnings("ignore", message=".*does not have a Zarr V3 specification.*")
-        _data.to_zarr(
+        _data.to_zarr(  # type: ignore
             store=_file_path,
             mode=mode,
             region=region,

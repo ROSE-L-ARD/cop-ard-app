@@ -66,10 +66,7 @@ def _make_dataset(burst_id, dates, speckle, delta):
 
 def _build_trees(delta):
     rng = np.random.default_rng(42)
-    speckle = {
-        b: (rng.standard_normal((N, N)) + 1j * rng.standard_normal((N, N))).astype(np.complex64)
-        for b in BURSTS
-    }
+    speckle = {b: (rng.standard_normal((N, N)) + 1j * rng.standard_normal((N, N))).astype(np.complex64) for b in BURSTS}
 
     reference_slcs = xr.DataTree()
     secondary_slcs = xr.DataTree()
@@ -84,8 +81,7 @@ def _build_trees(delta):
     return reference_slcs, secondary_slcs
 
 
-
-class TestEstimate():
+class TestEstimate:
     """Unit test for cop_ard_app.esd.estimate.
 
     Simulates a pair of consecutive bursts (iw1_254, iw1_255) whose master (reference)

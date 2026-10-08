@@ -4,7 +4,7 @@ from typing import cast
 import numpy as np
 import xarray as xr
 from cop_ard_core.logger import timeit
-from cop_ard_core.utils import compute_interf_norm, time_to_pixel, wrap, get_azimuth_time_raw
+from cop_ard_core.utils import compute_interf_norm, get_azimuth_time_raw, time_to_pixel, wrap
 
 from cop_ard_app.computation import map
 from cop_ard_app.utils import (
@@ -222,13 +222,13 @@ def extract_interf_multi(
 @timeit
 def mosaic_interf(interf: xr.DataTree, chunks: dict) -> xr.Dataset:
 
-    data = interf.bursts[list(interf.bursts.children)[0]].to_dataset()
+    data = interf.bursts[next(iter(interf.bursts.children))].to_dataset()
     # TODO: margins for mosaic do be adapted to the multilook and the valid points
     mosaic: xr.Dataset = data.isel(azimuth_time=slice(3, -3), slant_range_time=slice(3, -8))
     mosaic = mosaic.swap_dims({"azimuth_time": "y", "slant_range_time": "x"})
     mosaic = mosaic.reset_coords([e for e in mosaic.coords if e not in mosaic.dims])
 
-    for k, layer in interf.bursts.items():
+    for layer in interf.bursts.values():
         layer_sel = layer.isel(azimuth_time=slice(3, -3), slant_range_time=slice(3, -8)).to_dataset()
         layer_sel = layer_sel.swap_dims({"azimuth_time": "y", "slant_range_time": "x"})
         layer_sel = layer_sel.reset_coords([e for e in layer_sel.coords if e not in layer_sel.dims]).compute()

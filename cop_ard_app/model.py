@@ -1,8 +1,9 @@
 import copy
 import os
 import re
-from datetime import datetime, timezone
-from typing import Any, Sequence, Union, cast
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from typing import cast
 
 import cop_ard_core
 import numpy as np
@@ -220,9 +221,9 @@ def extract_orbits(
 
     # --- Collect Orbit Data ---
     # Iterate through all scenes (bursts or single images) to collect orbit polynomials.
-    for burst_id, i in (slcs.bursts if multiburst else {"data": slcs}).items():
+    for i in (slcs.bursts if multiburst else {"data": slcs}).values():
         for data_id, j in i.orig.items():
-            annot = j.measurements.slc.attrs[list(j.measurements.slc.attrs.keys())[0]]
+            annot = j.measurements.slc.attrs[next(iter(j.measurements.slc.attrs.keys()))]
             orbits.update({data_id: annot["Position"]["ARPPoly"]})
             reference_times.update(
                 {data_id: annot["Timeline"]["CollectStart"]},
@@ -247,13 +248,13 @@ def extract_orbits(
         else:
             data = np.array([v[e]["Coefs"] for e in ["X", "Y", "Z"]]).T
         if not isinstance(data, np.ndarray):
-            raise Exception(f"Expected np.ndarray, got {type(data)}")
+            raise TypeError(f"Expected np.ndarray, got {type(data)}")
         shape = data.shape
         # Place the coefficients into the consolidated array.
         coeffs[counter][: shape[0], : shape[1]] += data
 
     # --- Create Final DataArray ---
-    orbits = xr.DataArray(
+    orbits_da = xr.DataArray(
         data=coeffs,
         dims=["acquisition_id", "degree", "axis"],
         coords={
@@ -263,7 +264,7 @@ def extract_orbits(
         },
     ).assign_attrs({"reference_times": reference_times})
 
-    return orbits
+    return orbits_da
 
 
 def extract_acquisition_dates(
@@ -402,7 +403,7 @@ def map_index_to_group(dt, swath, burstid, pol):
         if cond:
             return k
     # Raise an error if no match is found.
-    raise Exception(f"No correspondence found for swath={swath} burst_id={burstid} pol={pol}")
+    raise ValueError(f"No correspondence found for swath={swath} burst_id={burstid} pol={pol}")
 
 
 def get_footprint(ds, index: int):
@@ -541,16 +542,16 @@ def update_container(dt: xr.DataTree, dt_name, cslc_id):
     coords.append(coords[0])
 
     datetime = start + round((end.astype(int) - start.astype(int)) / 2)
-    start = str(start) + "Z"
-    end = str(end) + "Z"
+    start_str = str(start) + "Z"
+    end_str = str(end) + "Z"
     datetime = str(datetime) + "Z"
     stac["properties"].pop("proj:epsg", None)
     stac["properties"].pop("proj:wkt2", None)
     stac["properties"].pop("proj:shape", None)
     stac["properties"].pop("proj:transform", None)
     stac["properties"]["datetime"] = datetime
-    stac["properties"]["start_datetime"] = start
-    stac["properties"]["end_datetime"] = end
+    stac["properties"]["start_datetime"] = start_str
+    stac["properties"]["end_datetime"] = end_str
     stac["bbox"] = bbox
     stac["geometry"]["coordinates"] = [coords]
     instrument = stac["properties"]["sar:instrument_mode"]
@@ -564,7 +565,7 @@ def update_container(dt: xr.DataTree, dt_name, cslc_id):
     return stac, processing_history
 
 
-def update_gmlp(gmlp: xr.DataTree, slcs: xr.DataTree, external_metadata: dict = {}):
+def update_gmlp(gmlp: xr.DataTree, slcs: xr.DataTree, external_metadata: dict | None = None):
     """
     Finalize the GSLC product by adding product-level metadata.
 
@@ -587,9 +588,10 @@ def update_gmlp(gmlp: xr.DataTree, slcs: xr.DataTree, external_metadata: dict = 
         A new DataTree, restructured and fully populated with final
         GSLC product metadata.
     """
-    processing_start_time = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    external_metadata = external_metadata or {}
+    processing_start_time = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     bursts = xr.DataTree()
-    multiburst = True if "bursts" in gmlp else False
+    multiburst = "bursts" in gmlp
     # --- Iterate Over Each Burst/Scene ---
     burst_items = gmlp["bursts"].children.items() if multiburst else [("data", gmlp)]
 
@@ -628,7 +630,7 @@ def update_gmlp(gmlp: xr.DataTree, slcs: xr.DataTree, external_metadata: dict = 
     return bursts
 
 
-def fix_attributes(data: Union[xr.DataTree, xr.DataArray], attrs):
+def fix_attributes(data: xr.DataTree | xr.DataArray, attrs):
     """
     Recursively clean up and standardize attributes in a DataTree or DataArray.
 
@@ -654,7 +656,7 @@ def fix_attributes(data: Union[xr.DataTree, xr.DataArray], attrs):
     # Iterate through all dimensions in the data object.
     for k in data.dims:
         if not isinstance(k, str):
-            raise Exception(f"Expected str, got {type(k)}")
+            raise TypeError(f"Expected str, got {type(k)}")
         # If the dimension name is in the attribute template, apply the standard attributes.
         if k in attrs:
             data[k].attrs = attrs[k]
@@ -673,17 +675,17 @@ def fix_attributes(data: Union[xr.DataTree, xr.DataArray], attrs):
     # --- Standardize Data Variable Attributes (if data is DataArray) ---
     if isinstance(data, xr.DataArray) and data.name in attrs:
         if not isinstance(data.name, str):
-            raise Exception(f"Expected str, got {type(data.name)}")
+            raise TypeError(f"Expected str, got {type(data.name)}")
         data.attrs.update({**attrs[data.name], "short_name": data.name})
 
     # --- Recurse for DataTree ---
     if isinstance(data, xr.DataTree):
         # 1. Recurse over DataVariables within the current node
-        for var_name, var_array in data.data_vars.items():
+        for var_array in data.data_vars.values():
             fix_attributes(var_array, attrs)
 
         # 2. Recurse over Child Nodes (Groups) in the DataTree hierarchy
-        for child_name, child_node in data.children.items():
+        for child_node in data.children.values():
             fix_attributes(child_node, attrs)
 
     return data
@@ -695,7 +697,6 @@ def clean_gslc(gslc, slc, acquisition_id):
     orbit = slc.coreg.conditions.orbit.to_dataset().drop_vars(
         ["orbit_files", "reference_time", "type"], errors="ignore"
     )
-    aq_size = gslc.measurements.acquisition_date.size
     mask = gslc.measurements.mask.to_dataset(name="distortion_mask").drop_vars(
         ["acquisition_date", "acquisition_id"], errors="ignore"
     )
@@ -781,8 +782,8 @@ def get_other_metadata_gslc(external_metadata):
 
 
 def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time, external_metadata):
-    multiburst = True if "bursts" in slcs else False
-    attrs = copy.deepcopy((slcs.bursts[burst_id] if multiburst else slcs)).attrs
+    multiburst = "bursts" in slcs
+    attrs = copy.deepcopy(slcs.bursts[burst_id] if multiburst else slcs).attrs
     stac = attrs["stac_discovery"]
     crs = CRS(gslc.rio.crs).to_3d()
     horizontal_crs = str(crs.to_2d().to_epsg())
@@ -859,8 +860,8 @@ def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time, exter
 
 
 def stac_discovery_template(burst_id, orig, coreg, external_metadata, stac, processing_start_time):
-    sicd = orig.attrs[list(orig.attrs)[0]]
-    sicd_coreg = coreg.attrs[list(coreg.attrs)[0]]
+    sicd = orig.attrs[next(iter(orig.attrs))]
+    sicd_coreg = coreg.attrs[next(iter(coreg.attrs))]
     tx_frequency = sicd["RadarCollection"]["TxFrequency"]
     platform, constellation, instruments = extract_stac_sar_props(sicd)
 
@@ -976,7 +977,6 @@ def stac_discovery_template(burst_id, orig, coreg, external_metadata, stac, proc
 
 def get_stac_cslc(slc: xr.DataTree, burst_id: str, external_metadata, processing_start_time):
     reference_id = slc.coreg.measurements.attrs["coregistration_reference_id"]
-    acquisition_dates = slc.coreg.measurements.cstack.acquisition_date.values
     acquisition_ids = slc.coreg.measurements.cstack.acquisition_id.values
     date = acquisition_ids[0] if acquisition_ids.size == 1 else reference_id
     orig = slc.orig[date].measurements.slc
@@ -991,11 +991,11 @@ def get_processing_history_cslc(slc: xr.DataTree, stac_discovery, external_metad
     acquisition_ids = slc.coreg.measurements.cstack.acquisition_id.values
     date = acquisition_ids[0] if acquisition_ids.size == 1 else reference_id
     processing_history = slc.orig[date].conditions.attrs.get("processing_history", {})
-    stac = slc.orig[date].conditions.attrs.get("stac_discovery", {})
-    inputs = stac["id"] if "id" in stac else "n/a"
-    if "Level-1 Product" in processing_history:
-        if processing_history["Level-1 Product"][0]["outputs"]:
-            inputs = processing_history["Level-1 Product"][0]["outputs"]
+    # stac = slc.orig[date].conditions.attrs.get("stac_discovery", {})
+    # inputs = stac["id"] if "id" in stac else "n/a"
+    # if "Level-1 Product" in processing_history:
+    #     if processing_history["Level-1 Product"][0]["outputs"]:
+    #         inputs = processing_history["Level-1 Product"][0]["outputs"]
 
     processing_history["COP ARD CSLC Product"] = external_metadata
     return processing_history
@@ -1025,7 +1025,7 @@ def update_coreg(
     slcs: xr.DataTree,
     wdir_path_static: str,
     reference_id: str,
-    external_metadata: dict = {},
+    external_metadata: dict | None = None,
     **kwargs,
 ):
     """
@@ -1048,9 +1048,10 @@ def update_coreg(
     DataTree
         A new DataTree, restructured and fully populated with final metadata.
     """
-    processing_start_time = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    external_metadata = external_metadata or {}
+    processing_start_time = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     bursts = xr.DataTree()
-    multiburst = True if "bursts" in slcs else False
+    multiburst = "bursts" in slcs
     # --- Iterate Over Each Burst/Scene ---
     for k, slc in (slcs.bursts if multiburst else {"data": slcs}).items():
         name = k if multiburst else "data"
@@ -1259,12 +1260,12 @@ def update_cslc_container(bursts: xr.DataTree):
     coords.append(coords[0])
 
     datetime = start + round((end.astype(int) - start.astype(int)) / 2)
-    start = str(start) + "Z"
-    end = str(end) + "Z"
+    start_str = str(start) + "Z"
+    end_str = str(end) + "Z"
     datetime = str(datetime) + "Z"
     stac["properties"]["datetime"] = datetime
-    stac["properties"]["start_datetime"] = start
-    stac["properties"]["end_datetime"] = end
+    stac["properties"]["start_datetime"] = start_str
+    stac["properties"]["end_datetime"] = end_str
     stac["bbox"] = bbox
     stac["geometry"]["coordinates"] = [coords]
     try:

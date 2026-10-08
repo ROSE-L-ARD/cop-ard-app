@@ -1,6 +1,7 @@
 import os
 from collections import defaultdict
-from typing import Any, Hashable, Sequence, cast
+from collections.abc import Hashable, Sequence
+from typing import Any, cast
 
 import numpy as np
 import sarpy.io.complex.sentinel
@@ -18,7 +19,6 @@ from cop_ard_core.slc import (
 )
 from cop_ard_core.utils import sync_sicd_metadata
 
-import cop_ard_app.readers
 from cop_ard_app.computation import init_zarr_groups, map, map_blocks
 from cop_ard_app.io import (
     Path,
@@ -46,8 +46,6 @@ from cop_ard_app.model import (
 )
 from cop_ard_app.utils import get_best_pol
 
-cop_ard_app.readers.__file__
-
 
 def import_slice(
     slc: xr.DataArray,
@@ -63,7 +61,7 @@ def import_slice(
     valid_data_x_idxs: np.ndarray | None = None,
     deramp_flag: bool = False,
     dkcoa_coeffs: np.ndarray | None = None,
-    chunk={},
+    chunk: dict | None = None,
 ):
     """
     Read, process, and save a single chunk of an SLC image.
@@ -83,6 +81,7 @@ def import_slice(
         deramp_flag: If True, apply phase deramping.
         chunk: A dictionary describing the specific slice (region) to process.
     """
+    chunk = chunk or {}
     # --- Read Data Chunk ---
     # Skip if the polarization doesn't match the target.
     if processed_pol not in slc.polarization.values:
@@ -123,12 +122,7 @@ def import_image(
     deramp: bool = False,
     apply_invalid_mask_flag: bool = False,
     do_import: bool = True,
-    chunks: dict[Hashable, int] = {
-        "azimuth_time": 2048,
-        "slant_range_time": 2048,
-        "acquisition_id": 1,
-        "polarization": 1,
-    },
+    chunks: dict[Hashable, int] | None = None,
     compute_on_host: bool = True,
     enable_dask: bool = True,
     **kwargs,
@@ -150,11 +144,19 @@ def import_image(
         deramp: If True, apply phase deramping.
         apply_invalid_mask_flag: If True, apply an invalid data mask.
         chunks: Dask chunking configuration.
+                defaults to {"azimuth_time": 2048, "slant_range_time": 2048, "acquisition_id": 1, "polarization": 1}
         reread: If True, reread the data from disk and return it.
 
     Returns:
         An xarray.DataTree of the processed image if `reread` is True, otherwise None.
     """
+    if chunks is None:
+        chunks = {
+            "azimuth_time": 2048,
+            "slant_range_time": 2048,
+            "acquisition_id": 1,
+            "polarization": 1,
+        }
     multiburst = kwargs["multiburst"]
     # --- Metadata and Coordinate Extraction ---
     pols = []
@@ -289,16 +291,16 @@ def import_image(
                 obj=obj,
                 args=args,
                 enable_dask=enable_dask,
-                chunksizes=chunksizes,
+                chunksizes=chunksizes,  # type: ignore
                 combine=False,
                 compute_on_host=compute_on_host,
                 store_mapping={0: save_options},
             )
 
-    image = read(data_path, storage_options=get_storage_options(kwargs))
-    if not isinstance(image, xr.DataTree):
-        raise ValueError(f"Expected xr.DataTree, got {type(image)}")
-    return (group, image)
+    image_dt = read(data_path, as_type=None, storage_options=get_storage_options(kwargs))
+    if not isinstance(image_dt, xr.DataTree):
+        raise TypeError(f"Expected xr.DataTree, got {type(image_dt)}")
+    return (group, image_dt)
 
 
 def group_discover(
@@ -341,9 +343,8 @@ def group_discover(
         annot = ds.sicd_meta[index]
         pol = annot.get_processed_polarization().replace(":", "")
         # Filter by polarization if specified.
-        if polarizations:
-            if pol not in polarizations:
-                continue
+        if polarizations and pol not in polarizations:
+            continue
 
         # --- Define the output group path ---
         if multiburst:
@@ -364,6 +365,8 @@ def group_discover(
             if (aoi_wkt is not None) and (not intersect(footprint, aoi_wkt)):
                 continue
             # Generate a unique group ID based on swath and burst ID.
+            if not isinstance(in_path, str):
+                raise TypeError(f"Expected a string, got {type(in_path)}")
             if not is_s3_path(in_path):
                 swath, burstid = get_burst_id(annot)
             else:
@@ -402,7 +405,7 @@ def import_slc(
     polarizations: list[str] | None = None,
     apply_invalid_mask_flag: bool = False,
     do_import: bool = True,
-    chunks={"acquisition_id": 1, "azimuth_time": 2048, "slant_range_time": 2048},
+    chunks=None,
     enable_dask: bool = True,
     **kwargs,
 ) -> list[xr.DataTree]:
@@ -426,10 +429,13 @@ def import_slc(
         reread: If True, reread the data from disk after processing and return it.
         apply_invalid_mask_flag: If True, apply a mask for invalid data.
         chunks: Dask chunking configuration.
+                Defaults to {"acquisition_id": 1, "azimuth_time": 2048, "slant_range_time": 2048}
 
     Returns:
         An xarray.DataTree of the processed data if `reread` is True, otherwise None.
     """
+    if chunks is None:
+        chunks = {"acquisition_id": 1, "azimuth_time": 2048, "slant_range_time": 2048}
     storage_options = get_storage_options(kwargs, key="storage_options_slc")
     # Use a temporary directory for local processing, especially for S3 inputs.
     in_local_path = None
@@ -441,7 +447,7 @@ def import_slc(
         in_path if in_local_path is None else in_local_path, aoi_wkt, multiburst, indices, polarizations
     )
     # Prepare the arguments for the `import_image` map operation.
-    args = [[index for index in group_dict.keys()], [group for group in group_dict.values()]]
+    args = [[index for index in group_dict], [group for group in group_dict.values()]]
 
     # Map the `import_image` function over the discovered groups.
     map_results = map(
@@ -466,7 +472,7 @@ def import_slc(
     )
     # If requested, open and return the DataTree from the output path.
     if not isinstance(map_results, list):
-        raise ValueError(f"Expected list of xr.DataTree, got {type(map_results)}")
+        raise TypeError(f"Expected list of xr.DataTree, got {type(map_results)}")
     return map_results
 
 
@@ -483,7 +489,7 @@ def import_slc_stack(
     polarizations: list[str] | None = None,
     apply_invalid_mask_flag: bool = False,
     do_import: bool = True,
-    chunks={"polarization": 1, "acquisition_id": 1, "azimuth_time": 2048, "slant_range_time": 2048},
+    chunks=None,
     enable_dask: bool = True,
     **kwargs,
 ) -> xr.DataTree:
@@ -509,10 +515,13 @@ def import_slc_stack(
         polarizations: A string specifying the polarizations to process (e.g., "VV VH").
         apply_invalid_mask_flag: If True, apply a mask to zero out invalid data regions.
         chunks: A dictionary defining the chunk sizes for Dask processing.
+                defaults to {"polarization": 1, "acquisition_id": 1, "azimuth_time": 2048, "slant_range_time": 2048}
 
     Returns:
         An xarray.DataTree containing the fully processed and consolidated SLC stack.
     """
+    if chunks is None:
+        chunks = {"polarization": 1, "acquisition_id": 1, "azimuth_time": 2048, "slant_range_time": 2048}
 
     if not or_f:
         raise ValueError("The input list cannot be empty.")
@@ -533,7 +542,7 @@ def import_slc_stack(
     )
 
     if not isinstance(res, list):
-        raise Exception(f"Expected list, got {type(res)}")
+        raise TypeError(f"Expected list, got {type(res)}")
     # Merge the list of dictionaries from all workers into a single dictionary of groups.
     groups = merge_dict(res)
     # --- Step 2: Initialize Output Storage ---
@@ -568,7 +577,7 @@ def import_slc_stack(
     # --- Step 4: Reread and Return Result ---
     # After all workers have finished writing, open the consolidated Zarr store.
     if not isinstance(map_results, list):
-        raise ValueError(f"Expected list of xr.DataTree, got {type(map_results)}")
+        raise TypeError(f"Expected list of xr.DataTree, got {type(map_results)}")
     for result in map_results:
         for group, slc in result:
             slcs[group] = slc
@@ -693,11 +702,11 @@ def finalize_import(
                 raise RuntimeError("No reference image found for any bursts. DataTree is empty.")
     else:
         if recompute:
-            acquisition_ids = list(slcs.orig.keys())
+            acquisition_ids = list(slcs.orig.keys())  # type: ignore
             if len(acquisition_ids) != 1:
                 raise ValueError(f"Expected exactly one acquisition id when recompute=True, got {len(acquisition_ids)}")
 
-            acquisition_id = acquisition_ids[0]
+            acquisition_id = next(iter(acquisition_ids))
             logger.info(f"Saving reference SLC {acquisition_id} to static working directory (non-multiburst).")
             save_slc_static(
                 "data",
@@ -871,37 +880,37 @@ def updateOrbits(slc: xr.DataTree) -> xr.Dataset:
     """
     # --- Extract Orbits from Annotations ---
     # This provides a baseline set of orbit data from the original product files.
-    orbits = extract_orbits(slc, multiburst=False)
-    orbits = orbits.to_dataset(name="coeffs")
-    num_dates = orbits.sizes["acquisition_id"]
-    orbits["reference_time"] = (
+    orbits_da = extract_orbits(slc, multiburst=False)
+    orbits_ds = orbits_da.to_dataset(name="coeffs")
+    num_dates = orbits_ds.sizes["acquisition_id"]
+    orbits_ds["reference_time"] = (
         "acquisition_id",
-        [orbits.coeffs.reference_times[date] for date in orbits.acquisition_id.values],
+        [orbits_ds.coeffs.reference_times[date] for date in orbits_ds.acquisition_id.values],
     )
-    orbits["type"] = ("acquisition_id", ["AUX_ANNOTATED"] * num_dates)
-    orbits["orbit_files"] = ("acquisition_id", [""] * num_dates)
+    orbits_ds["type"] = ("acquisition_id", ["AUX_ANNOTATED"] * num_dates)
+    orbits_ds["orbit_files"] = ("acquisition_id", [""] * num_dates)
     for date_key, v in slc.orig.items():
         if ("conditions" in v) and ("orbit" in v.conditions):
             precise_orbit = v.conditions.orbit
             # Safely locate the specific date across the DataArray
             loc_dict = {"acquisition_id": date_key}
             # Overwrite the coefficients
-            orbits["coeffs"].loc[loc_dict] = precise_orbit.coeffs.loc[loc_dict]
+            orbits_ds["coeffs"].loc[loc_dict] = precise_orbit.coeffs.loc[loc_dict]
             # Overwrite the metadata to reflect the precise orbit
-            orbits["type"].loc[loc_dict] = precise_orbit.attrs.get("orbit_type", "AUX_POEORB")
+            orbits_ds["type"].loc[loc_dict] = precise_orbit.attrs.get("orbit_type", "AUX_POEORB")
             # Extract the orbit file name (accounting for lists or strings in the attributes)
             if "orbit_files" in precise_orbit.attrs:
                 file_attr = precise_orbit.attrs["orbit_files"]
                 file_name = file_attr[0] if isinstance(file_attr, list) else file_attr
-                orbits["orbit_files"].loc[loc_dict] = file_name
+                orbits_ds["orbit_files"].loc[loc_dict] = file_name
 
             # Overwrite reference time if the precise orbit has a different one
             if "reference_time" in precise_orbit.attrs:
-                orbits["reference_time"].loc[loc_dict] = precise_orbit.attrs["reference_time"]
+                orbits_ds["reference_time"].loc[loc_dict] = precise_orbit.attrs["reference_time"]
 
-    orbits = orbits.chunk(axis=-1, degree=-1, acquisition_id=1)
+    orbits_ds = orbits_ds.chunk(axis=-1, degree=-1, acquisition_id=1)
 
-    return orbits
+    return orbits_ds
 
 
 def updateETAD(
@@ -948,9 +957,6 @@ def updateETAD(
     for k, v in slc.orig.items():
         if ("conditions" in v) and ("ETAD" in v.conditions):
             etad = v.conditions.ETAD.to_dataset()
-            annot = v.measurements.slc.attrs
-            annot = annot[list(annot)[0]]
-            center_frequency = annot["RMA"]["INCA"]["FreqZero"]
             # Select coregistration shifts for the current acquisition
             daz = measurements.daz.sel(acquisition_id=k)
             drg = measurements.drg.sel(acquisition_id=k)
@@ -1020,8 +1026,6 @@ def updateLookVector(
     idx_rg = np.linspace(0, len(slant_range_time) - 1, grid_size[1], dtype=int)
     az_sampled = azimuth_time[idx_az]
     rg_sampled = slant_range_time[idx_rg]
-
-    target_coords = {"azimuth_time": az_sampled, "slant_range_time": rg_sampled}
 
     dt_az_ns = (az_sampled.max() - az_sampled.min()).astype(float).values / (az_sampled.size - 1)
     dt_rg_s = (rg_sampled.max() - rg_sampled.min()).values / (rg_sampled.size - 1)

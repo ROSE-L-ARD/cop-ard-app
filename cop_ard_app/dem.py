@@ -1,4 +1,5 @@
-from typing import Any, Dict, Mapping, Sequence, cast
+from collections.abc import Mapping, Sequence
+from typing import Any, cast
 
 import numpy as np
 import xarray as xr
@@ -21,7 +22,7 @@ def dem_reproject(
     spacing: dict[str, Any],
     outproj: str | int,
     data_path: str,
-    chunks: dict = {"x": 2048, "y": 2048},
+    chunks: dict | None = None,
     enable_dask: bool = True,
     **kwargs,
 ) -> xr.Dataset:
@@ -44,6 +45,7 @@ def dem_reproject(
         The path where the reprojected DEM Zarr store will be created.
     chunks : dict
         A dictionary defining the chunk sizes for Dask processing.
+        Defaults to {"x": 2048, "y": 2048}
     enable_dask : bool
         If True, use Dask for parallel computation.
     **kwargs
@@ -54,16 +56,17 @@ def dem_reproject(
     xarray.Dataset
         The reprojected DEM as an xarray.Dataset, read back from the Zarr store.
     """
+    chunks = chunks or {"x": 2048, "y": 2048}
     method = kwargs.pop("method", "cubic")
     # Ensure the input DEM has 'x' and 'y' coordinates.
-    if (all([i in dem.coords for i in ["x", "y"]])) is False:
-        raise Exception('DEM dataset coordinates must contain "x" and "y"')
+    if (all(i in dem.coords for i in ["x", "y"])) is False:
+        raise ValueError('DEM dataset coordinates must contain "x" and "y"')
     dem_ds = dem.to_dataset(name="z")
 
     # --- CRS Handling ---
     CRS_EPSG = f"EPSG:{outproj}" if not str(outproj).startswith("EPSG:") else outproj
     if not isinstance(CRS_EPSG, str):
-        raise Exception(f"Expected str, got {type(CRS_EPSG)}")
+        raise TypeError(f"Expected str, got {type(CRS_EPSG)}")
     # Create 3D CRS objects for robust transformation.
     in_crs, out_crs = CRS(dem.rio.crs).to_3d(), CRS(CRS_EPSG).to_3d()
     dem_ds.rio.write_crs(in_crs, inplace=True)
@@ -125,7 +128,7 @@ def single_dem(
     spacing: dict[str, float],
     working_directory_static: str,
     working_directory_tmp: str,
-    chunks: dict = {"x": 2048, "y": 2048},
+    chunks: dict | None = None,
     crs: str | None = None,
     reference_id: str | None = None,
     enable_dask: bool = True,
@@ -156,6 +159,7 @@ def single_dem(
         The root directory for outputs.
     chunks : dict
         A dictionary defining chunk sizes for processing.
+        Defaults to {"x": 2048, "y": 2048}
     crs
         The target EPSG code. If None, it will be automatically determined.
     enable_dask : bool
@@ -170,9 +174,10 @@ def single_dem(
     tuple
         A tuple containing the burst_id and the reprojected DEM Dataset.
     """
+    chunks = chunks or {"x": 2048, "y": 2048}
     # Define the output path for this burst.
     if (not multiburst) and (reference_id is None):
-        raise ValueError(f"In single burst case, the reference_id is mandatory")
+        raise ValueError("In single burst case, the reference_id is mandatory")
     path = f"bursts/{burst_id}" if multiburst else f"data/{reference_id}"
     data_path = normpath(f"{working_directory_tmp}/{path}")
     simulation_path = f"{working_directory_static}/processed_data/{path}/simulation.ok"
@@ -185,7 +190,7 @@ def single_dem(
         lon = []
         # Collect the corner coordinates from all original images in this burst.
         for attrs in slc_attrs:
-            annot = attrs[list(attrs)[0]]
+            annot = attrs[next(iter(attrs))]
             for v in annot["GeoData"]["ImageCorners"]:
                 lat.append(v["Lat"])
                 lon.append(v["Lon"])
@@ -222,7 +227,7 @@ def stack_dem(
     spacing: dict[str, float],
     working_directory_static: str,
     working_directory_tmp: str,
-    chunks: dict = {"x": 2048, "y": 2048},
+    chunks: dict | None = None,
     crs: str | None = None,
     reference_id: str | None = None,
     enable_dask: bool = True,
@@ -252,6 +257,7 @@ def stack_dem(
         The root directory for all processing outputs.
     chunks : dict
         A dictionary defining the chunk sizes for Dask processing.
+        Defaults to {"x": 2048, "y": 2048}
     crs
         The target EPSG code. If None, it will be automatically determined.
     **kwargs
@@ -262,6 +268,7 @@ def stack_dem(
     xarray.DataTree
         An xarray.DataTree containing the reprojected DEM for each burst or scene.
     """
+    chunks = chunks or {"x": 2048, "y": 2048}
     # --- Determine Target CRS ---
     if crs is None:
         # If no CRS is specified, determine the default UTM/UPS zone.
@@ -349,12 +356,11 @@ def import_dem(
             storage_options=get_storage_options(kwargs, key="storage_options_dem"),
         )
         if not dem.rio.crs:
-            raise Exception(f"Input DEM projection not defined {dem} {dem.rio.crs}")
+            raise ValueError(f"Input DEM projection not defined {dem} {dem.rio.crs}")
 
         # Standardize coordinate names if the CRS is geographic.
-        if dem.rio.crs.is_geographic:
-            if all([i in dem.coords for i in ["lon", "lat"]]):
-                dem = dem.rename({"lat": "y", "lon": "x"})
+        if dem.rio.crs.is_geographic and all(i in dem.coords for i in ["lon", "lat"]):
+            dem = dem.rename({"lat": "y", "lon": "x"})
 
         # Preserve original chunking for efficient clipping.
         chunksize = {e: dem.chunksizes[e][0] for e in dem.coords if e in ["x", "y", "lon", "lat"]}
@@ -372,16 +378,19 @@ def import_dem(
         dem = dem.drop_encoding()
 
     # Convert the Dataset to a DataArray named 'z'.
-    dem = dem.to_array(name="z").squeeze(drop=True)
+    dem_da = dem.to_array(name="z").squeeze(drop=True)
 
     # --- NaN Handling ---
     # Ensure spatial dimensions are strictly recognized
-    dem.rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=True)
+    dem_da.rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=True)
 
     # Write the processed DEM to a Zarr store in the working directory.
     if (dem_type == "Copernicus") or dem_type.startswith("https://"):
-        dem = write(dem, normpath(f"{working_dir}/dem"), storage_options=get_storage_options(kwargs))
-        if not isinstance(dem, xr.DataArray):
-            raise Exception("Error reopening DEM dataarray")
+        write(dem_da, normpath(f"{working_dir}/dem"), storage_options=get_storage_options(kwargs), skip_read=True)
+        dem_da = read(
+            normpath(f"{working_dir}/dem"), as_type="xr.DataArray", storage_options=get_storage_options(kwargs)
+        )
+        if not isinstance(dem_da, xr.DataArray):
+            raise ValueError("Error reopening DEM dataarray")
 
-    return dem
+    return dem_da

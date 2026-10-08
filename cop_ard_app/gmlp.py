@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Generator, cast
+from typing import cast
 
 import numpy as np
 import xarray as xr
@@ -20,7 +20,7 @@ from cop_ard_core.gmlp import get_radar_spacing, warp_cmlp
 from cop_ard_core.griddata import interp_dataset, interp_dataset_scaled
 from cop_ard_core.logger import logger, timeit
 from cop_ard_core.simul import extract_simul_on_radar_chunk, get_geo_from_radar_bbox, get_radar_bbox
-from cop_ard_core.warp import extract_rg_az, sinc
+from cop_ard_core.warp import sinc
 
 from cop_ard_app.computation import map, map_blocks
 from cop_ard_app.io import get_storage_options, normpath, read, save_empty_dataset
@@ -41,7 +41,7 @@ def stack_gmlp(
     working_directory_static: str,
     working_directory_tmp: str,
     enable_dask: bool = True,
-    chunks: dict = {"acquisition_date": 1, "past_reference_date": 1, "polarization": 1, "y": 2048, "x": 2048},
+    chunks: dict | None = None,
     **kwargs,
 ):
     """
@@ -76,6 +76,9 @@ def stack_gmlp(
         A dictionary of options for configuring the Dask client.
     multiburst : bool, optional
         A boolean flag indicating if the data is in multiburst format.
+    chunks : dict, optional
+        Chunksizes to be used in GMLP processing.
+        Defaults to {"acquisition_date": 1, "past_reference_date": 1, "polarization": 1, "y": 2048, "x": 2048}
     **kwargs
         Additional keyword arguments passed to the processing functions,
         such as `warp_kernel_shape`.
@@ -85,18 +88,18 @@ def stack_gmlp(
     xr.DataTree
         A new DataTree containing the geocoded SLC (GSLC) data for each burst.
     """
+    chunks = chunks or {"acquisition_date": 1, "past_reference_date": 1, "polarization": 1, "y": 2048, "x": 2048}
     multiburst = "bursts" in cmlp_tree
     args = []
     # --- Prepare Arguments for Parallel Mapping ---
     for k, v in (cmlp_tree.bursts if multiburst else {"data": cmlp_tree}).items():
         slc_node = slcs["bursts"][k] if multiburst else slcs
         conditions = slc_node["coreg/conditions"]
-        orbit = conditions["orbit"]
         etad = conditions.get("ETAD")  # Safely returns None if ETAD isn't present
 
         # Extract only 'phase' variables
         measurements_ds = slc_node["coreg/measurements"].to_dataset()
-        phase_vars = [var for var in list(measurements_ds.data_vars) if "phase" in var]
+        phase_vars = [var for var in list(measurements_ds.data_vars) if "phase" in str(var)]
         phase = measurements_ds[phase_vars]
         dates_ids = {k: v for k, v in zip(phase.acquisition_date.values, phase.acquisition_id.values)}
         s = (simulation_tree.bursts[k] if multiburst else simulation_tree).to_dataset()
@@ -272,7 +275,7 @@ def map_geocoding_cmlp(
     enable_dask: bool = True,
     border: int = 10,
     **kwargs,
-) -> tuple[str, str, xr.Dataset]:
+) -> tuple[str, str, xr.DataTree]:
     """
     Orchestrate the block-wise geocoding of a single coregistered SLC.
 
@@ -309,7 +312,7 @@ def map_geocoding_cmlp(
 
     Returns
     -------
-    xr.Dataset or None
+    xr.DataTree or None
         The geocoded Dataset if `skip_read` is False, otherwise None.
     """
 
@@ -363,7 +366,7 @@ def map_geocoding_cmlp(
             dims[var_name] = DIMS
 
     # 3. Shape e Dtype trasparenti per 2D, 3D o 4D (zero KeyError)
-    shape = {k: [*da.shape[:-2], y.size, x.size] for k, da in all_vars.items()}
+    dataset_shape = {k: [*da.shape[:-2], y.size, x.size] for k, da in all_vars.items()}
     dtype = {k: da.dtype.name for k, da in all_vars.items()}
     dtype["mask"] = np.int8
 
@@ -378,7 +381,7 @@ def map_geocoding_cmlp(
     image = save_empty_dataset(
         data_vars=list(all_vars),
         dims=dims,
-        shape=shape,
+        shape=dataset_shape,
         chunks=ch,
         dtype=dtype,
         coords=coords,
@@ -574,7 +577,7 @@ def blockwise_interp_cmlp(
     dtrg_slc: float,
     margin: int = 5,
     method: str = "linear",
-    chunk: dict = {},
+    chunk: dict | None = None,
     **kwargs,
 ) -> xr.Dataset:
     """Warp coregistered SLC and phase data to a ground-projected geographical grid.
@@ -627,6 +630,7 @@ def blockwise_interp_cmlp(
     xr.Dataset
         Geocoded output dataset aligned to the target (y, x) spatial grid.
     """
+    chunk = chunk or {}
     shape = image.shape
 
     # --- 1. Simulation Bounding Box & Subsetting ---
