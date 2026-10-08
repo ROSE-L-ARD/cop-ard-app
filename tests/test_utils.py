@@ -2,15 +2,23 @@ import numpy as np
 import pytest
 import xarray as xr
 
+from cop_ard_app.model import get_az_rg_times
 from cop_ard_app.utils import (
     build_coreg_poly_dict,
     compute_chunks,
+    compute_iono_and_orb_height,
+    get_bbox,
     get_best_pol,
     get_margin,
     get_poly,
     get_spacing,
+    get_stack_phramp_diff,
     sanitize_coordinates,
+    save_single_burst,
     slice_and_drop_coordinates,
+    sparse_multilook,
+    sparse_multilook_core,
+    update_reference_database,
 )
 
 N_AZ = 8
@@ -33,6 +41,30 @@ CHUNK_X = (16,)
 TIMECA = [0.0, 1.0]
 AZ_SPACING = 1e-6
 RG_SPACING = 1.0
+
+# scene metadata fixtures for get_stack_phramp_diff
+SCP_COL = N_AZ // 2
+SCP_ROW = N_RG // 2
+COL_SS = 1.0
+ROW_SS = 1.0
+DKCOA = [[0.05, 0.0], [0.0, 0.0]]
+COLLECT_START = "2020-01-01T00:00:00"
+R_CA_SCP = 800_000.0
+Y_POLY_OFF_Y = str(T0 + np.timedelta64(4, "s"))
+
+# scene corners for get_bbox: (lat, lon) pairs per acquisition date, and the expected
+# bounding boxes rounded outward to one decimal place
+CORNERS = {
+    MASTER: [(41.234, 12.345), (41.234, 12.999), (41.9, 12.999), (41.9, 12.345)],
+    SECONDARIES[0]: [(40.0, 11.0), (40.0, 13.5), (43.0, 13.5), (43.0, 11.0)],
+}
+BBOX_MASTER = [12.3, 41.2, 13.0, 41.9]
+BBOX_BOTH = [11.0, 40.0, 13.5, 43.0]
+
+# ARPPos on the geoid sphere 700 km above the equator, so h_orb is known in closed form
+ARPPOS = {"X": 6_378_137.0 + 700_000.0, "Y": 0.0, "Z": 0.0}
+H_ORB = 700_000.0
+DEFAULT_IONO = 350_000.0
 
 
 def _measurements(dates, az_dt=AZ_DT, rg_dt=RG_DT, az0=0, rg0=0.0):
@@ -86,6 +118,104 @@ def _correction_poly(coefficients, off_y=None, offset=(0.0, 0.0), scale_fact=(1.
     if off_y is not None:
         attrs["off_y"] = off_y
     return xr.Dataset({SECONDARIES[0]: xr.DataArray(np.asarray(coefficients), dims=["i"], attrs=attrs)})
+
+
+def _annotation(dkcoa=DKCOA):
+    """Minimal SAR metadata dictionary as consumed by get_az_rg_times and get_coefficients."""
+    return {
+        "ImageData": {
+            "FullImage": {"NumCols": N_AZ, "NumRows": N_RG},
+            "SCPPixel": {"Col": SCP_COL, "Row": SCP_ROW},
+        },
+        "RMA": {"INCA": {"TimeCAPoly": {"Coefs": list(TIMECA)}, "R_CA_SCP": R_CA_SCP}},
+        "Timeline": {"CollectStart": COLLECT_START},
+        "Grid": {
+            "Col": {
+                "SS": COL_SS,
+                "DeltaKCOAPoly": {"Coefs": [list(r) for r in dkcoa]} if dkcoa is not None else {},
+            },
+            "Row": {"SS": ROW_SS},
+        },
+    }
+
+
+def _stack_times():
+    """Azimuth/slant-range coordinate arrays consistent with _annotation()."""
+    azimuth_time, slant_range_time = get_az_rg_times(_annotation())
+    return (
+        xr.DataArray(azimuth_time, dims=["azimuth_time"]),
+        xr.DataArray(slant_range_time, dims=["slant_range_time"]),
+    )
+
+
+def _shift_stack(value: float):
+    """daz (timedelta) and drg (float) stacks for a single acquisition."""
+    dims = ["acquisition_id", "azimuth_time", "slant_range_time"]
+    coords = {
+        "acquisition_id": [SECONDARIES[0]],
+        "azimuth_time": T0 + np.arange(N_AZ) * AZ_DT,
+        "slant_range_time": np.arange(N_RG, dtype=np.float64) * RG_DT,
+    }
+    daz = np.zeros((1, N_AZ, N_RG)).astype("timedelta64[ns]") + np.timedelta64(int(value * 1e9), "ns")
+    drg = np.zeros((1, N_AZ, N_RG), dtype=np.float64)
+    return xr.DataArray(daz, dims=dims, coords=coords), xr.DataArray(drg, dims=dims, coords=coords)
+
+
+def _scene_poly(shift: float):
+    """Constant azimuth correction polynomial with the attributes get_phramp_diff expects."""
+    return xr.Dataset(
+        {
+            SECONDARIES[0]: xr.DataArray(
+                np.array([[shift]], dtype=np.float64),
+                dims=["i", "j"],
+                attrs={"deg": 0, "offset": (0.0, 0.0), "scale_fact": (1.0, 1.0), "off_y": Y_POLY_OFF_Y},
+            )
+        }
+    )
+
+
+def _coherence_dataset(seed: int = 3):
+    """A measurements-like Dataset with the coherence/value variables sparse_multilook aggregates."""
+    rng = np.random.default_rng(seed)
+    return xr.Dataset(
+        {
+            "coherence": (["azimuth_time", "slant_range_time"], rng.random((N_AZ, N_RG))),
+            "value": (["azimuth_time", "slant_range_time"], rng.standard_normal((N_AZ, N_RG))),
+        },
+        coords={
+            "azimuth_time": T0 + np.arange(N_AZ) * AZ_DT,
+            "slant_range_time": np.arange(N_RG, dtype=np.float64),
+        },
+    )
+
+
+def _scene_tree(bursts, dates, corners=None, arppos=None, multiburst=True):
+    """SLC DataTree with coreg/measurements and orig nodes carrying scene metadata."""
+    tree = xr.DataTree()
+    for burst in bursts:
+        prefix = f"bursts/{burst}/" if multiburst else ""
+        tree[f"{prefix}coreg/measurements"] = _measurements(dates)
+        for date in dates:
+            path = f"{prefix}orig/{date}/measurements/slc"
+            slc = xr.Dataset(
+                {"x": ("azimuth_time", np.arange(N_AZ, dtype=np.float64))},
+                coords={"azimuth_time": T0 + np.arange(N_AZ) * AZ_DT},
+            )
+            scene = {}
+            if corners is not None:
+                scene["GeoData"] = {"ImageCorners": [{"Lat": la, "Lon": lo} for la, lo in corners[date]]}
+            if arppos is not None:
+                scene["SCPCOA"] = {"ARPPos": arppos}
+            slc.attrs = {POL: scene}
+            tree[path] = slc
+    return tree
+
+
+def _reference_tree(prefix, dates):
+    """A current/stable reference tree, as consumed by update_reference_database."""
+    tree = xr.DataTree()
+    tree[f"{prefix}measurements"] = xr.Dataset({"cstack": _measurements(dates)["cstack"]})
+    return tree
 
 
 class TestGetMargin:
@@ -343,3 +473,319 @@ class TestBuildCoregPolyDict:
     @pytest.mark.unit
     def test_build_coreg_poly_dict_without_polynomials_is_empty(self):
         assert build_coreg_poly_dict("nothing applied") == {"description": "nothing applied", "acquisitions": {}}
+
+
+class TestGetStackPhrampDiff:
+    """Unit test for cop_ard_app.utils.get_stack_phramp_diff.
+
+    With a zero shift stack, a constant DeltaKCOAPoly of DKCOA and a constant azimuth
+    polynomial of `shift` pixels moves the modulation phase ramp by 2 * pi * DKCOA * shift
+    radians at every pixel of the acquisition grid.
+    """
+
+    @pytest.mark.unit
+    def test_zero_polynomial_is_a_zero_correction(self):
+        azimuth_time, slant_range_time = _stack_times()
+        daz, drg = _shift_stack(0.0)
+        res = get_stack_phramp_diff(
+            xr.DataArray([SECONDARIES[0]], dims=["acquisition_id"]),
+            azimuth_time,
+            slant_range_time,
+            drg,
+            daz,
+            {SECONDARIES[0]: _annotation()},
+            _scene_poly(0.0),
+        )
+        assert res.dims == ("acquisition_id", "azimuth_time", "slant_range_time")
+        assert res.sizes == {"acquisition_id": 1, "azimuth_time": N_AZ, "slant_range_time": N_RG}
+        assert np.all(res.values == 0.0)
+
+    @pytest.mark.unit
+    def test_recovers_a_constant_azimuth_shift(self):
+        azimuth_time, slant_range_time = _stack_times()
+        daz, drg = _shift_stack(0.0)
+        shift = 2.0
+        res = get_stack_phramp_diff(
+            xr.DataArray([SECONDARIES[0]], dims=["acquisition_id"]),
+            azimuth_time,
+            slant_range_time,
+            drg,
+            daz,
+            {SECONDARIES[0]: _annotation()},
+            _scene_poly(shift),
+        )
+        expected = 2 * np.pi * DKCOA[0][0] * shift
+        assert np.allclose(res.values, expected, atol=1e-9)
+        assert np.all(np.isfinite(res.values))
+
+    @pytest.mark.unit
+    def test_multilook_coarsens_the_shift_stack_before_the_ramp(self):
+        azimuth_time, slant_range_time = _stack_times()
+        daz, drg = _shift_stack(0.0)
+        # the ramp is requested on a grid half the resolution of the shift stack
+        coarse_az = azimuth_time.isel(azimuth_time=slice(None, None, 2))
+        coarse_rg = slant_range_time.isel(slant_range_time=slice(None, None, 2))
+        res = get_stack_phramp_diff(
+            xr.DataArray([SECONDARIES[0]], dims=["acquisition_id"]),
+            coarse_az,
+            coarse_rg,
+            drg,
+            daz,
+            {SECONDARIES[0]: _annotation()},
+            _scene_poly(2.0),
+            multilook={"azimuth_time": 2, "slant_range_time": 2},
+        )
+        # coarsening a constant shift stack leaves it constant, so the ramp is unchanged
+        assert res.sizes == {"acquisition_id": 1, "azimuth_time": N_AZ // 2, "slant_range_time": N_RG // 2}
+        assert np.allclose(res.values, 2 * np.pi * DKCOA[0][0] * 2.0, atol=1e-9)
+
+    @pytest.mark.unit
+    def test_rejects_an_annotation_without_delta_kcoa_coefficients(self):
+        azimuth_time, slant_range_time = _stack_times()
+        daz, drg = _shift_stack(0.0)
+        with pytest.raises(ValueError, match="Missing DeltaKCOA polynomial coefficients"):
+            get_stack_phramp_diff(
+                xr.DataArray([SECONDARIES[0]], dims=["acquisition_id"]),
+                azimuth_time,
+                slant_range_time,
+                drg,
+                daz,
+                {SECONDARIES[0]: _annotation(dkcoa=None)},
+                _scene_poly(0.0),
+            )
+
+
+class TestSparseMultilook:
+    """Unit test for cop_ard_app.utils.sparse_multilook and sparse_multilook_core.
+
+    The aggregation (coordinate change, coherence masking, block indexing and grouped median)
+    runs to completion; the pinned xarray release then rejects the final `xr.Dataset(<Dataset>)`
+    reassembly, so the public entry point raises a TypeError once it is done.
+    """
+
+    @pytest.mark.unit
+    def test_sparse_multilook_rejects_unknown_multilook_dimensions(self):
+        with pytest.raises(ValueError, match=r"Not all \['azimuth_time', 'nope'\] in"):
+            sparse_multilook(_coherence_dataset(), cohe_th=0.5, multilook={"azimuth_time": 2, "nope": 2})
+
+    @pytest.mark.unit
+    def test_sparse_multilook_aggregates_before_the_final_reassembly(self):
+        with pytest.raises(TypeError, match="Passing a Dataset as"):
+            sparse_multilook(_coherence_dataset(), cohe_th=0.5, multilook={"azimuth_time": 2, "slant_range_time": 2})
+
+    @pytest.mark.unit
+    def test_sparse_multilook_declares_the_multilook_on_the_input_dims(self):
+        # a grid already linearized for sparse_multilook_core is not a valid input here
+        with pytest.raises(ValueError, match=r"Not all \['azimuth_time', 'slant_range_time'\] in"):
+            sparse_multilook(
+                _coherence_dataset()
+                .assign_coords(
+                    {
+                        "y_": ("azimuth_time", np.arange(N_AZ, dtype=float)),
+                        "x_": ("slant_range_time", np.arange(N_RG, dtype=float)),
+                    }
+                )
+                .swap_dims({"azimuth_time": "y_", "slant_range_time": "x_"}),
+                cohe_th=0.5,
+                multilook={"azimuth_time": 2, "slant_range_time": 2},
+            )
+
+    @pytest.mark.unit
+    def test_sparse_multilook_core_groups_the_median_by_block(self):
+        data = (
+            _coherence_dataset()
+            .assign_coords(
+                {
+                    "y_": ("azimuth_time", np.arange(N_AZ, dtype=float)),
+                    "x_": ("slant_range_time", np.arange(N_RG, dtype=float)),
+                }
+            )
+            .swap_dims({"azimuth_time": "y_", "slant_range_time": "x_"})
+        )
+        with pytest.raises(TypeError, match="Passing a Dataset as"):
+            sparse_multilook_core(data, cohe_th=0.5, multilook={"y_": 2, "x_": 2})
+
+
+class TestGetBbox:
+    """Unit test for cop_ard_app.utils.get_bbox."""
+
+    @pytest.mark.unit
+    def test_get_bbox_encompasses_every_scene_corner(self):
+        slcs = _scene_tree(BURSTS, [MASTER, SECONDARIES[0]], corners=CORNERS)
+        assert get_bbox(slcs) == BBOX_BOTH
+
+    @pytest.mark.unit
+    def test_get_bbox_rounds_the_scene_corners_outward(self):
+        slcs = _scene_tree(BURSTS[:1], [MASTER, SECONDARIES[0]], corners=CORNERS)
+        # restricting to the reference date keeps only its corners in the bounding box
+        assert get_bbox(slcs, reference_date=MASTER) == BBOX_MASTER
+
+    @pytest.mark.unit
+    def test_get_bbox_accepts_a_single_burst_layout(self):
+        slcs = _scene_tree(["b1"], [MASTER], corners=CORNERS, multiburst=False)
+        assert get_bbox(slcs) == BBOX_MASTER
+
+
+class TestSaveSingleBurst:
+    """Unit test for cop_ard_app.utils.save_single_burst (writes to temporary zarr stores)."""
+
+    @pytest.mark.unit
+    def test_save_single_burst_writes_current_and_stable_references(self, tmp_path):
+        save_single_burst(
+            "b1", _measurements([MASTER])["cstack"], _measurements(list(SECONDARIES))["cstack"], str(tmp_path), True
+        )
+        assert (tmp_path / "bursts/b1/current_reference").is_dir()
+        assert (tmp_path / "bursts/b1/stable_reference" / SECONDARIES[0]).is_dir()
+        assert not (tmp_path / "bursts/b1/stable_reference" / MASTER).exists()
+
+    @pytest.mark.unit
+    def test_save_single_burst_without_stable_reference_skips_it(self, tmp_path):
+        save_single_burst("b1", _measurements([MASTER])["cstack"], None, str(tmp_path), True)
+        assert (tmp_path / "bursts/b1/current_reference").is_dir()
+        assert not (tmp_path / "bursts/b1/stable_reference").exists()
+
+    @pytest.mark.unit
+    def test_save_single_burst_single_burst_requires_reference_id(self, tmp_path):
+        with pytest.raises(ValueError, match="the reference_id is mandatory"):
+            save_single_burst("b1", _measurements([MASTER])["cstack"], None, str(tmp_path), False)
+        save_single_burst("b1", _measurements([MASTER])["cstack"], None, str(tmp_path), False, reference_id="r1")
+        assert (tmp_path / "data/r1/current_reference").is_dir()
+        assert not (tmp_path / "data/r1/stable_reference").exists()
+        assert not (tmp_path / "bursts").exists()
+
+
+class TestUpdateReferenceDatabase:
+    """Unit test for cop_ard_app.utils.update_reference_database.
+
+    The dask dispatch is replaced by a recorder: the unit under test is the argument
+    assembly (burst ids, current and stable references) handed over to `save_single_burst`.
+    """
+
+    @pytest.mark.unit
+    def test_update_reference_database_transposes_the_burst_arguments(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr("cop_ard_app.utils.map", lambda func, args, **kw: calls.append((func, args, kw)))
+        current = xr.DataTree()
+        stable = xr.DataTree()
+        for burst in BURSTS:
+            current[f"bursts/{burst}/measurements"] = xr.Dataset({"cstack": _measurements([MASTER])["cstack"]})
+            stable[f"bursts/{burst}/measurements"] = xr.Dataset({"cstack": _measurements(list(SECONDARIES))["cstack"]})
+        update_reference_database(current, stable, str(tmp_path))
+
+        ((func, args, dispatch),) = calls
+        assert func is save_single_burst
+        expected = {"reference_db_path": str(tmp_path), "multiburst": True, "reference_id": None}
+        assert dispatch == {"kwargs": expected, "enable_dask": True}
+        burst_ids, current_args, stable_args = args
+        assert burst_ids == tuple(BURSTS)
+        assert [c.sizes["acquisition_id"] for c in current_args] == [1, 1]
+        assert [s.sizes["acquisition_id"] for s in stable_args] == [1, 1]
+
+    @pytest.mark.unit
+    def test_update_reference_database_drops_a_dummy_stable_tree(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr("cop_ard_app.utils.map", lambda func, args, **kw: calls.append((func, args, kw)))
+        current = _reference_tree(f"bursts/{BURSTS[0]}/", [MASTER])
+        dummy = xr.DataTree(dataset=xr.Dataset({"status": xr.DataArray(0).assign_attrs(is_empty=True)}))
+        update_reference_database(current, dummy, str(tmp_path))
+
+        ((_, args, dispatch),) = calls
+        assert dispatch["kwargs"]["multiburst"] is True
+        assert args[0] == (BURSTS[0],)
+        assert args[1][0].sizes["acquisition_id"] == 1
+        assert args[2] == (None,)
+
+    @pytest.mark.unit
+    def test_update_reference_database_accepts_a_single_burst_layout(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr("cop_ard_app.utils.map", lambda func, args, **kw: calls.append((func, args, kw)))
+        current = _reference_tree("", [MASTER])
+        stable = _reference_tree("", list(SECONDARIES))
+        update_reference_database(current, stable, str(tmp_path), reference_id="r1")
+        ((func, args, dispatch),) = calls
+        assert func is save_single_burst
+        expected = {"reference_db_path": str(tmp_path), "multiburst": False, "reference_id": "r1"}
+        assert dispatch == {"kwargs": expected, "enable_dask": True}
+        burst_ids, current_args, stable_args = args
+        assert burst_ids == ("data",)
+        assert current_args[0].sizes["acquisition_id"] == 1
+        assert stable_args[0].sizes["acquisition_id"] == 1
+
+    @pytest.mark.unit
+    def test_update_reference_database_tolerates_a_missing_stable_node(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr("cop_ard_app.utils.map", lambda func, args, **kw: calls.append((func, args, kw)))
+        current = xr.DataTree()
+        stable = xr.DataTree()
+        for burst in BURSTS:
+            current[f"bursts/{burst}/measurements"] = xr.Dataset({"cstack": _measurements([MASTER])["cstack"]})
+        stable[f"bursts/{BURSTS[0]}/measurements"] = xr.Dataset({"cstack": _measurements(list(SECONDARIES))["cstack"]})
+        update_reference_database(current, stable, str(tmp_path))
+
+        ((_, args, _),) = calls
+        assert args[0] == tuple(BURSTS)
+        assert args[2][0] is not None
+        assert args[2][1] is None
+
+
+class TestComputeIonoAndOrbHeight:
+    """Unit test for cop_ard_app.utils.compute_iono_and_orb_height.
+
+    ARPPOS lies on the geoid sphere H_ORB metres above the equator, so the orbital height
+    is known in closed form. The ionospheric lookup hits the network, so it is stubbed.
+    """
+
+    @pytest.mark.unit
+    def test_recovers_the_orbital_height_of_the_reference_scene(self, tmp_path):
+        reference = _scene_tree(BURSTS[:1], [MASTER], arppos=ARPPOS)
+        secondary = _scene_tree(BURSTS[:1], [SECONDARIES[0]], arppos=ARPPOS)
+        h_orb, h_iono = compute_iono_and_orb_height(
+            reference, secondary, str(tmp_path), MASTER, iono_height_input=250_000.0
+        )
+        assert h_orb == pytest.approx(H_ORB, rel=1e-6)
+        assert h_iono == 250_000.0
+
+    @pytest.mark.unit
+    def test_accepts_a_single_burst_layout(self, tmp_path):
+        reference = _scene_tree(["b1"], [MASTER], arppos=ARPPOS, multiburst=False)
+        secondary = _scene_tree(["b1"], [SECONDARIES[0]], arppos=ARPPOS, multiburst=False)
+        h_orb, h_iono = compute_iono_and_orb_height(reference, secondary, str(tmp_path), MASTER, iono_height_input=0)
+        assert h_orb == pytest.approx(H_ORB, rel=1e-6)
+        assert h_iono == 0.0
+
+    @pytest.mark.unit
+    def test_asks_the_ionosphere_model_when_no_height_is_given(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("cop_ard_app.utils.get_iono_height", lambda *args: 260_000.0)
+        reference = _scene_tree(BURSTS[:1], [MASTER], arppos=ARPPOS)
+        secondary = _scene_tree(BURSTS[:1], [SECONDARIES[0]], arppos=ARPPOS)
+        h_orb, h_iono = compute_iono_and_orb_height(reference, secondary, str(tmp_path), MASTER)
+        assert h_orb == pytest.approx(H_ORB, rel=1e-6)
+        assert h_iono == 260_000.0
+
+    @pytest.mark.unit
+    def test_falls_back_to_the_default_height_when_the_lookup_fails(self, tmp_path, monkeypatch):
+        def no_space_weather(*args):
+            raise RuntimeError("no space weather database available")
+
+        monkeypatch.setattr("cop_ard_app.utils.get_iono_height", no_space_weather)
+        reference = _scene_tree(BURSTS[:1], [MASTER], arppos=ARPPOS)
+        secondary = _scene_tree(BURSTS[:1], [SECONDARIES[0]], arppos=ARPPOS)
+        h_orb, h_iono = compute_iono_and_orb_height(
+            reference, secondary, str(tmp_path), MASTER, default_iono_height=DEFAULT_IONO
+        )
+        assert h_orb == pytest.approx(H_ORB, rel=1e-6)
+        assert h_iono == DEFAULT_IONO
+
+    @pytest.mark.unit
+    def test_requires_exactly_one_secondary_acquisition(self, tmp_path):
+        reference = _scene_tree(BURSTS[:1], [MASTER], arppos=ARPPOS)
+        secondary = _scene_tree(BURSTS[:1], [MASTER] + SECONDARIES, arppos=ARPPOS)
+        with pytest.raises(ValueError, match="Expected exactly 1 acquisition date"):
+            compute_iono_and_orb_height(reference, secondary, str(tmp_path), MASTER)
+
+    @pytest.mark.unit
+    def test_rejects_a_non_numeric_ionospheric_height(self, tmp_path):
+        reference = _scene_tree(BURSTS[:1], [MASTER], arppos=ARPPOS)
+        secondary = _scene_tree(BURSTS[:1], [SECONDARIES[0]], arppos=ARPPOS)
+        with pytest.raises(TypeError, match="Invalid iono_height_input type"):
+            compute_iono_and_orb_height(reference, secondary, str(tmp_path), MASTER, iono_height_input="auto")

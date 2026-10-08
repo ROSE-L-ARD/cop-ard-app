@@ -6,8 +6,11 @@ from scipy.constants import speed_of_light
 
 from cop_ard_app.coreg import (
     blockwise_warp_cslc,
+    coreg_single_burst,
     finalize_coreg,
+    init_single_coreg_stack,
     initialize_LUT_coords,
+    stack_coregistration,
     update_conditions,
     update_LUT,
     update_quality,
@@ -938,3 +941,470 @@ class TestFinalizeCoreg:
             with pytest.raises(ValueError, match=error):
                 finalize_coreg(slcs, WORKING_DIRECTORY, REFERENCE_ID, do_split_spectrum=True)
         assert [path for path, _ in calls] == looked_up
+
+
+BURST_ID = "b1"
+TERTIARY = "2020-01-22"
+AZ_M = np.arange(LUT_AZ.size, dtype=np.float64) * 100.0
+RG_M = np.arange(LUT_RG.size, dtype=np.float64) * 25.0
+DEM_Y = np.arange(GRID[0], dtype=np.float64)
+DEM_X = np.arange(GRID[1], dtype=np.float64)
+DEM_DISTANCE = [0.0, 0.0, 700_000.0]
+DEM_ELEVATION = 100.0
+DEM_CRS = "EPSG:4326"
+WARP = {"warp_kernel_shape": [3, 3], "warp_ov_fact": 1}
+ETAD_FIELDS = ("azcorr", "rgcorr")
+OTHER_POL = "LH"
+CALIBRATIONS = tuple(CALIB_VALUE)
+COREG_CHILDREN = ["conditions", "measurements", "quality"]
+MEASUREMENT_VARS = ["cstack", "daz", "drg", "phase_model"]
+CONDITION_CHILDREN = ["look_vector", "orbit", "phase_demod"]
+QUALITY_VARS = ["RCS", "beta0", "crg_accuracy", "gamma0", "noise", "sigma0"]
+
+
+def _etad_grid():
+    """An ETAD correction grid covering the whole coreg grid, correcting nothing."""
+    return xr.Dataset(
+        {name: (("slant_range_time", "azimuth_time"), np.zeros((LUT_RG.size, LUT_AZ.size))) for name in ETAD_FIELDS},
+        coords={"slant_range_time": LUT_RG, "azimuth_time": LUT_AZ},
+    )
+
+
+def _original_image(acq, annot, *, pol=POL, metres=(AZ_M, RG_M)):
+    """An original `slc` image on the full coreg grid, chunked the way an SLC read from disk is."""
+    return xr.DataArray(
+        np.ones((1, 1, LUT_AZ.size, LUT_RG.size), dtype=np.complex64),
+        dims=("polarization", "acquisition_id", "azimuth_time", "slant_range_time"),
+        coords={
+            "polarization": [pol],
+            "acquisition_id": [acq],
+            "azimuth_time": LUT_AZ,
+            "slant_range_time": LUT_RG,
+            "azimuth_m": ("azimuth_time", metres[0]),
+            "slant_range_m": ("slant_range_time", metres[1]),
+        },
+        attrs={pol: annot},
+    ).chunk({"polarization": 1, "acquisition_id": 1, "azimuth_time": -1, "slant_range_time": -1})
+
+
+def _original_measurements(acq, annot, *, pol=POL, metres=(AZ_M, RG_M)):
+    """An `orig/<acq>/measurements` node: an annotated original plus its metric coordinates."""
+    return xr.Dataset(
+        {"slc": _original_image(acq, annot, pol=pol, metres=metres)},
+        coords={
+            "polarization": [pol],
+            "acquisition_id": [acq],
+            "acquisition_date": ("acquisition_id", [acq]),
+            "azimuth_time": LUT_AZ,
+            "slant_range_time": LUT_RG,
+            "azimuth_m": ("azimuth_time", metres[0]),
+            "slant_range_m": ("slant_range_time", metres[1]),
+        },
+    )
+
+
+def _original_stack(slc_annots, acqs, *, prefix="", pols=None, etad_acqs=()):
+    """A stack of annotated originals as `orig/<acq>` nodes, with the ETAD companions asked for."""
+    groups = {}
+    for acq in acqs:
+        groups[f"{prefix}/orig/{acq}/measurements"] = _original_measurements(
+            acq, slc_annots[acq], pol=(pols or {}).get(acq, POL)
+        )
+        if acq in etad_acqs:
+            groups[f"{prefix}/orig/{acq}/conditions/ETAD"] = _etad_grid()
+        else:
+            groups[f"{prefix}/orig/{acq}/conditions"] = xr.Dataset()
+    return xr.DataTree.from_dict(groups)
+
+
+def _simulation(acq):
+    """Simulate a flat DEM onto the coreg grid itself, i.e. every radar node maps onto itself."""
+    return xr.Dataset(
+        coords={"acquisition_id": [acq], "y": DEM_Y, "x": DEM_X, "axis": [0, 1, 2]},
+        data_vars={
+            "azimuth_time": (
+                ["acquisition_id", "y", "x"],
+                np.broadcast_to(LUT_AZ[None, :, None], (1, GRID[0], GRID[1])),
+            ),
+            "slant_range_time": (
+                ["acquisition_id", "y", "x"],
+                np.broadcast_to(LUT_RG[None, None, :], (1, GRID[0], GRID[1])),
+            ),
+            "dem_distance": (
+                ["acquisition_id", "y", "x", "axis"],
+                np.broadcast_to(DEM_DISTANCE, (1, GRID[0], GRID[1], 3)),
+            ),
+            "h": (["y", "x"], np.full((GRID[0], GRID[1]), DEM_ELEVATION, dtype="float32")),
+        },
+        attrs={"crs": DEM_CRS},
+    ).chunk({"acquisition_id": 1, "y": -1, "x": -1, "axis": -1})
+
+
+def _simulation_bounds(sim):
+    """The multilooked (min/max) bounds of a simulation, taken at two opposite corners."""
+    bounds = {}
+    for name, sel in (("min", 0), ("max", -1)):
+        bounds[name] = xr.Dataset(
+            data_vars={
+                "azimuth_time": (["y", "x"], sim.azimuth_time.values[:, sel, sel][:, None]),
+                "slant_range_time": (["y", "x"], sim.slant_range_time.values[:, sel, sel][:, None]),
+            },
+            coords={"y": [DEM_Y[sel]], "x": [DEM_X[sel]]},
+        )
+    return bounds
+
+
+def _simulation_tree(sim, burst=None):
+    """Where `stack_coregistration` reads a simulation from: a burst node, or the root for a scene."""
+    if burst is None:
+        return xr.DataTree(dataset=sim)
+    return xr.DataTree.from_dict({f"bursts/{burst}": sim})
+
+
+def _simulation_ml(bounds, burst=None):
+    """Where `stack_coregistration` reads the multilooked bounds from."""
+    return {"bursts": {burst: bounds}} if burst else bounds
+
+
+def _stub_slc_producers(monkeypatch):
+    """Stand in for the orbit, ETAD and look-vector producers of `cop_ard_app.slc`, which have their own module."""
+
+    def orbit(slcs):
+        return xr.Dataset({"coeffs": (["n"], np.arange(3.0))})
+
+    def etad(slcs, measurements):
+        return xr.Dataset({"dlat": (["azimuth_time"], np.zeros(LUT_AZ.size))}, coords={"azimuth_time": LUT_AZ})
+
+    def look_vector(measurements, simulation):
+        return xr.Dataset({"look_vector": (["axis"], np.zeros(3))})
+
+    for name, stub in (("updateOrbits", orbit), ("updateETAD", etad), ("updateLookVector", look_vector)):
+        monkeypatch.setattr(f"cop_ard_app.coreg.{name}", stub)
+
+
+class TestInitSingleCoregStack:
+    """Unit test for cop_ard_app.coreg.init_single_coreg_stack.
+
+    The structure this creates is written to a zarr store and read back, so the fixtures use a real
+    `tmp_path` store: `cstack` and `phase_model` are created as empty placeholders on the reference
+    image's grid in the `coreg/measurements` store, and `daz`/`drg` are created in their own `daz_drg`
+    store and returned as in-memory companions labelled with the path they were written to and with
+    the flag that tells the next stage to recompute them. The reference image is the one that sizes
+    the stack, supplies the annotations carried over to `cstack` and the metric coordinates; every
+    other acquisition is stacked and the reference itself is dropped unless recomputation is asked
+    for. The refusals are a missing output path, a reference the stack does not have, and
+    acquisitions whose polarization sets disagree.
+    """
+
+    @pytest.mark.unit
+    def test_creates_the_empty_stack_and_the_displacements_in_their_own_stores(self, tmp_path):
+        annot = _scene_annot()
+        out = init_single_coreg_stack(_original_stack({acq: annot for acq in LUT_ACQS}, LUT_ACQS), ACQ, str(tmp_path))
+
+        assert (tmp_path / "coreg" / "measurements").is_dir()
+        assert (tmp_path / "daz_drg").is_dir()
+        assert sorted(out.children) == ["coreg", "orig"]
+        assert sorted(out["coreg"].children) == COREG_CHILDREN
+        assert sorted(out["coreg/measurements"].data_vars) == MEASUREMENT_VARS
+
+        coreg = out["coreg/measurements"]
+        assert coreg.attrs["coregistration_reference_id"] == ACQ
+        assert coreg.daz.attrs["store_path"] == f"{tmp_path}/daz_drg"
+        assert coreg.daz.attrs["recompute"] is True
+        assert coreg.cstack.dims == ("polarization", "acquisition_id", "azimuth_time", "slant_range_time")
+        assert coreg.cstack.shape == (1, len(LUT_ACQS) - 1, *GRID)
+        assert coreg.cstack.dtype == np.complex64
+        assert coreg.phase_model.shape == (len(LUT_ACQS) - 1, *GRID)
+        assert coreg.daz.shape == coreg.drg.shape == (len(LUT_ACQS) - 1, *GRID)
+        assert coreg.daz.dtype == np.dtype("timedelta64[ns]")
+        assert coreg.drg.dtype == np.float64
+        assert [str(v) for v in coreg.acquisition_id.values] == [SECONDARY]
+        assert [str(v) for v in coreg.acquisition_date.values] == [SECONDARY]
+        assert list(coreg.polarization.values) == [POL]
+        assert np.array_equal(coreg.azimuth_time.values, LUT_AZ)
+        assert np.array_equal(coreg.slant_range_time.values, LUT_RG)
+        assert sorted(out.orig.children) == [SECONDARY]
+
+    @pytest.mark.unit
+    def test_the_reference_image_supplies_the_grid_and_its_annotations(self, tmp_path):
+        reference = _scene_annot()
+        secondary = _scene_annot(tca_c=1.0)
+        slcs = xr.DataTree.from_dict(
+            {
+                f"/orig/{ACQ}/measurements": _original_measurements(ACQ, reference),
+                f"/orig/{SECONDARY}/measurements": _original_measurements(
+                    SECONDARY, secondary, metres=(AZ_M + 10.0, RG_M + 5.0)
+                ),
+            }
+        )
+
+        out = init_single_coreg_stack(slcs, ACQ, str(tmp_path))
+
+        coreg = out["coreg/measurements"]
+        assert list(coreg.cstack.attrs) == [POL]
+        assert coreg.cstack.attrs[POL]["RMA"]["INCA"]["TimeCAPoly"]["Coefs"] == [0.0, REF_TCA]
+        assert coreg.cstack.attrs[POL]["Grid"]["Row"]["SS"] == 1.0
+        assert np.array_equal(coreg.azimuth_m.values, AZ_M)
+        assert np.array_equal(coreg.slant_range_m.values, RG_M)
+
+    @pytest.mark.unit
+    def test_recomputing_keeps_the_reference_in_the_stack(self, tmp_path):
+        annot = _scene_annot()
+        out = init_single_coreg_stack(
+            _original_stack({acq: annot for acq in LUT_ACQS}, LUT_ACQS), ACQ, str(tmp_path), recompute=True
+        )
+
+        assert [str(v) for v in out["coreg/measurements"].acquisition_id.values] == LUT_ACQS
+        assert out["coreg/measurements"].cstack.shape == (1, len(LUT_ACQS), *GRID)
+        assert sorted(out.orig.children) == sorted(LUT_ACQS)
+
+    @pytest.mark.unit
+    def test_refuses_without_an_output_path(self):
+        annot = _scene_annot()
+        with pytest.raises(ValueError, match="Output SLCs path is required."):
+            init_single_coreg_stack(_original_stack({acq: annot for acq in LUT_ACQS}, LUT_ACQS), ACQ, None)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "acqs,reference,pols,refuse",
+        [
+            ([SECONDARY], REFERENCE_ID, {}, "Reference image not available."),
+            ([ACQ, SECONDARY, TERTIARY], ACQ, {TERTIARY: OTHER_POL}, f"For acquisition date {SECONDARY} got"),
+        ],
+        ids=["without the reference", "secondary without a match"],
+    )
+    def test_refuses_an_unusable_request(self, tmp_path, acqs, reference, pols, refuse):
+        annot = _scene_annot()
+        slcs = _original_stack({acq: annot for acq in acqs}, acqs, pols=pols)
+
+        with pytest.raises(ValueError, match=refuse):
+            init_single_coreg_stack(slcs, reference, str(tmp_path / "coreg"))
+
+
+class TestCoregSingleBurst:
+    """Unit test for cop_ard_app.coreg.coreg_single_burst on its `enable_dask=False` path.
+
+    The orbit, ETAD and look-vector producers belong to `cop_ard_app.slc` and have their own test
+    module, so they are stubbed here; the warping itself belongs to `cop_ard_core`. This test pins
+    the orchestration: the burst's empty structure is initialized under the output path the
+    multiburst flag selects (`bursts/<id>` for a burst, `data/<reference>` for a scene), `daz` and
+    `drg` are written to a zarr store of their own under that directory and read back from it, and
+    the warped stack is written to and re-read from the measurements store it was created in. The
+    product is the three subtrees of the coregistered node, and a stack without recomputation
+    holds every acquisition but the reference. Because the DEM is simulated onto the coreg grid
+    itself, the coregistration offsets this stack computes are exactly zero, and an ETAD grid
+    correcting nothing keeps them at zero while adding the `ETAD` group to the conditions.
+    """
+
+    def _product(self, tmp_path, monkeypatch, *, multiburst, recompute=False, etad_acqs=()):
+        """Run one burst and return its product plus the directory its stores were written to."""
+        _stub_slc_producers(monkeypatch)
+        annot = _scene_annot(calib=CALIBRATIONS)
+        slcs = _original_stack({acq: annot for acq in LUT_ACQS}, LUT_ACQS, etad_acqs=etad_acqs)
+        sim = _simulation(ACQ)
+        _, coreg = coreg_single_burst(
+            BURST_ID,
+            slcs,
+            sim,
+            None,
+            _simulation_bounds(sim),
+            multiburst,
+            None,
+            ACQ,
+            str(tmp_path),
+            recompute=recompute,
+            enable_dask=False,
+            **WARP,
+        )
+        root = tmp_path / ("bursts" if multiburst else "data") / (BURST_ID if multiburst else ACQ)
+        return coreg, root
+
+    @pytest.mark.unit
+    def test_a_burst_writes_its_coregistered_stack_to_its_own_stores(self, tmp_path, monkeypatch):
+        coreg, root = self._product(tmp_path, monkeypatch, multiburst=True)
+
+        assert sorted(coreg.children) == COREG_CHILDREN
+        assert (root / "coreg" / "measurements").is_dir()
+        assert (root / "daz_drg").is_dir()
+        assert (root / "coreg" / "conditions").is_dir()
+        assert (root / "coreg" / "quality").is_dir()
+        assert coreg.measurements.attrs["store_path"] == str(root / "coreg" / "measurements")
+        assert sorted(coreg.measurements.data_vars) == MEASUREMENT_VARS
+
+        n_secondary = len(LUT_ACQS) - 1
+        assert coreg.measurements.cstack.shape == (1, n_secondary, *GRID)
+        assert [str(v) for v in coreg.measurements.acquisition_id.values] == [SECONDARY]
+        assert np.array_equal(coreg.measurements.daz.values, np.zeros((n_secondary, *GRID), dtype="timedelta64[ns]"))
+        assert np.array_equal(coreg.measurements.drg.values, np.zeros((n_secondary, *GRID)))
+        assert sorted(coreg.conditions.children) == CONDITION_CHILDREN
+        assert sorted(coreg.quality.data_vars) == QUALITY_VARS
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "multiburst,recompute",
+        [(True, True), (False, False)],
+        ids=["recomputing the reference", "as a single scene"],
+    )
+    def test_the_output_path_follows_the_multiburst_flag(self, tmp_path, monkeypatch, multiburst, recompute):
+        coreg, root = self._product(tmp_path, monkeypatch, multiburst=multiburst, recompute=recompute)
+
+        assert sorted(coreg.children) == COREG_CHILDREN
+        assert coreg.measurements.attrs["store_path"] == str(root / "coreg" / "measurements")
+        expected = LUT_ACQS if recompute else [SECONDARY]
+        assert [str(v) for v in coreg.measurements.acquisition_id.values] == expected
+        assert coreg.measurements.cstack.shape == (1, len(expected), *GRID)
+        assert np.array_equal(coreg.measurements.drg.values, np.zeros((len(expected), *GRID)))
+
+    @pytest.mark.unit
+    def test_etad_metadata_reaches_the_conditions_of_the_burst(self, tmp_path, monkeypatch):
+        coreg, _ = self._product(tmp_path, monkeypatch, multiburst=True, etad_acqs=LUT_ACQS)
+
+        assert sorted(coreg.conditions.children) == ["ETAD", *CONDITION_CHILDREN]
+        assert sorted(coreg.conditions.ETAD.data_vars) == ["dlat"]
+        n_secondary = len(LUT_ACQS) - 1
+        assert np.array_equal(coreg.measurements.daz.values, np.zeros((n_secondary, *GRID), dtype="timedelta64[ns]"))
+        assert np.array_equal(coreg.measurements.drg.values, np.zeros((n_secondary, *GRID)))
+
+
+class TestUpdateLutEdgeCases:
+    """Unit test for the per-polarization and fallback paths of cop_ard_app.coreg.updateLut.
+
+    `TestUpdateLut` covers a LUT built from the annotation of a single-polarization stack. The
+    remaining branches are the ones taken when the coefficients are looked up per polarization,
+    which needs a LUT and a stack that both carry a `polarization` dimension: a polarization the
+    original image has no coefficients for is refused by name, and the scene centre the reference
+    is expressed against is looked up in the coregistered stack's own annotation, whose labels a
+    pixel outside the coregistered grid cannot be found in - the lookup then falls back to the
+    first label of each axis.
+    """
+
+    def _tree(self, coreg_annot, slc_annot):
+        """A one-acquisition stack whose coregistered and original annotations differ."""
+        cstack = xr.DataArray(
+            np.zeros((1, 1, N_AZ, N_RG), dtype=np.complex64),
+            dims=("polarization", "acquisition_id", "azimuth_time", "slant_range_time"),
+            coords={"polarization": [POL], "acquisition_id": [ACQ], "azimuth_time": AZ, "slant_range_time": RG},
+            attrs={POL: coreg_annot},
+        )
+        slc = xr.DataArray(
+            np.zeros((N_AZ, N_RG), dtype=np.complex64),
+            dims=("azimuth_time", "slant_range_time"),
+            coords={"azimuth_time": AZ, "slant_range_time": RG},
+            attrs={POL: slc_annot},
+        )
+        return _build_tree(_measurements(cstack, az=AZ, rg=RG), _orig(ACQ, slc, az=AZ, rg=RG))
+
+    @pytest.mark.unit
+    def test_a_polarization_without_coefficients_is_refused_by_name(self):
+        missing = _scene_annot()
+        del missing["Grid"]["Col"]["DeltaKCOAPoly"]
+        slcs = self._tree(_scene_annot(), missing)
+
+        with pytest.raises(ValueError, match="Could not find coefficients for polarization"):
+            updateLut(slcs, _zero_lut_shifts(), "Grid.Col.DeltaKCOAPoly.Coefs", "sigma0", grid=COARSE)
+
+    @pytest.mark.unit
+    def test_a_reference_pixel_outside_the_stack_falls_back_to_the_first_labels(self):
+        outside = _scene_annot()
+        outside["ImageData"]["SCPPixel"] = {"Row": N_RG + 3, "Col": N_AZ + 7}
+        slcs = self._tree(outside, _scene_annot())
+
+        out = updateLut(slcs, _zero_lut_shifts(), "Grid.Col.DeltaKCOAPoly.Coefs", "doppler", grid=COARSE)
+
+        assert out.doppler.attrs["reference"] == {
+            "azimuth_time": str(AZ[0]),
+            "slant_range_time": float(RG[0]),
+        }
+
+
+class TestStackCoregistration:
+    """Unit test for cop_ard_app.coreg.stack_coregistration.
+
+    The mapping layer hands `coreg_single_burst` its arguments, so the test pins the routing rather
+    than the product: the simulation, its multilooked bounds and an already computed set of
+    displacements are taken from the matching burst node in multiburst mode and from the root for a
+    single scene, a stored set of displacements is dropped when `save_daz_drg` asks for the
+    coregistration to compute them again, and a secondary simulation is only handed over when one
+    was given. The product of each burst then replaces its input node, under `bursts/<id>/coreg`
+    in multiburst mode and at the root otherwise. The offsets and metadata a burst computes belong
+    to `TestCoregSingleBurst`; here only that the reference acquisition is no longer an original
+    of the coregistered burst is re-checked.
+    """
+
+    def _coregister(self, tmp_path, monkeypatch, *, multiburst, daz_drg=None, save_daz_drg=False, secondary=False):
+        """Coregister a one-burst stack and return its output tree plus the directory it wrote to."""
+        _stub_slc_producers(monkeypatch)
+        annot = _scene_annot(calib=CALIBRATIONS)
+        prefix = f"/bursts/{BURST_ID}" if multiburst else ""
+        slcs = _original_stack({acq: annot for acq in LUT_ACQS}, LUT_ACQS, prefix=prefix)
+        sim = _simulation(ACQ)
+        bounds = _simulation_bounds(sim)
+        out = stack_coregistration(
+            slcs,
+            _simulation_tree(sim, BURST_ID if multiburst else None),
+            _simulation_ml(bounds, BURST_ID if multiburst else None),
+            ACQ,
+            str(tmp_path),
+            simulation_secondary_tree=_simulation_tree(_simulation(SECONDARY), BURST_ID) if secondary else None,
+            save_daz_drg=save_daz_drg,
+            daz_drg=daz_drg,
+            multiburst=multiburst,
+            enable_dask=False,
+            **WARP,
+        )
+        root = tmp_path / ("bursts" if multiburst else "data") / (BURST_ID if multiburst else ACQ)
+        return out, root
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "multiburst,stored,save_daz_drg,secondary",
+        [
+            (True, False, False, False),
+            (True, True, False, False),
+            (True, True, True, False),
+            (True, False, False, True),
+            (False, False, False, False),
+        ],
+        ids=[
+            "burst",
+            "with stored displacements kept",
+            "with stored displacements recomputed",
+            "with a secondary simulation",
+            "single scene",
+        ],
+    )
+    def test_every_burst_gets_the_arguments_of_its_own_node(
+        self, tmp_path, monkeypatch, multiburst, stored, save_daz_drg, secondary
+    ):
+        stored_ds = (
+            xr.DataTree.from_dict({f"bursts/{BURST_ID}": _lut_displacements(LUT_ACQS, daz_ns=7, drg=3.5)})
+            if stored
+            else None
+        )
+        out, root = self._coregister(
+            tmp_path,
+            monkeypatch,
+            multiburst=multiburst,
+            daz_drg=stored_ds,
+            save_daz_drg=save_daz_drg,
+            secondary=secondary,
+        )
+
+        assert (root / "coreg" / "measurements").is_dir()
+        assert (root / "daz_drg").is_dir()
+        assert (root / "coreg" / "conditions").is_dir()
+        assert (root / "coreg" / "quality").is_dir()
+
+        if multiburst:
+            assert sorted(out.bursts.children) == [BURST_ID]
+            coreg = out[f"bursts/{BURST_ID}/coreg"]
+        else:
+            assert sorted(out.children) == ["coreg", "orig"]
+            coreg = out["coreg"]
+        assert sorted(coreg.children) == COREG_CHILDREN
+        assert sorted(coreg.measurements.data_vars) == MEASUREMENT_VARS
+        assert sorted(coreg.conditions.children) == CONDITION_CHILDREN
+        assert sorted(coreg.quality.data_vars) == QUALITY_VARS
+        assert [str(v) for v in coreg.measurements.acquisition_id.values] == [SECONDARY]
+        assert np.array_equal(coreg.measurements.daz.values, np.zeros((1, *GRID), dtype="timedelta64[ns]"))
+        assert np.array_equal(coreg.measurements.drg.values, np.zeros((1, *GRID)))

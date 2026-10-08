@@ -14,18 +14,25 @@ from cop_ard_app.model import (
     extract_acquisition_dates,
     extract_acquisition_id,
     extract_orbits,
+    extract_stac_sar_props,
     fix_attributes,
     get_az_rg_meters,
     get_az_rg_times,
     get_burst_id,
+    get_burst_id_safe,
     get_coefficients,
     get_footprint,
+    get_other_metadata_cslc,
     get_other_metadata_gslc,
+    get_processing_history_cslc,
     get_rf_band,
+    get_stac_cslc,
     map_index_to_group,
+    stac_discovery_template,
     update_container,
     update_coreg,
     update_cslc_container,
+    update_gmlp,
 )
 
 N_COLS = 5
@@ -896,3 +903,437 @@ class TestUpdateCoreg:
         assert list(bursts.children) == [CSLC_PRESET_ID]
         assert set(bursts[CSLC_PRESET_ID].groups) == _prefixed_groups(f"/{CSLC_PRESET_ID}")
         assert slcs_out.attrs["stac_discovery"]["id"].split("_")[:4] == CSLC_ID_HEAD
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: STAC discovery template, CSLC metadata getters, SAFE burst ids and
+# GMLP finalization.
+# ---------------------------------------------------------------------------
+
+SICD_TEMPLATE = {
+    "CollectionInfo": {
+        "CollectorName": "sentinel-1t ",
+        "CoreName": "S1-OPQ-R33100000-SM-20200101",
+        "RadarMode": {"ModeID": "IW"},
+        "Parameters": {"SWATH": "IW1", "ABSOLUTE_ORBIT": "123", "RELATIVE_ORBIT": "30"},
+    },
+    "GeoData": {
+        "ImageCorners": [
+            {"Lat": 20.0, "Lon": 10.0},
+            {"Lat": 50.0, "Lon": 10.0},
+            {"Lat": 50.0, "Lon": 30.0},
+            {"Lat": 20.0, "Lon": 30.0},
+        ],
+    },
+    "RadarCollection": {"TxFrequency": {"Min": 2.0e9, "Max": 2.0e9}},
+    "RMA": {"INCA": {"FreqZero": 2.34e9}},
+    "SCPCOA": {"ARPVel": {"Z": -7000.0}, "IncidenceAng": 39.5},
+}
+
+COREG_GRID = {"Grid": {"Col": {"SS": 1.23456789}, "Row": {"SS": 9.87654321}}}
+
+TEMPLATE_EXTENSIONS = [
+    "https://stac-extensions.github.io/eopf/v1.2.0/schema.json",
+    "https://stac-extensions.github.io/product/v0.1.0/schema.json",
+    "https://stac-extensions.github.io/sat/v1.1.0/schema.json",
+    "https://stac-extensions.github.io/view/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/scientific/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/processing/v1.2.0/schema.json",
+    "https://stac-extensions.github.io/sar/v1.2.0/schema.json",
+]
+
+TEMPLATE_BBOX = [10.0, 20.0, 30.0, 50.0]
+TEMPLATE_RING = [[10.0, 20.0], [10.0, 50.0], [30.0, 50.0], [30.0, 20.0], [10.0, 20.0]]
+TEMPLATE_START = "2020-01-01T00:00:00Z"
+TEMPLATE_MID = "2020-01-06T12:00:00Z"
+TEMPLATE_END = "2020-01-12T00:00:00Z"
+PROCESSING_START = "2021-06-01T12:00:00Z"
+TEMPLATE_ID_HEAD = ["S01SIWCSL", "20200101T000000Z", "950400", "T030"]
+TEMPLATE_ID_TAIL = ["0186A0", "SV"]
+PROPS_BRANCH_STAC = {
+    "properties": {
+        "eopf:datatake_id": 1048576,
+        "sat:absolute_orbit": "999",
+        "sat:relative_orbit": 77,
+        "sat:orbit_state": "ascending",
+    }
+}
+
+CSLC_ACQ_ID = "MA001_sec"
+CSLC_REF_ID = "MR000_ref"
+AZ_TIME = np.array([DATE_A, np.datetime64("2020-01-06T12:00:00", "ns"), DATE_B])
+
+GMLP_ACQ_ID = "MA001_sec"
+GMLP_SINGLE_ID_HEAD = ["S01SIWGMP", "20200101T000000Z", "259200", "SENTINEL-1254"]
+GMLP_SINGLE_ID_TAIL = ["100000", "SV"]
+GSLC_PRODUCT_GROUPS = {
+    "/",
+    "/measurements",
+    "/quality",
+    "/quality/coherence",
+    "/quality/distortion_mask",
+    "/conditions",
+    "/conditions/orbit",
+    "/conditions/look_vector",
+}
+ATTRS_GEO_Y = {
+    "description": "UTM y coordinates",
+    "long_name": "North coordinates",
+    "units": "m",
+    "short_name": "y",
+}
+
+
+def _ext_cslc() -> list[dict]:
+    """Fresh external metadata for the CSLC template and its metadata getters."""
+    return [
+        {"execution_parameters": {"measurement_type": "area", "noise_removal": False}},
+        {
+            "execution_parameters": {
+                "facility": "cop-ard-facility",
+                "product_timeliness": "P1D",
+                "product_timeliness_category": "moderate",
+                "providers": ["esa"],
+                "atbd_link": "https://atbd/link",
+                "product_pixel_coordinate_convention": "row-col",
+                "cslc_status": "cslc-ok",
+                "product_family_specification": "S1-RG",
+            }
+        },
+    ]
+
+
+def _ext_gmlp() -> list[dict]:
+    """GSLC-style external metadata, plus the mutable "outputs" list update_gmlp writes."""
+    return [
+        {
+            "execution_parameters": {
+                "noise_removal": False,
+                "measurement_type": "area",
+                "product_data_access": "FROM-FIRST",
+                "product_pixel_coordinate_convention": "FROM-FIRST",
+                "gmlp_status": "FROM-FIRST",
+                "product_family_specification": "FROM-FIRST",
+            },
+            "outputs": ["OLD-FIRST"],
+        },
+        {"execution_parameters": {"unused": True}, "outputs": ["OLD-MIDDLE"]},
+        {
+            "execution_parameters": {
+                "noise_removal": True,
+                "measurement_type": "points",
+                "product_data_access": ["external"],
+                "product_pixel_coordinate_convention": "row-col",
+                "gmlp_status": "gmlp-ok",
+                "product_family_specification": "S1-RG",
+            },
+            "outputs": ["OLD-LAST"],
+        },
+    ]
+
+
+def _slc_array() -> xr.DataArray:
+    """Complex SLC carrying the SICD attributes the discovery template reads."""
+    return xr.DataArray(
+        np.zeros((1, 3, 5)),
+        dims=("polarization", "azimuth_time", "x"),
+        coords={"polarization": [POL], "azimuth_time": AZ_TIME, "x": np.arange(5)},
+        attrs={"SICD": SICD_TEMPLATE},
+    )
+
+
+def _cstack_array() -> xr.DataArray:
+    """Co-registered stack carrying the co-registration grid used for pixel spacings."""
+    return xr.DataArray(
+        np.ones((1, 4, 4)),
+        dims=("acquisition_id", "y", "x"),
+        coords={"acquisition_id": [CSLC_ACQ_ID], "y": np.arange(4), "x": np.arange(4)},
+        attrs={"SICD_COREG": COREG_GRID},
+    )
+
+
+def _cslc_final_scene(with_props: bool = False, with_history: bool = True) -> xr.DataTree:
+    """CSLC scene shaped for get_stac_cslc / get_processing_history_cslc / get_other_metadata_cslc."""
+    slc = xr.DataTree()
+    slc["coreg/measurements"] = xr.Dataset({"cstack": _cstack_array()})
+    slc["coreg/measurements"].attrs = {"coregistration_reference_id": CSLC_REF_ID}
+    slc[f"orig/{CSLC_ACQ_ID}/measurements"] = xr.Dataset({"slc": _slc_array()})
+    conditions_attrs: dict = {}
+    if with_props:
+        conditions_attrs["stac_discovery"] = PROPS_BRANCH_STAC
+    if with_history:
+        conditions_attrs["processing_history"] = {
+            "Level-1 Product": [{"inputs": ["L1-INPUT"], "outputs": ["L1-OUTPUT"]}]
+        }
+    slc[f"orig/{CSLC_ACQ_ID}/conditions"] = xr.Dataset()
+    slc[f"orig/{CSLC_ACQ_ID}/conditions"].attrs = conditions_attrs
+    return slc
+
+
+def _run_template(stac: dict) -> dict:
+    return stac_discovery_template("data", _slc_array(), _cstack_array(), _ext_cslc(), stac, PROCESSING_START)
+
+
+def _safe_annotation(burst: str, swath: str, pol: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        CollectionInfo=SimpleNamespace(Parameters={"BURST": burst, "SWATH": swath}),
+        get_processed_polarization=lambda: pol,
+    )
+
+
+SENTINEL_BURST_XML = (
+    "<SentinelProduct>"
+    "<OtherInformation></OtherInformation>"
+    "<swathTiming>"
+    '<burstList count="1" id="">'
+    '<burst id="0" index="0">'
+    "<azimuthAnxTime>5.0</azimuthAnxTime>"
+    "<srsTime>4.0</srsTime>"
+    "<duration>2.0</duration>"
+    "</burst>"
+    "</burstList>"
+    "</swathTiming>"
+    "</SentinelProduct>"
+)
+
+
+def _gmlp_geocoded() -> xr.DataTree:
+    """Geocoded scene satisfying update_gmlp: rio CRS on measurements, y coord on look_vector."""
+    scene = _gslc_scene()
+    look = scene["conditions/look_vector"].to_dataset().assign_coords(y=np.arange(4))
+    scene["conditions/look_vector"] = look
+    measurements = scene["measurements"].to_dataset().rio.write_crs("EPSG:4326")
+    scene["measurements"] = measurements
+    return scene
+
+
+def _gmlp_slcs() -> xr.DataTree:
+    """Co-registered inputs with the acquisition coords update_gmlp zips, plus root STAC."""
+    slc = _coreg_scene()
+    measurements = (
+        slc["coreg/measurements"]
+        .to_dataset()
+        .assign_coords(
+            acquisition_id=[GMLP_ACQ_ID],
+            acquisition_date=("acquisition_id", [GSLC_DATE]),
+        )
+    )
+    slc["coreg/measurements"] = measurements
+    slc.attrs = {
+        "stac_discovery": _product_stac(
+            "GMLP", GMLP_START, GMLP_END_FIRST, GMLP_BBOX, "IW", [POL], 254, 1048576, "GMLP-PRESET-ID"
+        )
+    }
+    return slc
+
+
+class TestStacDiscoveryTemplate:
+    """Unit tests for cop_ard_app.model.stac_discovery_template."""
+
+    @pytest.mark.unit
+    def test_template_sicd_branch(self):
+        out = _run_template({})
+        assert out["type"] == "Feature"
+        assert out["stac_version"] == "1.1.0"
+        assert out["stac_extensions"] == TEMPLATE_EXTENSIONS
+        assert out["bbox"] == TEMPLATE_BBOX
+        assert out["geometry"] == {"type": "Polygon", "coordinates": [TEMPLATE_RING]}
+        assert out["links"] == [{"href": "./zarr.json", "rel": "self", "type": "application/json"}]
+        props = out["properties"]
+        assert props["title"] == "COP-ARD CSLC Product"
+        assert props["start_datetime"] == TEMPLATE_START
+        assert props["end_datetime"] == TEMPLATE_END
+        assert props["datetime"] == TEMPLATE_MID
+        assert props["created"] == PROCESSING_START
+        assert props["processing:datetime"] == PROCESSING_START
+        assert props["processing:lineage"] == "systematic"
+        assert props["processing:facility"] == "cop-ard-facility"
+        assert props["product:timeliness"] == "P1D"
+        assert props["product:timeliness_category"] == "moderate"
+        assert props["providers"] == ["esa"]
+        assert props["sci:citation"] == "https://atbd/link"
+        assert props["platform"] == "sentinel-1t"
+        assert props["constellation"] == "sentinel-1"
+        assert props["instruments"] == ["s-sar"]
+        assert props["eopf:datatake_id"] == "100000"
+        assert props["eopf:instrument_mode"] == "IW"
+        assert props["product:type"] == "S01SIWCSL"
+        assert props["sar:beam_ids"] == ["IW1"]
+        assert props["sar:center_frequency"] == 2.34e9
+        assert props["sar:frequency_band"] == "S"
+        assert props["sar:instrument_mode"] == "IW"
+        assert props["sar:pixel_spacing_azimuth"] == 1.23457
+        assert props["sar:pixel_spacing_range"] == 9.87654
+        assert props["sar:polarizations"] == [POL]
+        assert props["sat:absolute_orbit"] == 123
+        assert props["sat:relative_orbit"] == 30
+        assert props["sat:orbit_state"] == "descending"
+        assert props["view:incidence_angle"] == 39.5
+        parts = out["id"].split("_")
+        assert len(parts) == 7
+        assert parts[:4] == TEMPLATE_ID_HEAD
+        assert parts[5:] == TEMPLATE_ID_TAIL
+
+    @pytest.mark.unit
+    def test_template_properties_branch_override(self):
+        out = _run_template(PROPS_BRANCH_STAC)
+        props = out["properties"]
+        assert props["eopf:datatake_id"] == 1048576
+        assert props["sat:absolute_orbit"] == 999
+        assert props["sat:relative_orbit"] == 77
+        assert props["sat:orbit_state"] == "ascending"
+        parts = out["id"].split("_")
+        assert len(parts) == 7
+        assert parts[:4] == ["S01SIWCSL", "20200101T000000Z", "950400", "T077"]
+        assert parts[5:] == ["100000", "SV"]
+
+
+class TestExtractStacSarProps:
+    """Unit tests for cop_ard_app.model.extract_stac_sar_props."""
+
+    @pytest.mark.unit
+    def test_known_family_and_frequency_bands(self):
+        for name, platform, constellation in [
+            ("S1", "sentinel-1", "sentinel-1"),
+            ("SENTINEL-1", "sentinel-1", "sentinel-1"),
+            ("TSX", "tsx", "terrasar-x"),
+        ]:
+            sicd = {"CollectionInfo": {"CollectorName": name}}
+            assert extract_stac_sar_props(sicd) == (platform, constellation, ["sar"])
+
+        for tmin, tmax, band in [
+            (5.0e8, 9.0e8, "p-sar"),
+            (1.5e9, 1.5e9, "l-sar"),
+            (2.0e9, 4.0e9, "s-sar"),
+            (4.0e9, 8.0e9, "c-sar"),
+            (8.0e9, 12.0e9, "x-sar"),
+        ]:
+            sicd = {
+                "CollectionInfo": {"CollectorName": "SENTINEL-1"},
+                "RadarCollection": {"TxFrequency": {"Min": tmin, "Max": tmax}},
+            }
+            platform, constellation, instruments = extract_stac_sar_props(sicd)
+            assert (platform, constellation) == ("sentinel-1", "sentinel-1")
+            assert instruments == [band]
+
+    @pytest.mark.unit
+    def test_unknown_collector_fallback(self):
+        sicd = {"CollectionInfo": {"CollectorName": "MY COLLECTOR_C"}}
+        assert extract_stac_sar_props(sicd) == ("my-collector-c", "my-collector", ["sar"])
+
+
+class TestGetBurstIdSafe:
+    """Unit tests for cop_ard_app.model.get_burst_id_safe (sarpy XML parsing stubbed)."""
+
+    @pytest.mark.unit
+    def test_matched_product_file(self, monkeypatch):
+        from xml.etree import ElementTree
+
+        monkeypatch.setattr(
+            "sarpy.io.complex.sentinel._parse_xml", lambda *a, **k: ElementTree.fromstring(SENTINEL_BURST_XML)
+        )
+        annot = _safe_annotation("1", "IW1", "VV")
+        file_sets = [{"product": "/dir/S1C_TEST_-iw1_-vv_XML"}]
+        assert get_burst_id_safe(file_sets, annot, 1) == ("iw1", 2)
+
+    @pytest.mark.unit
+    def test_unmatched_product_falls_back_to_none(self, monkeypatch):
+        from xml.etree import ElementTree
+
+        monkeypatch.setattr(
+            "sarpy.io.complex.sentinel._parse_xml", lambda *a, **k: ElementTree.fromstring(SENTINEL_BURST_XML)
+        )
+        annot = _safe_annotation("1", "EW1", "VV")
+        file_sets = [{"product": "/dir/S1C_TEST_-iw1_-vv_XML"}]
+        assert get_burst_id_safe(file_sets, annot, 1) == ("ew1", 13)
+
+
+class TestGetStacCslc:
+    """Unit tests for cop_ard_app.model.get_stac_cslc."""
+
+    @pytest.mark.unit
+    def test_get_stac_cslc_delegates_to_template(self):
+        out = get_stac_cslc(_cslc_final_scene(), "data", _ext_cslc(), PROCESSING_START)
+        assert out["bbox"] == TEMPLATE_BBOX
+        assert out["properties"]["sat:orbit_state"] == "descending"
+        parts = out["id"].split("_")
+        assert len(parts) == 7
+        assert parts[:4] == TEMPLATE_ID_HEAD
+        assert parts[5:] == TEMPLATE_ID_TAIL
+
+
+class TestGetProcessingHistoryCslc:
+    """Unit tests for cop_ard_app.model.get_processing_history_cslc."""
+
+    @pytest.mark.unit
+    def test_previous_history_is_preserved(self):
+        ext = _ext_cslc()
+        out = get_processing_history_cslc(_cslc_final_scene(with_history=True), {}, ext, PROCESSING_START)
+        assert out == {
+            "Level-1 Product": [{"inputs": ["L1-INPUT"], "outputs": ["L1-OUTPUT"]}],
+            "COP ARD CSLC Product": ext,
+        }
+
+    @pytest.mark.unit
+    def test_missing_history_yields_only_current_product(self):
+        ext = _ext_cslc()
+        out = get_processing_history_cslc(_cslc_final_scene(with_history=False), {}, ext, PROCESSING_START)
+        assert out == {"COP ARD CSLC Product": ext}
+
+
+class TestGetOtherMetadataCslc:
+    """Unit tests for cop_ard_app.model.get_other_metadata_cslc."""
+
+    @pytest.mark.unit
+    def test_other_metadata_gathers_sicd_and_execution_parameters(self):
+        ext = _ext_cslc()
+        out = get_other_metadata_cslc(_cslc_final_scene(), ext)
+        assert out == {
+            "SICD": {"SICD": SICD_TEMPLATE},
+            "product_geometry": "slant-range",
+            "product_pixel_coordinate_convention": "row-col",
+            "cslc_status": "cslc-ok",
+            "product_family_specification": "S1-RG",
+            "measurement_type": "area",
+            "noise_correction_flag": False,
+        }
+
+
+class TestUpdateGmlp:
+    """Unit tests for cop_ard_app.model.update_gmlp."""
+
+    @pytest.mark.unit
+    def test_single_scene_finalizes_product(self):
+        gmlp = xr.DataTree()
+        gmlp[GSLC_DATE] = _gmlp_geocoded()
+        out = update_gmlp(gmlp, _gmlp_slcs(), _ext_gmlp())
+
+        child = next(iter(out.children))
+        parts = child.split("_")
+        assert len(parts) == 7
+        assert parts[:4] == GMLP_SINGLE_ID_HEAD
+        assert parts[5:] == GMLP_SINGLE_ID_TAIL
+        product = out[child]
+        assert set(product.groups) == {f"/{child}" if g == "/" else f"/{child}{g}" for g in GSLC_PRODUCT_GROUPS}
+        assert set(product.attrs) >= {"stac_discovery", "processing_history", "other_metadata"}
+        assert product.attrs["stac_discovery"]["id"] == child
+        history = product.attrs["processing_history"]
+        assert list(history) == ["COP ARD GMLP Product"]
+        # get_stac_and_history_gslc writes the child product id into the shared last output
+        assert history["COP ARD GMLP Product"][-1]["outputs"] == [child]
+        assert product.attrs["other_metadata"] == EXPECTED_GSLC_OTHER_METADATA
+        assert product["measurements"].coords["y"].attrs == ATTRS_GEO_Y
+        assert set(out.attrs) == {"stac_discovery", "processing_history"}
+        root_parts = out.attrs["stac_discovery"]["id"].split("_")
+        assert len(root_parts) == 7
+        assert root_parts[:4] == GMLP_SINGLE_ID_HEAD
+        assert root_parts[5:] == GMLP_SINGLE_ID_TAIL
+        assert out.attrs["stac_discovery"]["assets"] == {child: {"href": f"./{child}", "type": "application/vnd+zarr"}}
+
+    @pytest.mark.unit
+    def test_two_dates_in_one_burst_raise(self):
+        gmlp = xr.DataTree()
+        gmlp[GSLC_DATE] = _gmlp_geocoded()
+        gmlp[ACQ2] = _gmlp_geocoded()
+        with pytest.raises(ValueError, match="Expected exactly 1 acquisition date"):
+            update_gmlp(gmlp, _gmlp_slcs(), _ext_gmlp())
