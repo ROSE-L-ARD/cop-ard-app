@@ -1,3 +1,11 @@
+"""
+Enhanced Spectral Diversity (ESD) module of the cop_ard_app package.
+
+It estimates the residual azimuth shifts between consecutive Sentinel-1
+bursts, fits global ESD polynomial models, and applies the resulting phase
+ramp corrections to the coregistration stacks.
+"""
+
 import datetime
 import json
 import os
@@ -59,6 +67,29 @@ def esd_single_burst(
     multilook = multilook or {"azimuth_pixel": 4, "slant_range_time": 16}
 
     def time_to_pixel_az(stack: xr.Dataset, dtaz: float, reference_time: datetime.datetime | None = None):
+        """
+        Converts the azimuth time coordinates into integer azimuth pixel indices.
+
+        Pixels are numbered relative to a reference time using the given
+        azimuth time step, and the `azimuth_time` dimension of the dataset is
+        swapped for the new `azimuth_pixel` coordinate.
+
+        Parameters
+        ----------
+        stack : xr.Dataset
+            Burst dataset with an `azimuth_time` coordinate.
+        dtaz : float
+            Azimuth time step per pixel, in seconds.
+        reference_time : datetime, optional
+            Origin of the pixel grid; the first azimuth time is used when
+            ``None``. Defaults to ``None``.
+
+        Returns
+        -------
+        tuple[xr.Dataset, datetime]
+            The dataset with the `azimuth_pixel` coordinate and swapped
+            dimensions, and the reference time actually used.
+        """
         if reference_time is None:
             reference_time = stack.azimuth_time[0].values
         azimuth_pixel = np.round((stack.azimuth_time - reference_time).astype("float64") / 1e9 / dtaz).astype("int32")
@@ -118,6 +149,19 @@ def esd_single_burst(
 
 
 def get_next_burst_id(burst_id):
+    """
+    Builds the identifier of the next consecutive burst of the same swath.
+
+    Parameters
+    ----------
+    burst_id : str
+        Burst identifier in the form `<swath>_<number>` (e.g. `iw1_254`).
+
+    Returns
+    -------
+    str
+        Identifier of the following burst (e.g. `iw1_255`).
+    """
     swath, id = burst_id.split("_")
     next_burst_id = f"{swath}_{int(id) + 1}"
     return next_burst_id
@@ -131,7 +175,44 @@ def estimate(
     enable_dask: bool = True,
     **kwargs,
 ):
+    """
+    Estimates the ESD azimuth shifts between consecutive bursts of a stack.
 
+    For each pair of consecutive bursts, `esd_single_burst` is mapped over
+    the reference and secondary measurements to estimate the residual
+    azimuth shifts on the common overlap area; the per-burst shift datasets
+    are merged into a single ESD dataset indexed by the `id` (burst)
+    dimension. `optimize_curvature` is then fitted per acquisition ID to
+    remove the global polynomial trend from the mean phase, updating the
+    `mean_phase` and `mean_shift` variables of the merged dataset.
+
+    Parameters
+    ----------
+    reference_slcs : xr.DataTree
+        DataTree holding the reference measurements of each burst.
+    secondary_slcs : xr.DataTree
+        DataTree holding the secondary (interferometric) measurements of
+        each burst.
+    poly_degree : int, optional
+        Degree of the ESD polynomial model used to fit the azimuth shifts.
+        Defaults to 0.
+    enable_dask : bool, optional
+        Whether to run the computations with dask. Defaults to True.
+    **kwargs : dict
+        Additional keyword arguments forwarded to the `map` dispatcher.
+
+    Returns
+    -------
+    xr.Dataset
+        ESD dataset holding the mean phase, mean shift and coherence of the
+        estimated overlaps, indexed by `id` (burst), `acquisition_id`,
+        `azimuth_time` and `slant_range_time`.
+
+    Raises
+    ------
+    ValueError
+        If the keys of the reference and secondary burst trees do not match.
+    """
     args = []
     for k_ref, k_sec in zip(reference_slcs.bursts.keys(), secondary_slcs.bursts.keys()):
         if k_ref != k_sec:
@@ -228,12 +309,46 @@ def find_global_shift(esd: xr.Dataset, poly_degree: int = 0, norm: int = 1):
 
 
 def to_dataset(X, acquisition_id, t0, r0, s_y, s_x):
+    """
+    Converts bivariate polynomial coefficients into a dataset of dense grids.
 
+    The total degree of the model is derived from the length of the flat
+    coefficient vector, which is rearranged by `triangular_to_polygrid`
+    into a dense (deg+1, deg+1) coefficient grid over the `i`, `j` axes;
+    one data variable named after each acquisition ID is emitted, carrying
+    the `deg`, `offset` and `scale_fact` attributes used at evaluation
+    time.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        Flat, degree-ordered coefficient vector of the ESD polynomial.
+    acquisition_id : iterable
+        Acquisition IDs to duplicate the polynomial model for.
+    t0 : numpy.datetime64
+        Azimuth time origin of the polynomial (evaluation offset).
+    r0 : float
+        Slant range origin of the polynomial (evaluation offset).
+    s_y : float
+        Azimuth coordinate scaling factor.
+    s_x : float
+        Slant range coordinate scaling factor.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with one (deg+1, deg+1) coefficient data variable per
+        acquisition ID, named by the acquisition ID.
+    """
     n = len(X)
     deg = round((-3 + np.sqrt(1 + 8 * n)) / 2)
 
     def triangular_to_polygrid(coef):
-
+        """
+        Embeds a flat coefficient vector ordered by decreasing total degree
+        into a dense (deg+1, deg+1) coefficient grid, filling degrees
+        starting from the end of the vector.
+        """
         C = np.zeros((deg + 1, deg + 1))
 
         k = 0
@@ -260,11 +375,44 @@ def to_dataset(X, acquisition_id, t0, r0, s_y, s_x):
 
 
 def to_dataset_1D(X, acquisition_id, t0, r0, s_y, s_x):
+    """
+    Converts univariate polynomial coefficients into a dataset of grids.
 
+    The degree of the model is derived from the length of the coefficient
+    vector; the coefficients are embedded in the first column of a dense
+    (deg+1, deg+1) grid and stored, for every acquisition ID, in a data
+    variable carrying the `deg`, `offset`, `scale_fact` and `off_y`
+    attributes used at evaluation time.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        Univariate coefficient vector, ordered from the highest degree term.
+    acquisition_id : iterable
+        Acquisition IDs to duplicate the polynomial model for.
+    t0 : numpy.datetime64
+        Azimuth time origin of the polynomial, stored as the `off_y`
+        attribute.
+    r0 : float
+        Slant range origin of the polynomial (evaluation offset).
+    s_y : float
+        Azimuth coordinate scaling factor.
+    s_x : float
+        Slant range coordinate scaling factor.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with one (deg+1, deg+1) coefficient data variable per
+        acquisition ID, named by the acquisition ID.
+    """
     deg = len(X) - 1
 
     def _to_polygrid(coef):
-
+        """
+        Embeds a univariate coefficient vector in the first column of a
+        dense (deg+1, deg+1) coefficient grid.
+        """
         C = np.zeros((deg + 1, deg + 1))
 
         C[:, 0] = np.flip(X)
@@ -294,6 +442,42 @@ def stack_esd(
     enable_dask: bool = True,
     **kwargs,
 ):
+    """
+    Estimates and removes the ESD phase ramp of a multi-burst stack.
+
+    The measurements are split into reference and secondary DataTrees, the
+    azimuth shifts between consecutive bursts are estimated with
+    `estimate`, a global polynomial of degree `esd_poly_degree` is fitted to
+    them with `find_global_shift`, and the resulting phase ramp is applied
+    to the cstack of every secondary burst through `map_single_phase_ramp`,
+    using the best common polarization of the reference and secondary data.
+    The recomposed DataTree carries the polynomial description in its
+    `coregistration_polynomials` attributes under the `esd` key. When
+    `multiburst` is False, ESD correction is skipped with a warning.
+
+    Parameters
+    ----------
+    slcs : xr.DataTree
+        DataTree of the multi-burst SLC/coregistration data.
+    wdir_path : str | Path
+        Working directory used for the temporary Zarr stores.
+    multiburst : bool
+        Whether the input is organized as a multi-burst DataTree.
+    reference_id : str
+        Acquisition ID of the reference burst.
+    esd_poly_degree : int, optional
+        Degree of the ESD polynomial model. Defaults to 2.
+    enable_dask : bool, optional
+        Whether to run the computations with dask. Defaults to True.
+    **kwargs : dict
+        Additional keyword arguments forwarded to the `map` dispatcher.
+
+    Returns
+    -------
+    xr.DataTree
+        Recomposed DataTree with phase-ramp-corrected cstacks and the ESD
+        polynomial recorded in its attributes.
+    """
     wdir_path = Path(str(wdir_path))
 
     # estimate ESD at full-band
@@ -374,6 +558,40 @@ def map_single_phase_ramp(
     enable_dask: bool,
     **kwargs,
 ):
+    """
+    Applies the ESD phase ramp to one burst, streaming the result to disk.
+
+    An empty Zarr-backed measurements dataset mirroring the `cstack` shape,
+    chunks and coordinates is created and written first; `compute_phase_ramp`
+    is then mapped over the coregistration stack in blocks whose results are
+    stored directly into the Zarr group, and the corrected measurements are
+    read back.
+
+    Parameters
+    ----------
+    burst_id : str
+        Identifier of the burst being corrected.
+    coreg_sec : xr.Dataset
+        Coregistered secondary measurements of the burst.
+    annot : str
+        JSON string with the original SICD annotations of the matching
+        reference acquisitions.
+    y_poly : xr.Dataset
+        ESD polynomial model data variables, one per acquisition ID.
+    working_directory : str
+        Root of the temporary working directory holding the Zarr stores.
+    enable_dask : bool
+        Whether to run the block computations with dask.
+    **kwargs : dict
+        Additional keyword arguments, e.g. `storage_options` for the Zarr
+        reads and writes.
+
+    Returns
+    -------
+    tuple[str, xr.Dataset]
+        The burst identifier and the corrected measurements dataset read
+        back from the Zarr store.
+    """
     # Define the output path for this burst.
     path = f"bursts/{burst_id}"
     coreg_path = normpath(f"{working_directory}/{path}")
@@ -449,6 +667,29 @@ def map_single_phase_ramp(
 
 
 def compute_phase_ramp(coreg_sec: xr.Dataset, y_poly: xr.Dataset, annot: str):
+    """
+    Removes the ESD phase ramp from one block of the coregistered stack.
+
+    The azimuth phase ramp difference is computed with
+    `get_stack_phramp_diff` from the `daz`/`drg` displacement fields, the
+    SICD annotations and the ESD polynomials, and the cstack is multiplied
+    by `exp(-1j * ph_ramp_diff)` to correct the residual azimuth shift.
+
+    Parameters
+    ----------
+    coreg_sec : xr.Dataset
+        Block of the coregistration stack with the `cstack`, `drg`, `daz`
+        and coordinate variables.
+    y_poly : xr.Dataset
+        ESD polynomial model data variables, one per acquisition ID.
+    annot : str
+        JSON-encoded SICD annotations keyed by acquisition date.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with the corrected `cstack` data variable.
+    """
     annot_dict = json.loads(annot)
     ph_ramp_diff_ml = get_stack_phramp_diff(
         coreg_sec.acquisition_id,

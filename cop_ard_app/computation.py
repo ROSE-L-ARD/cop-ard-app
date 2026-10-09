@@ -12,6 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Orchestration of Dask-based parallel computations (map, map_blocks).
+
+Manages Dask clients and clusters, splits xarray objects in aligned chunks,
+executes user functions per block and combines or stores the results.
+"""
+
 import copy
 import inspect
 import itertools
@@ -195,6 +202,11 @@ def conditional_delayed(enable_dask: bool, name: str):
     """
 
     def wrapper(func):
+        """
+        Wrap the function with `dask.delayed` when Dask is enabled.
+
+        Otherwise returns the function unchanged, providing serial execution.
+        """
         if enable_dask:
             func.__name__ = name
             return dask.delayed(func)
@@ -428,6 +440,13 @@ def try_to_combine(
         return None
 
     def try_to_combine_(result):
+        """
+        Try to merge a list of results into a single xarray object.
+
+        Reads result paths back into datasets when possible, concatenates or
+        combines the results by coordinates, and returns the untouched list
+        when the combination fails.
+        """
 
         try:
             # when func returns paths, I will try  #
@@ -1023,6 +1042,12 @@ def map_blocks(
 
         @conditional_delayed(enable_dask, func.__name__)
         def execute(objs, args, indices, block_id, job_id, apply_isel=apply_isel):
+            """
+            Apply the wrapped function to a single data block.
+
+            Injects the reserved keyword arguments when the function declares
+            them, selects the block, runs it and hands the result to `try_to_store`.
+            """
             # reserved keywords set #
             if "chunk" in func_parameters:
                 kwargs_["chunk"] = indices[0]
@@ -1065,6 +1090,12 @@ def map_blocks(
         job_array: list[Any] = []
 
         def compute_results(fix_memory_leak, enable_dask, restart, destroy, job_array):
+            """
+            Compute one batch of queued jobs and return their futures.
+
+            Returns the futures produced by the client together with empty
+            lists to replace the scattered arguments and objects.
+            """
             _future_args = []
             _future_objs = []
             results_ = client.compute(job_array)
@@ -1096,6 +1127,12 @@ def map_blocks(
         results = [e.result() for e in results]
 
         def stop_client(destroy, restart):
+            """
+            Dispose of the client and its resources after the computation.
+
+            Destroys the client if requested, restarts it otherwise, or cancels
+            the pending scattered futures as a last resort.
+            """
             if destroy:
                 destroy_client(client)
             elif restart:
@@ -1195,6 +1232,12 @@ def map(
 
     # Define a wrapper function to ensure each execution uses the specified Dask scheduler.
     def execute_map(*args, **kwargs):
+        """
+        Apply the wrapped function to one set of arguments.
+
+        Sets the requested scheduler configuration and passes the output of
+        the call to `try_to_store` for optional persistence.
+        """
         config = {"scheduler": scheduler} if scheduler is not None else {}
         with dask.config.set(config):
             result = func(*args, **kwargs)
@@ -1532,6 +1575,9 @@ def init_zarr_groups(out_path, groups, multiburst, **kwargs):
 
     # Create and save an empty dataset in each group path to initialize it.
     def write_dt(dt_group):
+        """
+        Write an empty initialized DataTree for one output Zarr group.
+        """
         dt = xr.DataTree.from_dict({kk: xr.Dataset() for kk in ["measurements"]})
         write(
             dt,

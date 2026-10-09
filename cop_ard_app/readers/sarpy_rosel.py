@@ -56,6 +56,24 @@ _WGS84_B = 6356752.314245179
 
 
 def _clean_text(value: str | None, keep_not_available: bool = True) -> str | None:
+    """
+    Normalize raw XML text into a usable string.
+
+    Strips surrounding whitespace and maps missing or empty strings to ``None``.
+
+    Parameters
+    ----------
+    value : str or None
+        The raw text extracted from an XML element.
+    keep_not_available : bool, optional
+        Whether the literal ``NOT_AVAILABLE`` sentinel is kept as text. When
+        False, it is converted to ``None``. Defaults to True.
+
+    Returns
+    -------
+    str or None
+        The cleaned text, or ``None`` when the value is missing or empty.
+    """
     if value is None:
         return None
     value = value.strip()
@@ -74,6 +92,47 @@ def poly_fit_2d(
     y_order: int = 2,
     rcond: float | None = None,
 ) -> tuple[numpy.ndarray, numpy.ndarray, int, numpy.ndarray]:
+    """
+    Fits a bivariate polynomial to scattered data by least squares.
+
+    Coordinates are rescaled into [0, 1] for numerical stability, a design
+    matrix with columns ``x**i * y**j`` is assembled, and
+    ``scipy.linalg.lstsq`` solves it.  The resulting coefficients are
+    rescaled back to the original (unnormalized) coordinate units.
+
+    Parameters
+    ----------
+    x : numpy.ndarray
+        Sample coordinates of the first polynomial variable.
+    y : numpy.ndarray
+        Sample coordinates of the second polynomial variable.
+    z : numpy.ndarray
+        Sample values to be modeled by the polynomial.
+    x_order : int, optional
+        Maximum polynomial power in ``x``. Defaults to 2.
+    y_order : int, optional
+        Maximum polynomial power in ``y``. Defaults to 2.
+    rcond : float or None, optional
+        Cutoff for small singular values, passed to ``scipy.linalg.lstsq``
+        as ``cond``. Defaults to None.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray, int, numpy.ndarray]
+        ``(coeffs, residuals, rank, singular_values)`` mirroring the
+        ``scipy.linalg.lstsq`` output, where ``coeffs`` has shape
+        ``(x_order + 1, y_order + 1)`` and satisfies
+        ``z ~= sum coeffs[i, j] * x**i * y**j``.  Residuals are
+        normalized by the number of samples.
+
+    Raises
+    ------
+    TypeError
+        Raised when ``x``, ``y``, or ``z`` is not a numpy array.
+    ValueError
+        Raised when ``x``, ``y``, and ``z`` do not have the same number
+        of elements.
+    """
     # --- Input Validation ---
     if (isinstance(x, numpy.ndarray) and isinstance(y, numpy.ndarray) and isinstance(z, numpy.ndarray)) is False:
         raise TypeError("x, y, z must be numpy arrays")
@@ -129,6 +188,22 @@ def parse_timestring(time_string: str, precision: Any = "us") -> numpy.datetime6
 
 
 def _parse_xml(file_name: str) -> ElementTree.Element:
+    """
+    Read an Aresys GPP metadata XML, removing its default namespace.
+
+    The supplied files declare a namespace but use unqualified element names,
+    so the default-namespace declaration is stripped before parsing.
+
+    Parameters
+    ----------
+    file_name : str
+        Path to the XML metadata file.
+
+    Returns
+    -------
+    ElementTree.Element
+        Root element (``AresysXmlDoc``) of the parsed document.
+    """
     with open(file_name, "rb") as fi:
         xml_string = fi.read()
     # The supplied file uses a prefixed namespace declaration but unqualified
@@ -138,6 +213,26 @@ def _parse_xml(file_name: str) -> ElementTree.Element:
 
 
 def _required(node: ElementTree.Element, path: str) -> ElementTree.Element:
+    """
+    Find an XML element whose presence and text content are mandatory.
+
+    Parameters
+    ----------
+    node : ElementTree.Element
+        Parent element to search.
+    path : str
+        ElementTree find path of the required element.
+
+    Returns
+    -------
+    ElementTree.Element
+        The found element with non-empty text.
+
+    Raises
+    ------
+    SarpyIOError
+        Raised when the element is missing or has no text.
+    """
     out = node.find(path)
     if out is None or out.text is None:
         raise SarpyIOError(f"Required ROSE-L metadata element is missing: {path}")
@@ -145,6 +240,9 @@ def _required(node: ElementTree.Element, path: str) -> ElementTree.Element:
 
 
 def _float(node: ElementTree.Element, path: str) -> float:
+    """
+    Reads a required XML element's text as a float.
+    """
     node_text = _required(node, path).text
     if node_text is None:
         raise TypeError("Expected text, got None")
@@ -152,6 +250,9 @@ def _float(node: ElementTree.Element, path: str) -> float:
 
 
 def _int(node: ElementTree.Element, path: str) -> int:
+    """
+    Reads a required XML element's text as an integer.
+    """
     node_text = _required(node, path).text
     if node_text is None:
         raise TypeError("Expected text, got None")
@@ -159,10 +260,33 @@ def _int(node: ElementTree.Element, path: str) -> int:
 
 
 def _vals(node: ElementTree.Element, path: str) -> numpy.ndarray:
+    """
+    Collect all matching XML child elements as a 1-D float64 array.
+    """
     return numpy.asarray([float(entry.text) for entry in node.findall(path)], dtype="float64")  # type: ignore
 
 
 def _polarization(value: str) -> tuple[str, str, str]:
+    """
+    Split ROSE-L polarization text into SICD polarization designators.
+
+    Accepts both ``L:Q`` and ``L/Q`` forms and uppercases both halves.
+
+    Parameters
+    ----------
+    value : str
+        Polarization text from ``Channel/SwathInfo/Polarization``.
+
+    Returns
+    -------
+    tuple[str, str, str]
+        ``(tx, rcv, tx:rcv)`` uppercase polarization designators.
+
+    Raises
+    ------
+    SarpyIOError
+        Raised when the text does not contain exactly two designators.
+    """
     parts = [part.strip().upper() for part in value.replace(":", "/").split("/")]
     if len(parts) != 2:
         raise SarpyIOError(f"Unexpected ROSE-L polarization {value!r}")
@@ -195,6 +319,11 @@ def _ecf_scp_from_zero_doppler(
     x0 = arp - rhat * nadir_distance + look * along
 
     def residual(x):
+        """
+        Residual of the three geolocation constraints for a candidate
+        SCP position ``x``: the slant-range sphere, the zero-Doppler
+        plane, and the WGS-84 ellipsoid surface.
+        """
         los = x - arp
         return numpy.asarray(
             [
@@ -216,6 +345,25 @@ class ROSELSwathDetails:
     """Interpret one GPP XML/binary pair (one swath and polarization)."""
 
     def __init__(self, file_name: str):
+        """
+        Parse one Aresys GPP metadata XML into per-burst state.
+
+        Reads the state vectors and every ScanSAR burst descriptor from
+        the document, keeping absolute paths to the XML for later lookup
+        of its companion raw raster.
+
+        Parameters
+        ----------
+        file_name : str
+            Path to the ``.xml`` metadata file of one swath/polarization pair.
+
+        Raises
+        ------
+        SarpyIOError
+            Raised when the path is not a file, the document root is not an
+            ``AresysXmlDoc``, or required state-vector/burst data is
+            inconsistent.
+        """
         if not os.path.isfile(file_name):
             raise SarpyIOError(f"Path {file_name} does not exist or is not a file")
         self._file_name = os.path.abspath(file_name)
@@ -231,14 +379,23 @@ class ROSELSwathDetails:
 
     @property
     def file_name(self) -> str:
+        """
+        Absolute path to the parsed XML metadata file.
+        """
         return self._file_name
 
     @property
     def directory_name(self) -> str:
+        """
+        Directory containing the XML metadata file.
+        """
         return self._directory_name
 
     @property
     def swath(self) -> str:
+        """
+        The near (N) or far (P) swath identifier from ``Channel/SwathInfo/Swath``.
+        """
         swath_node = _required(self._root_node, "./Channel/SwathInfo/Swath").text
         if swath_node is None:
             raise TypeError()
@@ -246,6 +403,10 @@ class ROSELSwathDetails:
 
     @property
     def polarization(self) -> str:
+        """
+        The transmit/receive polarization string (e.g. ``L/Q``) from
+        ``Channel/SwathInfo/Polarization``.
+        """
         pol_node = _required(self._root_node, "./Channel/SwathInfo/Polarization").text
         if pol_node is None:
             raise TypeError()
@@ -253,10 +414,34 @@ class ROSELSwathDetails:
 
     @property
     def bursts(self) -> list[dict]:
+        """
+        Deep copy of the parsed burst descriptors.
+
+        Returns
+        -------
+        list[dict]
+            Per-burst metadata with keys ``number``, ``line_offset``,
+            ``num_lines``, ``num_samples``, ``range_start_time`` (s),
+            ``azimuth_start_time`` (numpy.datetime64), and ``center_shift`` (s).
+        """
         return copy.deepcopy(self._bursts)
 
     @property
     def binary_file(self) -> str:
+        """
+        Path to the raw complex raster declared in ``Channel/RasterInfo/FileName``.
+
+        The declared name is resolved against the directory of the XML file.
+        When it carries no extension, ``.bin``, ``.raw``, and ``.dat``
+        suffixes are tried in turn.
+
+        Returns
+        -------
+        str
+            Absolute path of the first candidate that exists, or the
+            declared path when none exists so that reader construction
+            reports an informative error.
+        """
         name = _required(self._root_node, "./Channel/RasterInfo/FileName").text
         if name is None:
             raise TypeError()
@@ -272,6 +457,20 @@ class ROSELSwathDetails:
         return candidates[0]
 
     def _parse_state_vectors(self) -> None:
+        """
+        Read ``Channel/StateVectorData`` into absolute-time state arrays.
+
+        Parses the ``pSV_m`` positions and ``vSV_mOs`` velocities (WGS-84 ECF,
+        meters and meters/second), verifies their count against the declared
+        ``nSV_n``, and builds a uniform time grid from ``t_ref_Utc`` advanced
+        in ``dtSV_s`` steps.
+
+        Raises
+        ------
+        SarpyIOError
+            Raised when the position and velocity arrays are incompatible or
+            their count differs from the declared ``nSV_n``.
+        """
         pos = _vals(self._root_node, "./Channel/StateVectorData/pSV_m/val")
         vel = _vals(self._root_node, "./Channel/StateVectorData/vSV_mOs/val")
         if pos.size != vel.size or pos.size % 3 != 0:
@@ -290,6 +489,24 @@ class ROSELSwathDetails:
         self._state_velocity = vel.reshape((-1, 3))  # type: ignore
 
     def _lines_per_burst(self, burst_number: int) -> int:
+        """
+        Number of raster lines that a given burst contributes.
+
+        Applies the last entry of ``LinesPerBurstChangeList/Lines`` whose
+        ``FromBurst`` attribute is at or below ``burst_number``.  When no
+        change list is present, the total ``RasterInfo/Lines`` is divided
+        evenly over ``BurstInfo/NumberOfBursts``.
+
+        Parameters
+        ----------
+        burst_number : int
+            One-based burst number being queried.
+
+        Returns
+        -------
+        int
+            Applicable number of lines per burst.
+        """
         changes = []
         for entry in self._root_node.findall("./Channel/BurstInfo/LinesPerBurstChangeList/Lines"):
             if entry.text is None:
@@ -307,6 +524,27 @@ class ROSELSwathDetails:
         return value
 
     def _parse_bursts(self) -> list[dict]:
+        """
+        Parse every ``Channel/BurstInfo/Burst`` element into a descriptor dict.
+
+        Each dictionary records the burst ``number`` (from the ``N``
+        attribute), the cumulative ``line_offset`` into the shared raster,
+        ``num_lines`` from :meth:`_lines_per_burst`, ``num_samples`` from
+        ``RasterInfo/Samples``, ``range_start_time`` (s), ``azimuth_start_time``
+        (UTC timestamp), and ``center_shift`` (s).  The line counts are
+        validated to sum to ``RasterInfo/Lines``.
+
+        Returns
+        -------
+        list[dict]
+            Burst descriptors in document order.
+
+        Raises
+        ------
+        SarpyIOError
+            Raised when the summed line counts do not match
+            ``RasterInfo/Lines``.
+        """
         bursts = []
         line_offset = 0
         samples = _int(self._root_node, "./Channel/RasterInfo/Samples")
@@ -338,6 +576,30 @@ class ROSELSwathDetails:
         return bursts
 
     def _position(self, collect_start: numpy.datetime64) -> PositionType:
+        """
+        Fit the SICD ARP polynomial to the state vectors for one burst.
+
+        Absolute state-vector timestamps are converted to seconds relative to
+        ``collect_start`` and fitted with
+        :func:`sarpy.io.complex.utils.fit_position_xvalidation` at a maximum
+        degree of 8.
+
+        Parameters
+        ----------
+        collect_start : numpy.datetime64
+            Burst collection start time, the time origin of the returned
+            ``ARPPoly``.
+
+        Returns
+        -------
+        PositionType
+            Position object holding a WGS-84 ECF XYZ polynomial.
+
+        Raises
+        ------
+        TypeError
+            Raised when the state vectors have not been parsed yet.
+        """
         if self._state_time is None:
             raise TypeError()
         times = numpy.asarray(
@@ -349,6 +611,30 @@ class ROSELSwathDetails:
         return PositionType(ARPPoly=XYZPolyType(X=px, Y=py, Z=pz))
 
     def _doppler_entries(self, tag: str) -> list[dict]:
+        """
+        Collect the annotated per-range Doppler polynomials of a tag group.
+
+        Each entry holds the ``number`` (from the ``Number`` attribute,
+        falling back to ordinal position), ``coeffs`` from ``pol/val`` (the
+        annotated polynomial in range and azimuth time), ``range_ref`` from
+        ``trg0_s`` (s), and ``az_time`` from ``taz0_Utc``.
+
+        Parameters
+        ----------
+        tag : str
+            XML child tag to enumerate, e.g. ``DopplerRate`` or
+            ``DopplerCentroid`` under ``Channel``.
+
+        Returns
+        -------
+        list[dict]
+            The annotated Doppler entries.
+
+        Raises
+        ------
+        SarpyIOError
+            Raised when no entries are found for the tag.
+        """
         output: list[dict] = []
         for node in self._root_node.findall(f"./Channel/{tag}"):
             time_node = _required(node, "./taz0_Utc").text
@@ -368,9 +654,48 @@ class ROSELSwathDetails:
 
     @staticmethod
     def _nearest_entry(entries: Sequence[dict], time: numpy.datetime64) -> dict:
+        """
+        Select the entry whose ``az_time`` is closest to ``time``.
+
+        Parameters
+        ----------
+        entries : Sequence[dict]
+            Candidate entries as produced by :meth:`_doppler_entries`.
+        time : numpy.datetime64
+            Time to match against.
+
+        Returns
+        -------
+        dict
+            The entry with the smallest absolute time difference in seconds.
+        """
         return min(entries, key=lambda item: abs(get_seconds(item["az_time"], time, precision="us")))
 
     def _collection_info(self, burst: dict) -> CollectionInfoType:
+        """
+        Build the SICD CollectionInfo metadata for one burst.
+
+        The XML ``DataSetInfo/AcquisitionMode`` is mapped to a SICD radar
+        mode: SCANSAR becomes SPOTLIGHT (a single burst is spotlight-like in
+        SICD's formation geometry), otherwise STRIPMAP.  The core name is
+        composed as ``ROSEL_{swath}_{polarization}_B{burst}_{date}`` and
+        GPP-specific provenance is stored in ``Parameters``.
+
+        Parameters
+        ----------
+        burst : dict
+            Burst descriptor as produced by :meth:`_parse_bursts`.
+
+        Returns
+        -------
+        CollectionInfoType
+            Populated collection metadata.
+
+        Raises
+        ------
+        TypeError
+            Raised when ``AcquisitionMode`` has no text.
+        """
         mode_id_node = _required(self._root_node, "./Channel/DataSetInfo/AcquisitionMode")
         if mode_id_node.text is None:
             raise TypeError("Expected string, got None")
@@ -394,6 +719,14 @@ class ROSELSwathDetails:
         )
 
     def _image_creation(self) -> ImageCreationType:
+        """
+        Build ImageCreation metadata from ``DataSetInfo/ProcessingDate``.
+
+        Returns
+        -------
+        ImageCreationType
+            Processing timestamp attributed to the ROSE-L GPP application.
+        """
         processing_date = _required(self._root_node, "./Channel/DataSetInfo/ProcessingDate").text
         if processing_date is None:
             raise TypeError("Expected string, got None")
@@ -401,6 +734,29 @@ class ROSELSwathDetails:
         return ImageCreationType(Application="ROSE-L GPP", DateTime=processing, Site="N/A", Profile="sarpy")
 
     def _image_data(self, burst: dict) -> ImageDataType:
+        """
+        Build ImageData describing one burst's window of the shared raster.
+
+        Rows are range samples (``RasterInfo/Samples``) and columns are the
+        burst's lines; only ``CellType`` of ``FLOAT_COMPLEX`` is supported,
+        mapped to the SICD pixel type RE32F_IM32F, with the SCP placed at
+        the window center.
+
+        Parameters
+        ----------
+        burst : dict
+            Burst descriptor.
+
+        Returns
+        -------
+        ImageDataType
+            Image dimensions and SCP pixel for the burst.
+
+        Raises
+        ------
+        SarpyIOError
+            Raised when ``RasterInfo/CellType`` is not ``FLOAT_COMPLEX``.
+        """
         samples = _int(self._root_node, "./Channel/RasterInfo/Samples")
         cell_type_node = _required(self._root_node, "./Channel/RasterInfo/CellType")
         if cell_type_node.text is None:
@@ -419,6 +775,20 @@ class ROSELSwathDetails:
         )
 
     def _radar_collection(self) -> RadarCollectionType:
+        """
+        Build the SICD RadarCollection from the XML Pulse and DataSetInfo.
+
+        Uses ``DataSetInfo/fc_hz`` (center frequency), ``PulseLength``,
+        ``Bandwidth``, ``PulseSamplingRate`` (ADC rate), and
+        ``PulseStartFrequency`` to describe a single CHIRP waveform; the
+        window length follows from samples/ADC-rate.
+
+        Returns
+        -------
+        RadarCollectionType
+            Radar collection with one waveform and the channel's TX/RX
+            polarization.
+        """
         center = _float(self._root_node, "./Channel/DataSetInfo/fc_hz")
         pulse_length = _float(self._root_node, "./Channel/Pulse/PulseLength")
         bandwidth = _float(self._root_node, "./Channel/Pulse/Bandwidth")
@@ -446,6 +816,24 @@ class ROSELSwathDetails:
         )
 
     def _timeline(self, burst: dict) -> TimelineType:
+        """
+        Build the SICD Timeline for one burst.
+
+        The collection duration is ``num_lines * LinesStep``; the IPP
+        polynomial maps time to line index using the
+        ``AcquisitionTimeLine/PRF_changes_values`` value when present, or
+        the reciprocal of the line spacing otherwise.
+
+        Parameters
+        ----------
+        burst : dict
+            Burst descriptor.
+
+        Returns
+        -------
+        TimelineType
+            Timeline starting at the burst's azimuth start time.
+        """
         line_step = _float(self._root_node, "./Channel/RasterInfo/LinesStep")
         duration = burst["num_lines"] * line_step
         prf_node = self._root_node.find("./Channel/AcquisitionTimeLine/PRF_changes_values/val")
@@ -465,7 +853,37 @@ class ROSELSwathDetails:
         self,
         burst: dict,
     ):
+        """
+        Evaluate the GPP demodulation phase on a coarse range/azimuth grid.
+
+        Implements the ARBD-of-GPP formula: the annotated Doppler rate and
+        centroid polynomials are evaluated on a 50x50 grid of azimuth times
+        (``num_lines * LinesStep`` over ``SamplesStep * num_samples +
+        range_start_time``), giving a zero-Doppler time reference ``t_ref``
+        and the ScanSAR demodulation phase
+        ``pi * k_t * (t_a - t_ref)**2 + 2 * pi * f_dc * t_a`` (radians).
+
+        Parameters
+        ----------
+        burst : dict
+            Burst descriptor.
+
+        Returns
+        -------
+        tuple
+            ``(phi_demod, t_a, t_r)`` on an ``(azimuth, range)`` grid of
+            shape ``(50, 50)``: the demodulation phase (rad), the azimuth
+            time relative to the burst start (s), and the range time
+            relative to the first sample (s).
+        """
+
         def _evaluate_gpp_poly(poly, az_axis, rg_axis):
+            """
+            Evaluate an annotated GPP polynomial (``coeffs``, ``range_ref``,
+            ``az_time``) on a range/azimuth grid by remapping its annotated
+            coefficient layout into ``polygrid2d`` coefficients offset from
+            the annotation reference point.
+            """
             coeffs = numpy.zeros((2, poly["coeffs"].size - 2), dtype="float64")
             coeffs[0, :2] = poly["coeffs"][:2]
             coeffs[1, :2] = poly["coeffs"][2:4]
@@ -519,6 +937,42 @@ class ROSELSwathDetails:
         position: PositionType,
         collection_info: CollectionInfoType,
     ) -> tuple[GridType, RMAType, GeoDataType, SCPCOAType]:
+        """
+        Derive the SICD Grid, RMA, GeoData, and SCPCOA for one burst.
+
+        The slant-range spacing comes from ``SamplesStep`` and the azimuth
+        spacing from ``LinesStep`` scaled by the DopplerRate-derived SS
+        scale; the zero-Doppler SCP is solved from the ARP state vectors
+        and ``DataSetInfo/SideLooking``.  The annotated Doppler rate and
+        centroid polynomials are shifted to the SICD coordinates to build
+        the INCA, its ``DopCentroidPoly`` is combined with the acquisition
+        geometry term, and ``DeltaKCOAPoly`` is re-fitted (order 2 range,
+        order 3 azimuth) against the evaluated GPP demodulation phase.
+
+        Parameters
+        ----------
+        burst : dict
+            Burst descriptor.
+        image_data : ImageDataType
+            Burst image dimensions, used to locate the SCP pixel.
+        position : PositionType
+            Fitted ARP polynomial for the burst.
+        collection_info : CollectionInfoType
+            Collection metadata, consulted for the radar mode type.
+
+        Returns
+        -------
+        tuple[GridType, RMAType, GeoDataType, SCPCOAType]
+            ``(grid, rma, geo, scpcoa)`` with ``rma`` of algorithm OMEGA_K
+            carrying the INCA state.
+
+        Raises
+        ------
+        SarpyIOError
+            Raised when the azimuth sample-spacing scale is invalid, the
+            mode type is not SPOTLIGHT, or the ARP velocity at the
+            Doppler centroid estimate time is not a usable vector.
+        """
         center_frequency = _float(self._root_node, "./Channel/DataSetInfo/fc_hz")
         sample_time = _float(self._root_node, "./Channel/RasterInfo/SamplesStep")
         row_ss = 0.5 * speed_of_light * sample_time
@@ -655,6 +1109,18 @@ class ROSELSwathDetails:
         return grid, RMAType(RMAlgoType="OMEGA_K", INCA=inca), geo, scpcoa
 
     def get_sicds(self) -> list[SICDType]:
+        """
+        Assemble one complete SICD per burst from the parsed XML.
+
+        Combines the collection info, image creation, image data, geo
+        metadata, grid, timeline, position, radar collection, image
+        formation, and RMA state, then calls ``sicd.derive()``.
+
+        Returns
+        -------
+        list[SICDType]
+            Full SICD objects, one per ScanSAR burst, in document order.
+        """
         output = []
         _, _, tx_rcv = _polarization(self.polarization)
         radar_collection = self._radar_collection()
@@ -695,6 +1161,27 @@ class ROSELSwathDetails:
         return output
 
     def get_data_segments(self) -> list[SubsetSegment]:
+        """
+        Build one subset data segment per burst over a shared memmap.
+
+        The raw raster is memory-mapped as a ``(lines, samples)`` array of
+        complex64 honoring ``RasterInfo/HeaderOffsetBytes`` and the declared
+        ``RasterInfo/ByteOrder`` (little or big endian), transposed to a
+        formatted ``(samples, lines)`` layout, and then windowed to each
+        burst's ``line_offset``/``num_lines`` line range.
+
+        Returns
+        -------
+        list[SubsetSegment]
+            One segment per burst in document order, sharing a single
+            parent memmap that is closed after the last subset.
+
+        Raises
+        ------
+        SarpyIOError
+            Raised when the declared binary raster file cannot be found or
+            ``RowPrefixBytes`` is non-zero.
+        """
         path = self.binary_file
         if not os.path.isfile(path):
             raise SarpyIOError(f"Binary raster declared by {self.file_name} was not found: {path}")
@@ -739,6 +1226,24 @@ class ROSELDetails:
     """Discover every swath/polarization XML in a GPP product folder."""
 
     def __init__(self, path: str):
+        """
+        Discover and parse every readable Aresys XML under a path.
+
+        All ``*.xml`` files in the directory are sorted and attempted in
+        order; files that fail to parse as ROSE-L GPP documents are
+        silently skipped.
+
+        Parameters
+        ----------
+        path : str
+            GPP product directory, or a single metadata XML file.
+
+        Raises
+        ------
+        SarpyIOError
+            Raised when the path does not exist, or no readable ROSE-L GPP
+            XML was found.
+        """
         if os.path.isdir(path):
             xml_files = sorted(glob.glob(os.path.join(os.path.abspath(path), "*.xml")))
         elif os.path.isfile(path):
@@ -758,13 +1263,33 @@ class ROSELDetails:
 
     @property
     def directory_name(self) -> str:
+        """
+        Directory of the GPP product, i.e. the folder scanned or the
+        directory of a single metadata XML.
+        """
         return self._directory_name
 
     @property
     def swaths(self) -> tuple[ROSELSwathDetails, ...]:
+        """
+        Parsed swath/polarization details.
+
+        Returns
+        -------
+        tuple[ROSELSwathDetails, ...]
+            One entry for each successfully parsed XML, in sorted file order.
+        """
         return tuple(self._swaths)
 
     def get_sicds(self) -> list[SICDType]:
+        """
+        Concatenate the SICDs of all swaths.
+
+        Returns
+        -------
+        list[SICDType]
+            One SICD per ScanSAR burst across every swath/polarization.
+        """
         return [sicd for detail in self._swaths for sicd in detail.get_sicds()]
 
 
@@ -774,6 +1299,26 @@ class ROSELReader(SICDTypeReader):
     __slots__ = ("_rosel_details",)
 
     def __init__(self, rosel_details: str | ROSELDetails):
+        """
+        Collect SICDs and data segments from every swath into one reader.
+
+        Each swath's SICDs and data segments are paired and checked for a
+        count match, then handed to :class:`SICDTypeReader`.
+
+        Parameters
+        ----------
+        rosel_details : str or ROSELDetails
+            Path to a GPP product folder or a single metadata XML, or an
+            already-constructed :class:`ROSELDetails`.
+
+        Raises
+        ------
+        TypeError
+            Raised when ``rosel_details`` is neither a path nor a
+            :class:`ROSELDetails`.
+        SarpyIOError
+            Raised when a swath's SICD and data-segment counts differ.
+        """
         if isinstance(rosel_details, str):
             rosel_details = ROSELDetails(rosel_details)
         if not isinstance(rosel_details, ROSELDetails):
@@ -793,10 +1338,16 @@ class ROSELReader(SICDTypeReader):
 
     @property
     def rosel_details(self) -> ROSELDetails:
+        """
+        The underlying ROSELDetails parsed for this reader.
+        """
         return self._rosel_details
 
     @property
     def file_name(self) -> str:
+        """
+        Directory of the GPP product backing this reader.
+        """
         return self._rosel_details.directory_name
 
 

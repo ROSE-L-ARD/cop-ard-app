@@ -72,6 +72,24 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_xml(file_name: str, without_ns: bool = False) -> ElementTree.Element | tuple[dict, ElementTree.Element]:
+    """
+    Parses an XML file and returns its root node, and (unless suppressed) its namespace map.
+
+    Parameters
+    ----------
+    file_name : str
+        The path to the XML file to parse.
+    without_ns : bool, optional
+        Whether to return only the root node, skipping the namespace
+        prefix parsing. Defaults to False.
+
+    Returns
+    -------
+    tuple[dict, ElementTree.Element] | ElementTree.Element
+        The `(namespaces, root node)` tuple, where `namespaces` maps
+        namespace prefixes to URIs; or just the root node if `without_ns` is True.
+    """
+
     root_node = ElementTree.parse(file_name).getroot()
     if without_ns:
         return root_node
@@ -84,6 +102,28 @@ def _parse_xml(file_name: str, without_ns: bool = False) -> ElementTree.Element 
 
 
 def find_string(root_node, path) -> str:
+    """
+    Finds the XML node at the given path, and returns its text content.
+
+    Parameters
+    ----------
+    root_node : ElementTree.Element
+        The root XML node to search within.
+    path : str
+        The element path (XPath-style) of the node whose text is sought.
+
+    Returns
+    -------
+    str
+        The text content of the found node.
+
+    Raises
+    ------
+    TypeError
+        If the node found at `path` is not an `ElementTree.Element`,
+        or if its text content is None.
+    """
+
     node = root_node.find(path)
     if not isinstance(node, ElementTree.Element):
         raise TypeError(f"Expected Element for {path}")
@@ -98,6 +138,40 @@ def find_string(root_node, path) -> str:
 
 
 class SentinelDetails:
+    """
+    Parser and interpreter for a Sentinel-1 SAFE package.
+
+    This class locates and validates the `manifest.safe` file within a Sentinel-1
+    SLC package, extracts the platform and product information from it, and builds
+    the SICD metadata collections for each measurement data unit described by the
+    manifest.
+
+    Attributes
+    ----------
+    file_name : str
+        The path to the `manifest.safe` file.
+    directory_name : str
+        The Sentinel-1 package directory containing the `manifest.safe` file.
+    satellite : str
+        The platform family name, required to be `SENTINEL-1`.
+    product_type : str
+        The product type, required to be `SLC`.
+
+    Methods
+    -------
+    _get_file_sets :
+        Groups the measurement, product, noise, and calibration file paths
+        by measurement data unit.
+    _parse_product_sicd :
+        Builds the SICD collection(s) from a product (SAFE) annotation file.
+    _refine_using_calibration :
+        Adds radiometric scale-factor polynomials from a calibration file.
+    _refine_using_noise :
+        Adds radiometric noise polynomials from a noise file.
+    get_sicd_collection :
+        Returns the `(data file, sicds)` pairs for each measurement data unit.
+    """
+
     __slots__ = ("_base_sicd", "_directory_name", "_file_name", "_ns", "_product_type", "_root_node", "_satellite")
 
     def __init__(self, file_name: str):
@@ -223,6 +297,21 @@ class SentinelDetails:
 
     @staticmethod
     def _parse_pol(str_in: str) -> str:
+        """
+        Reformats a Sentinel polarization code (e.g. `RR`) into the SICD
+        colon-separated form (e.g. `R:R`).
+
+        Parameters
+        ----------
+        str_in : str
+            The polarization code string.
+
+        Returns
+        -------
+        str
+            The first two characters of `str_in`, separated by a colon.
+        """
+
         return f"{str_in[0]}:{str_in[1]}"
 
     def _get_file_sets(self) -> list[dict]:
@@ -237,6 +326,11 @@ class SentinelDetails:
         """
 
         def get_file_location(schema_type, tids):
+            """
+            Resolves a data-object ID (or list of IDs) of the given schema type to the
+            corresponding file path within the package directory, or None if not found.
+            """
+
             if isinstance(tids, str):
                 tids = [
                     tids,
@@ -372,14 +466,50 @@ class SentinelDetails:
         geo_coords = geodetic_to_ecf(geo_coords)
 
         def get_center_frequency():  # type: () -> float
+            """
+            Reads the radar center frequency in Hz from the
+            `generalAnnotation/productInformation/radarFrequency` field.
+
+            Returns
+            -------
+            float
+                The center frequency in Hz.
+            """
+
             return float(find_string(root_node, "./generalAnnotation/productInformation/radarFrequency"))
 
         def get_image_col_spacing_zdt():  # type: () -> float
+            """
+            Returns the image column spacing in zero-doppler time (seconds),
+            read from `imageAnnotation/imageInformation/azimuthTimeInterval`.
+
+            Returns
+            -------
+            float
+                The per-column zero-doppler time spacing in seconds.
+            """
+
             # Image column spacing in zero doppler time (seconds)
             # Sentinel-1 is always right-looking, so this should always be positive
             return float(find_string(root_node, "./imageAnnotation/imageInformation/azimuthTimeInterval"))
 
         def get_image_data():  # type: () -> ImageDataType
+            """
+            Builds the SICD `ImageData` element from the product annotation file.
+
+            Reads `imageAnnotation/imageInformation/pixelValue` (only 16-bit complex
+            SLC data is supported); the row and column counts come from
+            `swathTiming/samplesPerBurst` and `swathTiming/linesPerBurst` when the
+            collect contains bursts (TOPSAR), and otherwise from `numberOfSamples`
+            and `numberOfLines` (STRIPMAP).
+
+            Returns
+            -------
+            ImageDataType
+                The image data element with `NumRows`, `NumCols`, full-image extent,
+                and an `SCPPixel` at the center of a single-burst image.
+            """
+
             _pv = find_string(root_node, "./imageAnnotation/imageInformation/pixelValue")
             if _pv == "Complex":
                 pixel_type = "RE16I_IM16I"
@@ -408,6 +538,22 @@ class SentinelDetails:
             )
 
         def get_common_grid():  # type: () -> GridType
+            """
+            Builds the SICD `Grid` element common to all bursts of the product.
+
+            The row spacing comes from the inverse of
+            `generalAnnotation/productInformation/rangeSamplingRate`, the column
+            spacing from `imageAnnotation/imageInformation/azimuthPixelSpacing`, and
+            the windowing parameters from the
+            `imageAnnotation/processingInformation/swathProcParamsList` entries.
+
+            Returns
+            -------
+            GridType
+                The grid element (RG-ZERO type, with slant image plane when the
+                projection is `Slant Range`, and row/column `DirParamType`s).
+            """
+
             center_frequency = get_center_frequency()
             image_plane = (
                 "SLANT"
@@ -469,6 +615,21 @@ class SentinelDetails:
             return GridType(ImagePlane=image_plane, Type="RGZERO", Row=row, Col=col)
 
         def get_common_timeline():  # type: () -> TimelineType
+            """
+            Builds the preliminary SICD `Timeline` element common to all bursts.
+
+            The pulse read frequency (PRF) is read from
+            `generalAnnotation/downlinkInformationList/downlinkInformation/prf`; the
+            `TEnd` and `IPPEnd` are placeholder values, to be corrected per collect
+            later.
+
+            Returns
+            -------
+            TimelineType
+                The timeline element with a single IPPSet carrying the
+                `(0, prf)` IPP polynomial.
+            """
+
             prf = float(find_string(root_node, "./generalAnnotation/downlinkInformationList/downlinkInformation/prf"))
             # NB: TEnd and IPPEnd are nonsense values which will be corrected
             return TimelineType(
@@ -478,6 +639,22 @@ class SentinelDetails:
             )
 
         def get_common_radar_collection():  # type: () -> RadarCollectionType
+            """
+            Builds the SICD `RadarCollection` element for the product.
+
+            Copies the collection-wide radar collection and sets the TX
+            polarization from `adsHeader/polarisation`, the TX frequency range
+            from the center frequency plus
+            `downlinkValues/txPulseStartFrequency` and the pulse length times
+            the ramp rate, and the waveform parameters from the downlink values
+            and the `swlList` receive window lengths.
+
+            Returns
+            -------
+            RadarCollectionType
+                The completed radar collection element.
+            """
+
             radar_collection = out_sicd.RadarCollection.copy()
             center_frequency = get_center_frequency()
             downlink_values = "./generalAnnotation/downlinkInformationList/downlinkInformation/downlinkValues"
@@ -515,6 +692,21 @@ class SentinelDetails:
             return radar_collection
 
         def get_image_formation():  # type: () -> ImageFormationType
+            """
+            Builds the SICD `ImageFormation` element for the product.
+
+            Determines the channel index matching the `adsHeader/polarisation`
+            of this data file within the collection-wide receive channels, and
+            records the processing polarization, TX frequency range, and RMA
+            image formation algorithm.
+
+            Returns
+            -------
+            ImageFormationType
+                The image formation element (with `RcvChanProc`, polarization,
+                and TX frequency processing information).
+            """
+
             st_beam_comp = "GLOBAL" if out_sicd.CollectionInfo.RadarMode.ModeID[0] == "S" else "SV"
             pol = self._parse_pol(find_string(root_node, "./adsHeader/polarisation"))
             # which channel does this pol correspond to?
@@ -538,6 +730,19 @@ class SentinelDetails:
             )
 
         def get_rma():  # type: () -> RMAType
+            """
+            Builds the preliminary SICD `RMA` element common to all bursts.
+
+            Uses `imageAnnotation/imageInformation/slantRangeTime` together with the
+            range sampling rate to compute the range to closest approach (RCA) at the
+            SCP, and sets the frequency zero to the center frequency.
+
+            Returns
+            -------
+            RMAType
+                The RMA element, with an `INCA` sub-element.
+            """
+
             center_frequency = get_center_frequency()
             tau_0 = float(find_string(root_node, "./imageAnnotation/imageInformation/slantRangeTime"))
             delta_tau_s = 1.0 / float(
@@ -553,6 +758,16 @@ class SentinelDetails:
             )
 
         def get_slice():  # type: () -> str
+            """
+            Returns the slice number of the product.
+
+            Returns
+            -------
+            str
+                The slice number from `imageAnnotation/imageInformation/sliceNumber`,
+                or `"0"` if that field is absent.
+            """
+
             slice_number = root_node.find("./imageAnnotation/imageInformation/sliceNumber")
             if slice_number is None:
                 return "0"
@@ -560,9 +775,33 @@ class SentinelDetails:
                 return str(slice_number.text)
 
         def get_swath():  # type: () -> str
+            """
+            Returns the swath indicator (e.g. `iw` or `ew`) of the product.
+
+            Returns
+            -------
+            str
+                The swath identifier from `adsHeader/swath`.
+            """
+
             return find_string(root_node, "./adsHeader/swath")
 
         def get_collection_info():  # type: () -> CollectionInfoType
+            """
+            Builds the SICD `CollectionInfo` element for the product.
+
+            Sets the collector name from `adsHeader/missionId` and the radar mode
+            from `adsHeader/mode`, and computes the relative orbit number from the
+            manifest `safe:relativeOrbitNumber` field if present, otherwise falling
+            back to a formula on `adsHeader/absoluteOrbitNumber`. The slice, swath,
+            and orbit values are stored in the `Parameters` dictionary.
+
+            Returns
+            -------
+            CollectionInfoType
+                The collection information element.
+            """
+
             collection_info = out_sicd.CollectionInfo.copy()
             mission_id = cast(ElementTree.Element, root_node.find("./adsHeader/missionId")).text
             collection_info.CollectorName = mission_id
@@ -599,6 +838,23 @@ class SentinelDetails:
 
         def get_state_vectors(start):
             # type: (numpy.datetime64) -> Tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray]
+            """
+            Extracts the orbit state vectors from `generalAnnotation/orbitList`.
+
+            Parameters
+            ----------
+            start : numpy.datetime64
+                The reference time relative to which the state-vector times
+                (parsed with microsecond precision) are computed.
+
+            Returns
+            -------
+            tuple
+                A tuple `(Ts, Xs, Ys, Zs)` where `Ts` are time offsets in seconds
+                from `start`, and `Xs`, `Ys`, `Zs` are the ECF position components
+                (in meters) of each state vector.
+            """
+
             orbit_list = root_node.findall("./generalAnnotation/orbitList/orbit")
             shp = (len(orbit_list),)
             Ts = numpy.empty(shp, dtype=numpy.float64)
@@ -614,6 +870,24 @@ class SentinelDetails:
 
         def get_doppler_estimates(start):
             # type: (numpy.datetime64) -> Tuple[numpy.ndarray, numpy.ndarray, List[numpy.ndarray]]
+            """
+            Extracts the Doppler centroid estimates from the
+            `dopplerCentroid/dcEstimateList` annotation.
+
+            Parameters
+            ----------
+            start : numpy.datetime64
+                The reference time relative to which the azimuth times
+                (parsed with microsecond precision) are computed.
+
+            Returns
+            -------
+            tuple
+                A tuple `(dc_az_time, dc_t0, data_dc_poly)` with the azimuth
+                times in seconds, the slant-range time references `t0` (seconds),
+                and the coefficient arrays of each `dataDcPolynomial`.
+            """
+
             dc_estimate_list = root_node.findall("./dopplerCentroid/dcEstimateList/dcEstimate")
             shp = (len(dc_estimate_list),)
             dc_az_time = numpy.empty(shp, dtype=numpy.float64)
@@ -629,6 +903,27 @@ class SentinelDetails:
 
         def get_azimuth_fm_estimates(start):
             # type: (numpy.datetime64) -> Tuple[numpy.ndarray, numpy.ndarray, List[numpy.ndarray]]
+            """
+            Extracts the azimuth fill-mode rate estimates from the
+            `generalAnnotation/azimuthFmRateList` annotation.
+
+            Handles both the old `c0/c1/c2` coefficient style and the newer
+            `azimuthFmRatePolynomial` style.
+
+            Parameters
+            ----------
+            start : numpy.datetime64
+                The reference time relative to which the azimuth times
+                (parsed with microsecond precision) are computed.
+
+            Returns
+            -------
+            tuple
+                A tuple `(az_t, az_t0, k_a_poly)` with the azimuth times in
+                seconds, the slant-range time references `t0` (seconds), and the
+                fill-mode rate polynomial coefficient arrays.
+            """
+
             azimuth_fm_rate_list = root_node.findall("./generalAnnotation/azimuthFmRateList/azimuthFmRate")
             shp = (len(azimuth_fm_rate_list),)
             az_t = numpy.empty(shp, dtype=numpy.float64)
@@ -655,6 +950,23 @@ class SentinelDetails:
 
         def set_core_name(sicd, start_dt, burst_num):
             # type: (SICDType, datetime, int) -> None
+            """
+            Sets the SICD `CollectionInfo.CoreName` and updates the `BURST`
+            parameter of the given metadata object in place.
+
+            The name is built from the start date, mission ID, mission data-take
+            ID, slice number, swath, and burst number.
+
+            Parameters
+            ----------
+            sicd : SICDType
+                The SICD metadata object to modify in place.
+            start_dt : datetime
+                The collection start date/time.
+            burst_num : int
+                The burst number to record.
+            """
+
             t_slice = int(get_slice())
             swath = get_swath()
             sicd.CollectionInfo.CoreName = "{:s}{:s}{:s}_{:02d}_{:s}_{}".format(
@@ -669,6 +981,23 @@ class SentinelDetails:
 
         def set_timeline(sicd, start, duration):
             # type: (SICDType, numpy.datetime64, float) -> None
+            """
+            Sets the collection timeline fields on the given metadata object in place.
+
+            Sets `Timeline.CollectStart` and `CollectDuration`, completes the IPP
+            set `TEnd` and `IPPEnd` using the PRF from the downlink annotation,
+            and sets `ImageFormation.TEndProc`.
+
+            Parameters
+            ----------
+            sicd : SICDType
+                The SICD metadata object to modify in place.
+            start : numpy.datetime64
+                The collection start time.
+            duration : float
+                The collection duration in seconds.
+            """
+
             prf = float(find_string(root_node, "./generalAnnotation/downlinkInformationList/downlinkInformation/prf"))
             timeline = sicd.Timeline
             timeline.CollectStart = start
@@ -679,6 +1008,18 @@ class SentinelDetails:
 
         def set_position(sicd, start):
             # type: (SICDType, numpy.datetime64) -> None
+            """
+            Fits polynomial position to the orbit state vectors and sets it
+            as the `Position.ARPPoly` of the given metadata object in place.
+
+            Parameters
+            ----------
+            sicd : SICDType
+                The SICD metadata object to modify in place.
+            start : numpy.datetime64
+                The reference time for the state vectors.
+            """
+
             Ts, Xs, Ys, Zs = get_state_vectors(start)
             poly_order = min(5, Ts.size - 1)
             P_X = polynomial.polyfit(Ts, Xs, poly_order)
@@ -688,6 +1029,37 @@ class SentinelDetails:
 
         def update_rma_and_grid(sicd, first_line_relative_start, start, return_time_dets=False):
             # type: (SICDType, Union[float, int], numpy.datetime64, bool) -> Union[None, Tuple[float, float]]
+            """
+            Completes the RMA INCA and Grid time/rate polynomials for one burst,
+            modifying the given metadata object in place.
+
+            Sets `RMA.INCA.TimeCAPoly` from the first-line zero-doppler time and
+            the column spacing, derives `DRateSFPoly` from the closest azimuth
+            fill-mode rate polynomial, and fits `DeltaKCOAPoly`, `DopCentroidPoly`,
+            and `TimeCOAPoly` over sampled image coordinates with a degree-2
+            two-dimensional fit. The fit residuals, rank, and singular values are
+            logged at debug level.
+
+            Parameters
+            ----------
+            sicd : SICDType
+                The SICD metadata object to modify in place.
+            first_line_relative_start : float
+                The zero-doppler time of the first image line, in seconds relative
+                to `start`.
+            start : numpy.datetime64
+                The collection start time, i.e. the reference time of the
+                state vectors and rate estimates.
+            return_time_dets : bool, optional
+                Whether to return the earliest and latest sampled TimeCOA times.
+                Defaults to False.
+
+            Returns
+            -------
+            tuple or None
+                The `(minimum, maximum)` sampled TimeCOA times in seconds if
+                `return_time_dets` is True, otherwise None.
+            """
 
             center_frequency = get_center_frequency()
             # set TimeCAPoly
@@ -811,6 +1183,22 @@ class SentinelDetails:
 
         def adjust_time(sicd, time_offset):
             # type: (SICDType, float) -> None
+            """
+            Shifts the time-referenced polynomials of a burst by a time offset,
+            in place.
+
+            Subtracts the offset from the constant terms of `Grid.TimeCOAPoly`
+            and `RMA.INCA.TimeCAPoly`, and shifts `Position.ARPPoly` by the
+            negative offset.
+
+            Parameters
+            ----------
+            sicd : SICDType
+                The SICD metadata object to modify in place.
+            time_offset : float
+                The time offset (seconds) by which to shift the polynomials.
+            """
+
             # adjust TimeCOAPoly
             sicd.Grid.TimeCOAPoly.Coefs[0, 0] -= time_offset
             # adjust TimeCAPoly
@@ -819,11 +1207,39 @@ class SentinelDetails:
             sicd.Position.ARPPoly = sicd.Position.ARPPoly.shift(-time_offset, return_poly=True)
 
         def update_geodata(sicd):  # type: (SICDType) -> None
+            """
+            Projects the SCP pixel to the ground and updates the SCP of the
+            SICD `GeoData` element in place.
+
+            Parameters
+            ----------
+            sicd : SICDType
+                The SICD metadata object to modify in place.
+            """
+
             scp_pixel = [sicd.ImageData.SCPPixel.Row, sicd.ImageData.SCPPixel.Col]
             ecf = sicd.project_image_to_ground(scp_pixel, projection_type="HAE")
             sicd.update_scp(ecf, coord_system="ECF")
 
         def get_scps(count):
+            """
+            Interpolates the SCP ground positions for the images of each burst.
+
+            Constructs SCPPixel locations at the center of each burst image and
+            interpolates them through the geolocation grid points of the product
+            annotation using `scipy.interpolate.griddata`.
+
+            Parameters
+            ----------
+            count : int
+                The number of SCPs, i.e. the number of burst images, to compute.
+
+            Returns
+            -------
+            numpy.ndarray
+                Array of shape `(count, 3)` with the ECF (meters) SCP coordinates.
+            """
+
             # SCPPixel - points at which to interpolate geo_pixels & geo_coords data
             scp_pixels = numpy.zeros((count, 2), dtype=numpy.float64)
             scp_pixels[:, 0] = int((out_sicd.ImageData.NumRows - 1) / 2.0)
@@ -836,6 +1252,19 @@ class SentinelDetails:
             return scps
 
         def finalize_stripmap():  # type: () -> SICDType
+            """
+            Completes the SICD metadata for a STRIPMAP (no bursts) collect.
+
+            Sets the preliminary geodata and valid-data extent, then the core name,
+            timeline, position, RMA/grid elements, and updated geodata using the
+            first/last line sensing times from the downlink annotation.
+
+            Returns
+            -------
+            SICDType
+                The completed SICD metadata object for the stripmap collect.
+            """
+
             # out_sicd is the one that we return, just complete it
             # set preliminary geodata (required for projection)
             scp = get_scps(1)
@@ -868,6 +1297,28 @@ class SentinelDetails:
             return out_sicd
 
         def compute_burst_id(relative_orbit_number, anx_time, swath):
+            """
+            Computes the Sentinel-1 ANX-relative burst ID string.
+
+            Estimates the burst index from the relative orbit number and the burst
+            ANX time using time-per-beam and orbital-period constants along with
+            swath-specific time offsets; east-look IDs are offset by 11.
+
+            Parameters
+            ----------
+            relative_orbit_number : int
+                The relative orbit number of the collection.
+            anx_time : float
+                The ANX time of the burst in seconds, from `azimuthAnxTime`.
+            swath : str
+                The swath indicator (lowercase, e.g. `iw` or `ew`).
+
+            Returns
+            -------
+            str
+                The zero-padded 6-digit burst ID string.
+            """
+
             mode = swath[:-1]
             TBEAM = {"iw": 2.758273, "ew": 3.0388819516}  # Time per beam in seconds
             TORB = 12 * 86400 / 175  # Orbital period in seconds
@@ -889,9 +1340,34 @@ class SentinelDetails:
             return f"{burst_id:06}"
 
         def get_relative_orbit_number():
+            """
+            Returns the relative orbit number from the manifest
+            `safe:relativeOrbitNumber` field.
+
+            Returns
+            -------
+            int
+                The relative orbit number.
+            """
+
             return int(self._find(".//safe:relativeOrbitNumber").text)
 
         def finalize_bursts():  # type: () -> List[SICDType]
+            """
+            Splits the collection into one completed SICD per burst.
+
+            For each burst, sets the preliminary geodata and the valid-data extent
+            from the `firstValidSample`/`lastValidSample` fields of the burst list,
+            computes the burst ID and core name, fits the position and the RMA/grid
+            polynomials, adjusts the times to the burst's zero-doppler extent, and
+            updates the geodata.
+
+            Returns
+            -------
+            list[SICDType]
+                One completed SICD metadata object per burst.
+            """
+
             # we will have one sicd per burst.
             sicds = []
             scps = get_scps(len(burst_list))
@@ -982,6 +1458,20 @@ class SentinelDetails:
             ]
 
         def update_sicd(sicd, index):  # type: (SICDType, int) -> None
+            """
+            Fits the radiometric scale-factor polynomials for one SICD of the
+            collection and sets `SigmaZeroSFPoly`, `BetaZeroSFPoly`, and
+            `GammaZeroSFPoly` on its `Radiometric` element in place.
+
+            Parameters
+            ----------
+            sicd : SICDType
+                The SICD metadata object to modify in place.
+            index : int
+                The index of the SICD within the collection, used to select the
+                calibration lines belonging to this burst.
+            """
+
             # NB: in the deprecated version, there is a check if beta is constant,
             #   in which case constant values are used for beta/sigma/gamma.
             #   This has been removed.
@@ -1004,6 +1494,27 @@ class SentinelDetails:
                 coords_az = coords_az.reshape((valid_count, -1))
 
             def create_poly(arr, poly_order=2, poly_name=""):
+                """
+                Fits a two-dimensional polynomial to `arr` over the range/azimuth
+                coordinates captured in the enclosing scope, logs the fit details,
+                and returns the result as a `Poly2DType`.
+
+                Parameters
+                ----------
+                arr : numpy.ndarray
+                    The gridded values to fit.
+                poly_order : int, optional
+                    The polynomial order in each direction. Defaults to 2.
+                poly_name : str, optional
+                    A name used only to identify the fit in the debug log.
+                    Defaults to ''.
+
+                Returns
+                -------
+                Poly2DType
+                    The fitted 2D polynomial.
+                """
+
                 poly, residuals, rank, sing_values = two_dim_poly_fit(
                     coords_rg,
                     coords_az,
@@ -1094,6 +1605,26 @@ class SentinelDetails:
 
         def extract_vector(stem):
             # type: (str) -> Tuple[List[numpy.ndarray], List[Union[None, numpy.ndarray]], List[numpy.ndarray]]
+            """
+            Extracts the noise LUT vectors of `stemVectorList` (e.g. `noise`,
+            `noiseRange`, or `noiseAzimuth`) from the noise annotation file.
+
+            Ignores vectors whose lines are all negative and vectors whose LUT
+            values are all zero, and converts the noise values to dB.
+
+            Parameters
+            ----------
+            stem : str
+                The XML element stem prefix of the vector list to extract.
+
+            Returns
+            -------
+            tuple
+                A tuple `(lines, pixels, noises)` with, per vector, the line
+                numbers, the pixel indices (None for azimuth noise), and the
+                noise LUT values in dB.
+            """
+
             lines = []
             pixels = []
             noises = []
@@ -1131,6 +1662,24 @@ class SentinelDetails:
             return lines, pixels, noises
 
         def populate_noise(sicd, index):  # type: (SICDType, int) -> None
+            """
+            Fits the noise polynomial from the noise LUT data captured in the
+            enclosing scope and sets it as an absolute `NoiseLevel` on the
+            SICD `Radiometric` element in place.
+
+            For STRIPMAP mode, all LUTs apply and a full 2D fit is made; for
+            TOPSAR, a per-burst range polynomial is combined weakly with an
+            azimuth polynomial from the (may be absent) azimuth noise data.
+
+            Parameters
+            ----------
+            sicd : SICDType
+                The SICD metadata object to modify in place.
+            index : int
+                The index of the SICD within the collection, used to select the
+                relevant burst noise data.
+            """
+
             # NB: the default order was 7 before refactoring...that seems excessive.
 
             if not isinstance(range_pixel[0], numpy.ndarray):
@@ -1223,6 +1772,16 @@ class SentinelDetails:
 
     @staticmethod
     def _derive(sicds: SICDType | list[SICDType]) -> None:
+        """
+        Populates the derived SICD fields (via `SICDType.derive()` and
+        `populate_rniirs`) for a single SICD or a list of them, in place.
+
+        Parameters
+        ----------
+        sicds : SICDType | list[SICDType]
+            The SICD metadata object(s) whose derived fields are populated.
+        """
+
         if isinstance(sicds, SICDType):
             sicds.derive()
             sicds.populate_rniirs(override=False)
@@ -1327,9 +1886,21 @@ class SentinelReader(SICDTypeReader):
 
     @property
     def file_name(self) -> str:
+        """
+        str: the Sentinel-1 package directory name
+        """
+
         return self.sentinel_details.directory_name
 
     def close(self):
+        """
+        Closes the reader and any parent TIFF data segments.
+
+        Calls `BaseReader.close` on the reader, and then pops and closes each
+        parent segment held for multi-burst products, logging (rather than
+        raising) any exception encountered.
+        """
+
         BaseReader.close(self)
         if hasattr(self, "_parent_segments") and self._parent_segments is not None:
             # noinspection PyBroadException

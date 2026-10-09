@@ -1,3 +1,10 @@
+"""
+Model definitions and metadata builders for the cop-ard-app products.
+
+Provides attribute templates, STAC discovery items, and processing histories
+describing the co-registered (CSLC) and geocoded (GMLP) radar products.
+"""
+
 import copy
 import os
 import re
@@ -510,6 +517,27 @@ def get_burst_id_safe(file_sets: Sequence[dict], annot, relative_orbit_number: i
 
 
 def update_container(dt: xr.DataTree, dt_name, cslc_id):
+    """
+    Merge the metadata of the child products into a container-level STAC item.
+
+    Aggregates the bounding box, geometry, and start/end datetimes over all the
+    DataTree children, lists the children as Zarr assets, assigns a new product
+    ID, and records it in the processing history.
+
+    Parameters
+    ----------
+    dt : xr.DataTree
+        DataTree whose children hold the per-product STAC metadata.
+    dt_name : str
+        Product name used as key of the processing history entry.
+    cslc_id : str
+        ID of the input CSLC product (currently unused).
+
+    Returns
+    -------
+    tuple[dict, dict]
+        The merged STAC discovery item and the processing history.
+    """
     attrs = copy.deepcopy(next(iter(dt.children.values())).attrs)
     stac = attrs["stac_discovery"]
     processing_history = attrs["processing_history"]
@@ -692,6 +720,28 @@ def fix_attributes(data: xr.DataTree | xr.DataArray, attrs):
 
 
 def clean_gslc(gslc, slc, acquisition_id):
+    """
+    Restructure a processed geocoded product into its final GSLC layout.
+
+    Distributes the data into the `measurements`, `conditions`, and `quality`
+    groups, adds the `acquisition_id` and `acquisition_date` coordinates, and
+    drops the internal phase and coherence variables that are not part of the
+    product specification.
+
+    Parameters
+    ----------
+    gslc : xr.DataTree
+        The geocoded single look complex data tree to be restructured.
+    slc : xr.DataTree
+        The original radar-grid SLC, used to source the orbit conditions.
+    acquisition_id : str
+        Identifier of the acquisition the product belongs to.
+
+    Returns
+    -------
+    xr.DataTree
+        The GSLC product DataTree.
+    """
     # --- Restructure the DataTree for Final Product Format ---
     gslc_fix = xr.DataTree()
     orbit = slc.coreg.conditions.orbit.to_dataset().drop_vars(
@@ -760,6 +810,23 @@ def clean_gslc(gslc, slc, acquisition_id):
 
 
 def get_other_metadata_gslc(external_metadata):
+    """
+    Build the `other_metadata` attributes dictionary for a GSLC product.
+
+    Collects the product-level execution parameters (data access, pixel
+    convention, GMLP status, measurement type, and noise flags) from the
+    external processing-job metadata.
+
+    Parameters
+    ----------
+    external_metadata : list[dict]
+        Processing-job metadata entries containing the execution parameters.
+
+    Returns
+    -------
+    dict
+        Mapping with the GSLC `other_metadata` attribute keys.
+    """
     attrs = {
         "product_data_access": external_metadata[-1]["execution_parameters"]["product_data_access"],
         "product_geometry": "projected",
@@ -782,6 +849,33 @@ def get_other_metadata_gslc(external_metadata):
 
 
 def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time, external_metadata):
+    """
+    Build the STAC discovery item and processing history of a GMLP product.
+
+    Derives the projection (EPSG, WKT, shape, transform, GSD) and geographic
+    extent from the geocoded data, completes the product-level STAC properties
+    and assets, and assigns the final product ID to both the STAC item and the
+    processing history.
+
+    Parameters
+    ----------
+    burst_id : str
+        Identifier of the burst being processed.
+    gslc : xr.DataTree
+        Geocoded product node whose measurements provide the projection
+        metadata and geographic extent.
+    slcs : xr.DataTree
+        Input radar-grid products, from which the base STAC is taken.
+    processing_start_time : str
+        ISO-formatted UTC timestamp of the current processing step.
+    external_metadata : list[dict]
+        Processing-job metadata stored in the returned history.
+
+    Returns
+    -------
+    tuple[dict, dict]
+        The STAC discovery item and the processing history of the product.
+    """
     multiburst = "bursts" in slcs
     attrs = copy.deepcopy(slcs.bursts[burst_id] if multiburst else slcs).attrs
     stac = attrs["stac_discovery"]
@@ -860,6 +954,34 @@ def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time, exter
 
 
 def stac_discovery_template(burst_id, orig, coreg, external_metadata, stac, processing_start_time):
+    """
+    Assemble a complete STAC discovery item from SICD metadata and product views.
+
+    Builds the STAC Item dictionary for a CSLC product: the geographic footprint
+    from the SICD image corners, the acquisition timing from the original SLC,
+    the satellite and SAR extension properties from the annotations, and the
+    links to the Zarr assets.
+
+    Parameters
+    ----------
+    burst_id : str
+        Identifier of the burst, used when generating the product ID.
+    orig : xr.DataArray
+        Original SLC data providing the SICD annotation and acquisition timing.
+    coreg : xr.DataArray
+        Co-registered stack used for the co-registered pixel spacing values.
+    external_metadata : list[dict]
+        Processing-job metadata providing provider and product fields.
+    stac : dict
+        Pre-existing STAC metadata reused for orbit and datatake identifiers.
+    processing_start_time : str
+        ISO-formatted UTC timestamp of the current processing step.
+
+    Returns
+    -------
+    dict
+        The STAC discovery item, with the assigned product ID.
+    """
     sicd = orig.attrs[next(iter(orig.attrs))]
     sicd_coreg = coreg.attrs[next(iter(coreg.attrs))]
     tx_frequency = sicd["RadarCollection"]["TxFrequency"]
@@ -976,6 +1098,28 @@ def stac_discovery_template(burst_id, orig, coreg, external_metadata, stac, proc
 
 
 def get_stac_cslc(slc: xr.DataTree, burst_id: str, external_metadata, processing_start_time):
+    """
+    Produce the STAC discovery item of a single coregistered CSLC product.
+
+    Locates the reference acquisition inside the coregistered tree and
+    completes its STAC item through `stac_discovery_template`.
+
+    Parameters
+    ----------
+    slc : xr.DataTree
+        Coregistered SLC product holding the original and co-registered views.
+    burst_id : str
+        Identifier of the burst, used for the product ID.
+    external_metadata : list[dict]
+        Processing-job metadata forwarded to the template.
+    processing_start_time : str
+        ISO-formatted UTC timestamp of the current processing step.
+
+    Returns
+    -------
+    dict
+        The STAC discovery item of the CSLC product.
+    """
     reference_id = slc.coreg.measurements.attrs["coregistration_reference_id"]
     acquisition_ids = slc.coreg.measurements.cstack.acquisition_id.values
     date = acquisition_ids[0] if acquisition_ids.size == 1 else reference_id
@@ -987,6 +1131,29 @@ def get_stac_cslc(slc: xr.DataTree, burst_id: str, external_metadata, processing
 
 
 def get_processing_history_cslc(slc: xr.DataTree, stac_discovery, external_metadata, processing_start_time):
+    """
+    Build the processing history of a CSLC product.
+
+    Starts from the history stored in the conditions of the reference
+    acquisition and appends the COP ARD CSLC processing step described by the
+    external metadata.
+
+    Parameters
+    ----------
+    slc : xr.DataTree
+        The coregistered SLC product holding the source history.
+    stac_discovery : dict
+        STAC discovery item of the product (currently unused).
+    external_metadata : list[dict]
+        Description of the COP ARD processing step.
+    processing_start_time : str
+        ISO-formatted UTC timestamp of the processing step (unused).
+
+    Returns
+    -------
+    dict
+        The updated processing history dictionary.
+    """
     reference_id = slc.coreg.measurements.attrs["coregistration_reference_id"]
     acquisition_ids = slc.coreg.measurements.cstack.acquisition_id.values
     date = acquisition_ids[0] if acquisition_ids.size == 1 else reference_id
@@ -1002,6 +1169,25 @@ def get_processing_history_cslc(slc: xr.DataTree, stac_discovery, external_metad
 
 
 def get_other_metadata_cslc(slc: xr.DataTree, external_metadata):
+    """
+    Build the `other_metadata` attributes dictionary for a CSLC product.
+
+    Stores the SICD annotations of the reference acquisition together with the
+    product-level execution parameters (pixel convention, CSLC status,
+    measurement type, and noise flags) from the external metadata.
+
+    Parameters
+    ----------
+    slc : xr.DataTree
+        The coregistered SLC product from which the SICD is taken.
+    external_metadata : list[dict]
+        Processing-job metadata providing product execution parameters.
+
+    Returns
+    -------
+    dict
+        Mapping with the CSLC `other_metadata` attribute keys.
+    """
     reference_id = slc.coreg.measurements.attrs["coregistration_reference_id"]
     acquisition_ids = slc.coreg.measurements.cstack.acquisition_id.values
     date = acquisition_ids[0] if acquisition_ids.size == 1 else reference_id
@@ -1163,6 +1349,25 @@ def get_carrier_frequency(slcs: xr.DataTree, path: str, multiburst: bool = True)
 
 
 def clean_cslc(slc: xr.DataTree, mask: xr.DataArray):
+    """
+    Restructure a coregistered SLC into its final CSLC product layout.
+
+    Renames the co-registered stack to `cslc`, renames the quality variables,
+    and distributes the data over the `measurements`, `conditions`, and
+    `quality` groups of the output DataTree.
+
+    Parameters
+    ----------
+    slc : xr.DataTree
+        The coregistered SLC to be restructured.
+    mask : xr.DataArray
+        Integer distortion mask (layover and shadow) stored as quality data.
+
+    Returns
+    -------
+    xr.DataTree
+        The CSLC product DataTree.
+    """
     # --- Restructure the DataTree ---
     # Rename 'cstack' to 'cslc' and drop unnecessary coordinates.
     cslc = xr.DataTree()
@@ -1224,6 +1429,23 @@ def add_acquisition_date(ds: xr.Dataset | None, ref_measurements: xr.Dataset) ->
 
 
 def update_cslc_container(bursts: xr.DataTree):
+    """
+    Merge the metadata of the child products into a container-level CSLC item.
+
+    Aggregates the bounding box, geometry, and time range over all the child
+    products, lists them as Zarr assets, assigns a new product ID, and records
+    it in the CSLC processing history.
+
+    Parameters
+    ----------
+    bursts : xr.DataTree
+        DataTree whose children hold the per-burst CSLC STAC metadata.
+
+    Returns
+    -------
+    tuple[dict, dict]
+        The merged STAC discovery item and the processing history.
+    """
     attrs = copy.deepcopy(next(iter(bursts.children.values())).attrs)
     stac = attrs["stac_discovery"]
     processing_history = attrs["processing_history"]
@@ -1283,6 +1505,25 @@ def update_cslc_container(bursts: xr.DataTree):
 
 
 def get_rf_band(tx_frequency_min, tx_frequency_max):
+    """
+    Classify the RF band from the transmission frequency range.
+
+    Averages the minimum and maximum transmission frequencies and maps the
+    resulting center frequency, converted to GHz, onto the STAC RF-band
+    letters (P, L, S, C, X).
+
+    Parameters
+    ----------
+    tx_frequency_min : float
+        Minimum transmission frequency, in Hz.
+    tx_frequency_max : float
+        Maximum transmission frequency, in Hz.
+
+    Returns
+    -------
+    str
+        The RF-band letter ("P", "L", "S", "C", or "X"), or "Unknown".
+    """
     f_min = float(tx_frequency_min)  # Hz
     f_max = float(tx_frequency_max)  # Hz
 
@@ -1316,6 +1557,23 @@ FAMILIES_MAP = {
 
 
 def extract_stac_sar_props(sicd):
+    """
+    Derive the STAC platform, constellation, and instrument properties.
+
+    Matches the SICD collector name against the known SAR families to obtain
+    the platform and constellation identifiers and infers the instrument
+    (p-sar, l-sar, s-sar, c-sar, or x-sar) from the radar center frequency.
+
+    Parameters
+    ----------
+    sicd : dict
+        The SICD metadata dictionary.
+
+    Returns
+    -------
+    tuple[str, str, list[str]]
+        The platform, constellation, and instruments names.
+    """
     raw_collector = sicd["CollectionInfo"]["CollectorName"].strip().upper()
 
     # 1. PLATFORM & CONSTELLATION

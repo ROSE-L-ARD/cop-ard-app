@@ -55,6 +55,12 @@ jobs:
       - name: Unit test coverage
         run: uv run --extra tests --frozen pytest --cov=cop_ard_app --cov-report= --cov-fail-under=$COVERAGE_THRESHOLD $TESTS
 
+      - name: Code complexity
+        run: uv run --extra complexity --frozen python -m xenon --max-average b --max-modules c --max-absolute d $SOURCES
+
+      - name: Vulnerability scanning
+        run: uv run --extra security --frozen python -m bandit -c bandit.yml -r $SOURCES
+
       - name: Documentation coverage
         run: uv run --extra doc-cov --frozen docstr-coverage $SOURCES
 
@@ -62,8 +68,3 @@ jobs:
         run: >
           uv run --extra doc-cov --frozen radon raw -s $SOURCES | tail -n12 | grep 'C % S' | awk -v thres=$COMMENT_THRESHOLD -F': ' -f comment_coverage.awk
 
-      - name: Code complexity
-        run: uv run --extra complexity --frozen python -m xenon --max-average b --max-modules c --max-absolute d $SOURCES
-
-      - name: Vulnerability scanning
-        run: uv run --extra security --frozen python -m bandit -c bandit.yml -r $SOURCES

@@ -1,3 +1,10 @@
+"""
+cop-ard-app ETAD module.
+
+Discover the ETAD (Extended Timing Annotation Dataset) products matching
+a stack of SLC acquisitions and import their correction grids and orbit files.
+"""
+
 from typing import Any, cast
 
 import numpy as np
@@ -263,7 +270,32 @@ def import_etad_stack(
     enable_dask: bool,
     **kwargs,
 ):
+    """
+    Import a set of ETAD files and attach their grids to the matching SLCs.
 
+    For each ETAD file, the acquisition date covered by the SLC stack is
+    discovered, the NetCDF correction grids are read and saved per burst via
+    `update_etad`, and the resulting datasets are inserted into the `slcs`
+    DataTree; the corresponding precise orbit (EOF) files are collected too.
+
+    Parameters
+    ----------
+    etad_file_list : set
+        Set of ETAD product paths to search for SLC matches.
+    slcs : xr.DataTree
+        The SLC DataTree, updated in place with the ETAD conditions.
+    multiburst : bool
+        Flag indicating if the data is organized by bursts.
+    wdir_path : str
+        Root working directory for the saved ETAD stores.
+    enable_dask : bool
+        Whether to run the per-burst work in parallel with Dask.
+
+    Returns
+    -------
+    tuple
+        The updated `slcs` DataTree and the list of matched orbit file paths.
+    """
     slcs_az = xr.DataTree()
     for burst_id, slc in slcs.bursts.items():
         for date in slc.orig:

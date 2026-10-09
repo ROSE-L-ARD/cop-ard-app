@@ -1,3 +1,11 @@
+"""
+Split-spectrum processing for interferometric SAR ARD products.
+
+Separates the dispersive (ionospheric) and non-dispersive phase components
+of coregistered SLC stacks and removes the reconstructed ionospheric
+phase surface from the data.
+"""
+
 from typing import cast
 
 import numpy as np
@@ -32,6 +40,33 @@ from cop_ard_app.utils import (
 def get_phase_corr_from_x_poly(
     azimuth_time: xr.DataArray, slant_range_time: xr.DataArray, x_poly: xr.DataArray, freq: float
 ) -> xr.DataArray:
+    """
+    Evaluate a frequency-dependent phase correction from a range polynomial.
+
+    Rescales the azimuth-time and slant-range coordinates with the offset and
+    scale factors stored in the polynomial attributes, evaluates the 2D
+    polynomial over the resulting grid and converts the range correction into
+    a phase shift in radians for the given frequency offset.
+
+    Parameters
+    ----------
+    azimuth_time : xr.DataArray
+        Acquisition-time coordinate grid.
+    slant_range_time : xr.DataArray
+        Slant-range-time coordinate grid.
+    x_poly : xr.DataArray
+        2D polynomial model of the range displacement, carrying the
+        ``offset``, ``scale_fact`` and ``off_y`` attributes used for
+        coordinate normalization.
+    freq : float
+        Frequency offset [Hz] used to convert the range correction into phase.
+
+    Returns
+    -------
+    xr.DataArray
+        The phase correction in radians over the
+        ``(azimuth_time, slant_range_time)`` grid.
+    """
 
     out_coords = {"azimuth_time": azimuth_time.values, "slant_range_time": slant_range_time.values}
 
@@ -66,6 +101,66 @@ def separate_dispersive_spectrum_components(
     chunks=None,
     reference_id: str | None = None,
 ):
+    """
+    Estimate dispersive and non-dispersive phase components using the
+    split-spectrum method with mean-phase joint unwrapping.
+
+    Generates low- and high-frequency sub-band interferograms from the
+    reference and secondary SLC stacks, optionally applies frequency-dependent
+    phase corrections, jointly unwraps the two interferogram phases and
+    separates the resulting phase into ionospheric (dispersive) and
+    non-dispersive components. Intermediate products are persisted when a
+    working directory is given.
+
+    Parameters
+    ----------
+    reference_slcs : xr.DataTree
+        Reference SLC stack used to form the interferograms.
+    secondary_slcs : xr.DataTree
+        Secondary SLC stack used to form the interferograms.
+    frequency_offset : float
+        Frequency offset [Hz] between the carrier frequency and the center
+        frequency of each sub-band.
+    bandwidth : float
+        Bandwidth [Hz] of the sub-bands used for split-spectrum processing.
+    cohe_th : float
+        Coherence threshold used during joint phase unwrapping.
+    a_min : float
+        Minimum azimuth spacing passed to the interferogram generation.
+    r_min : float
+        Minimum range spacing passed to the interferogram generation.
+    x_poly : xr.Dataset
+        Polynomial model of the range-dependent phase correction applied with
+        opposite signs to the two sub-bands. If ``None``, no correction is
+        applied.
+    y_poly : xr.Dataset
+        Polynomial ESD model used during interferogram generation.
+    wdir_path : Path
+        Working directory used to persist intermediate products. If ``None``,
+        no products are written to disk.
+    multilook : dict or None, optional
+        Optional multilooking specification passed to the
+        interferogram generation. Defaults to None.
+    multiburst : bool, optional
+        Whether to process the data as a mosaic of bursts. Defaults to True.
+    enable_dask : bool, optional
+        Whether to use Dask for the computation. Defaults to True.
+    chunks : dict or None, optional
+        Chunking scheme used for Dask processing. Defaults to
+        {"azimuth_time": 4096, "slant_range_time": 4096}.
+    reference_id : str or None, optional
+        Optional identifier of the reference acquisition. Defaults to None.
+
+    Returns
+    -------
+    tuple[xr.Dataset, xr.DataArray]
+        A tuple containing:
+
+        - **phase_iono**: Dispersive (ionospheric) phase component stored as
+          a dataset with the estimated phase, coherence and raw azimuth-time
+          coordinates.
+        - **phase_nd**: Non-dispersive phase component.
+    """
     if chunks is None:
         chunks = {"azimuth_time": 4096, "slant_range_time": 4096}
     # define center band frequencies
@@ -377,6 +472,37 @@ def remove_iono_surface_chunk(
     H_iono: xr.DataArray | float,
     H_orb: xr.DataArray | float,
 ) -> xr.Dataset:
+    """
+    Remove the ionospheric phase surface from one chunk of a coregistered stack.
+
+    Recomputes the raw acquisition (azimuth) time of the chunk, reconstructs
+    the ionospheric phase surface from the fitted ionosphere polynomial and
+    rotates the cstack phasors by the conjugate of that surface to strip the
+    ionospheric contribution.
+
+    Parameters
+    ----------
+    cstack : xr.DataArray
+        Chunk of the coregistered complex stack.
+    poly_corr : xr.DataArray
+        Polynomial model of the ionospheric phase surface fitted at the
+        ionospheric height.
+    TimeCOAPoly : np.ndarray
+        Time center-of-acquisition polynomial coefficients from the image
+        annotation, used to map pixel rows to acquisition times.
+    CollectStart : np.datetime64
+        Acquisition start time of the image.
+    H_iono : xr.DataArray | float
+        Assumed ionospheric height [m].
+    H_orb : xr.DataArray | float
+        Orbital altitude [m] of the reference image.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with the ionosphere-removed ``cstack`` and the subtracted
+        ``phase_iono`` surface.
+    """
 
     # compute raw  azimuth time
     azimuth_time_raw = get_azimuth_time_raw(cstack, TimeCOAPoly, CollectStart)
@@ -408,6 +534,49 @@ def remove_iono_surface_single_burst(
     enable_dask: bool = True,
     reference_id: str | None = None,
 ) -> tuple[str, xr.Dataset]:
+    """
+    Remove the ionospheric phase surface from one burst or single slice.
+
+    Initializes an empty ``coreg_ss`` output store on disk, then maps
+    :func:`remove_iono_surface_chunk` over the chunks of the coregistered
+    cstack using the geometry metadata (TimeCOAPoly, CollectStart) taken from
+    the preferred polarization annotation, and reads the completed dataset
+    back from disk.
+
+    Parameters
+    ----------
+    burst_id : str
+        Identifier of the burst being processed (ignored in single-slice mode).
+    coreg : xr.Dataset
+        Coregistration measurements dataset of the burst, containing ``cstack``.
+    poly_corr : xr.DataArray
+        Polynomial model of the ionospheric phase surface fitted at the
+        ionospheric height.
+    H_iono : xr.DataArray | float
+        Assumed ionospheric height [m].
+    H_orb : xr.DataArray | float
+        Orbital altitude [m].
+    wdir_path : Path
+        Root working directory containing the product stores.
+    multiburst : bool
+        Whether the data are organized as a mosaic of bursts.
+    enable_dask : bool, optional
+        Whether to use Dask for the chunked computation. Defaults to True.
+    reference_id : str or None, optional
+        Identifier of the reference acquisition, mandatory in single-slice
+        mode. Defaults to None.
+
+    Returns
+    -------
+    tuple[str, xr.Dataset]
+        The burst identifier and the updated ``coreg_ss`` dataset with the
+        ionosphere-removed ``cstack`` and ``phase_iono`` surface.
+
+    Raises
+    ------
+    ValueError
+        If ``multiburst`` is False and no ``reference_id`` is given.
+    """
 
     if (not multiburst) and (reference_id is None):
         raise ValueError("In single burst case, the reference_id is mandatory")
@@ -463,6 +632,46 @@ def remove_iono_surface(
     enable_dask: bool = True,
     reference_id: str | None = None,
 ) -> xr.DataTree:
+    """
+    Remove the ionospheric phase surface from every burst or slice in a stack.
+
+    Maps :func:`remove_iono_surface_single_burst` over all nodes of the SLC
+    DataTree (all bursts in multiburst mode, or the single slice) and
+    writes the ionosphere-removed cstack and the subtracted
+    ``phase_iono`` surface back into each node's coregistration measurements.
+
+    Parameters
+    ----------
+    slcs : xr.DataTree
+        SLC DataTree with coregistration measurements to be updated.
+    poly_corr : xr.DataArray
+        Polynomial model of the ionospheric phase surface fitted at the
+        ionospheric height.
+    H_iono : float
+        Assumed ionospheric height [m].
+    H_orb : float
+        Orbital altitude [m].
+    wdir_path : Path
+        Root working directory containing the product stores.
+    multiburst : bool
+        Whether the data are organized as a mosaic of bursts.
+    enable_dask : bool, optional
+        Whether to use Dask for the computation. Defaults to True.
+    reference_id : str or None, optional
+        Identifier of the reference acquisition, mandatory in single-slice
+        mode. Defaults to None.
+
+    Returns
+    -------
+    xr.DataTree
+        The updated DataTree whose coregistration measurements carry the
+        ionosphere-removed ``cstack`` and ``phase_iono`` for each node.
+
+    Raises
+    ------
+    ValueError
+        If the per-burst workers return invalid results.
+    """
 
     args = [
         (burst_id, slc.coreg.measurements.to_dataset())
@@ -516,6 +725,57 @@ def split_spectrum(
     x_poly: xr.Dataset | None = None,
     dbfile: str | None = None,
 ):
+    """
+    Run the complete split-spectrum workflow over an SLC DataTree.
+
+    Splits the stack into reference and secondary images, computes the
+    ionospheric and orbital heights, estimates the endpoint slope difference
+    (ESD) and fits a global shift, separates the dispersive (ionospheric)
+    phase component with the delta/mean split-spectrum formulation, fits an
+    ionosphere surface polynomial at the ionospheric height and removes that
+    surface from the secondary images. The polynomial corrections are stored
+    in the DataTree attributes for later reuse.
+
+    Parameters
+    ----------
+    slcs : xr.DataTree
+        Input SLC DataTree containing the image stack.
+    multilook : dict
+        Multilooking specification used for interferogram generation.
+    frequency_offset : float
+        Frequency offset [Hz] between the carrier frequency and the center
+        frequency of each sub-band.
+    bandwidth : float
+        Bandwidth [Hz] of the sub-bands used for split-spectrum processing.
+    cohe_th : float
+        Coherence threshold used during joint phase unwrapping.
+    wdir_path : str
+        Path of the product working directory for intermediate outputs.
+    multiburst : bool
+        Whether the data are organized as a mosaic of bursts.
+    reference_id : str
+        Identifier of the reference acquisition.
+    esd_poly_degree : int, optional
+        Polynomial degree used to fit the ESD global shift. Defaults to 2.
+    split_spectrum_poly_degree : int, optional
+        Polynomial degree used to fit the ionosphere surface. Defaults to 2.
+    h_iono : float or None, optional
+        Assumed ionospheric height [m]; when omitted it is derived from the
+        scene geometry. Defaults to None.
+    enable_dask : bool, optional
+        Whether to use Dask for the computation. Defaults to True.
+    x_poly : xr.Dataset or None, optional
+        Optional polynomial model of range-dependent phase corrections.
+        Defaults to None.
+    dbfile : str or None, optional
+        Optional path to a database file used for height lookup. Defaults to None.
+
+    Returns
+    -------
+    xr.DataTree
+        The recomposed DataTree with the ionospheric phase removed from the
+        secondary images and the coregistration polynomials in its attributes.
+    """
     wdir_path = Path(wdir_path)  # type: ignore[assignment]
     reference_slcs, secondary_slcs = split_slc_datatrees(
         slcs=slcs,

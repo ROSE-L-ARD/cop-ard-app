@@ -1,3 +1,10 @@
+"""
+cop-ard-app simulation module.
+
+Compute the radar acquisition geometry (azimuth times and slant ranges) for
+every point of the gridded DEM and manage its multilooked versions.
+"""
+
 from typing import Any, cast
 
 import numpy as np
