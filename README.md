@@ -16,52 +16,95 @@
 
 # COP ARD APP
 
-This repository contains the COP ARD APP project.
+Application layer of the COP ARD processing chain.
 
-COP ARD APP
+`cop-ard-app` sits between the `cop-ard-core` algorithm kernels and the
+`cop-ard-processor` EOPF pipeline: mission readers, co-registration workflow,
+interferogram generation, CMLP/GMLP building blocks, and distributed
+computation orchestration on Dask.
+
+Stack position:
+`cop-ard-processor` → **`cop-ard-app`** → `cop-ard-core`.
 
 ## Project Structure
 
 This project is organized as follows:
 
-* `cop_ard_app` contains the source code of the
-  project's main Python package.
-* `tests` contains the unit and integration tests of the `COP ARD APP`
-  project.
+* `cop_ard_app/`: source code of the project's main Python package —
+  `readers/` (`sarpy`-based readers for Sentinel-1 SAFE  and
+  ROSE-L), `coreg.py`, `interf.py`, `matching.py`, `esd.py`,
+  `split_spectrum.py`, `cmlp.py`, `gmlp.py`, `area_projection.py`, `dem.py`,
+  `etad.py`, `orbit.py`, `slc.py`, `io.py`, `model.py`, `computation.py`,
+  `simulation.py`, `utils.py`.
+* `tests/`: unit and integration tests covering every module, including the
+  mission readers (`test_sarpy_rosel.py`, `test_sarpy_sentinel_safe.py`).
+* `notebooks/`: analysis notebooks.
+* `makefile`: local Dask cluster targets (`scheduler`, `worker`, `cluster`,
+  `kill`) and quality-assurance targets (`format`, `fix`, `test`).
+* `Dockerfile`: container image build.
+* `pyproject.toml` / `uv.lock`: package metadata and pinned dependency
+  lockfile.
 
-## Tools
+## Installation
 
-The following tools are used by this project:
+The project requires Python 3.13 (`>=3.13, <3.14`) and is managed with
+[`uv`](https://docs.astral.sh/uv/). `cop-ard-app` pulls `cop-ard-core` from
+its private GitHub repository (via `[tool.uv.sources]`), so authenticated
+GitHub access is required:
 
-* `pyproject.toml`: Build system requirements for Python.
-* `uv.lock`: `uv` lock file containing specific versions for all dependencies.
+```bash
+gh auth login && gh auth setup-git   # or configure a ~/.netrc entry for github.com
+uv sync --frozen
+```
 
-## Documentation
+This creates the local `.venv` from `pyproject.toml` and the pinned
+`uv.lock`; `uv` provisions Python 3.13 automatically.
 
+## Development
 
+Local Dask cluster (port `8786`, `4` workers, unlimited memory limit;
+override with `N=`, `SCHEDULER_HOST=`, `PORT=`):
+
+```bash
+make cluster   # scheduler + worker in one shot
+make kill      # pkill dask scheduler/worker
+```
+
+`make format` runs `ruff format`, import sorting, `ruff check`, `bandit`,
+`xenon`, and `mypy` over the package and tests; `make fix` applies
+`ruff check --fix`; `make test` runs the test suite.
+
+The GitHub Actions pipeline (`.github/workflows/ci.yml`) runs on every push
+to `main` and on every pull request against `main`. It authenticates to
+GitHub with the `GIT_PAT` secret (to fetch the private `cop-ard-core`
+dependency), then enforces:
+
+* Linting (`ruff check --no-fix`) and formatting check (`ruff format --check`)
+* Typing (`mypy`)
+* Unit tests (`pytest`) with coverage gate (`pytest --cov`, fail below 70%)
+* Docstring coverage (`docstr-coverage`) and comment coverage
+  (`radon raw` + `comment_coverage.awk`, threshold 20%)
+* Complexity (`xenon`) and vulnerability scanning (`bandit` with `bandit.yml`)
 
 ## Run tests
 
-To execute the tests locally using `pytests`, run:
+To execute the tests locally using `pytest`, run:
 
-``` python
+```bash
 uv run --extra tests pytest tests/
 ```
 
-The GitLab CI pipeline will also automatically run the unit and
-integration tests of the project.
-
-
-
 ## Updating core dependencies
-To update core dependencies in the `uv.lock` file, run:
 
-``` python
+`uv.lock` pins `cop-ard-core` to a specific commit of its GitHub
+repository. To advance the pin, run:
+
+```bash
 uv lock -P cop-ard-core
 ```
 
 To add updated dependencies to the local `uv` virtual environment, run:
 
-``` python
+```bash
 uv sync --frozen
 ```
