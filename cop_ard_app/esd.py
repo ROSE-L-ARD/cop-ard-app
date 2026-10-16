@@ -293,6 +293,8 @@ def stack_esd(
     multiburst: bool,
     reference_id: str,
     esd_poly_degree: int = 2,
+    multilook: dict | None = None,
+    coherence_threshold: float = 0.7,
     enable_dask: bool = True,
     **kwargs,
 ):
@@ -309,6 +311,8 @@ def stack_esd(
             reference_slcs,
             secondary_slcs,
             poly_degree=esd_poly_degree,
+            multilook=multilook,
+            coherence_threshold=coherence_threshold,
             enable_dask=enable_dask,
         )
 
