@@ -56,7 +56,12 @@ def esd_single_burst(
              reference_date_i image as ESD reference
 
     """
-    multilook = multilook or {"azimuth_pixel": 4, "slant_range_time": 16}
+    src = multilook or {}
+
+    multilook = {
+        "azimuth_pixel": src.get("azimuth_pixel", src.get("azimuth_time", 4)),
+        "slant_range_time": src.get("slant_range_time", 16),
+    }
 
     def time_to_pixel_az(stack: xr.Dataset, dtaz: float, reference_time: datetime.datetime | None = None):
         if reference_time is None:
