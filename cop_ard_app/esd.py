@@ -129,6 +129,8 @@ def estimate(
     secondary_slcs: xr.DataTree,
     poly_degree: int = 0,
     enable_dask: bool = True,
+    multilook: dict | None = None,
+    coherence_threshold: float = 0.7,
     **kwargs,
 ):
 
@@ -153,7 +155,7 @@ def estimate(
         map(
             esd_single_burst,
             args=args,
-            kwargs={"enable_dask": enable_dask},
+            kwargs={"enable_dask": enable_dask, "multilook": multilook, "coherence_threshold": coherence_threshold},
             combine=False,
             enable_dask=enable_dask,
             force_compute=True,
