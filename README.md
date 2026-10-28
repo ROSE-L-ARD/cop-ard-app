@@ -39,8 +39,9 @@ This project is organized as follows:
 * `tests/`: unit and integration tests covering every module, including the
   mission readers (`test_sarpy_rosel.py`, `test_sarpy_sentinel_safe.py`).
 * `notebooks/`: analysis notebooks.
-* `makefile`: local Dask cluster targets (`scheduler`, `worker`, `cluster`,
-  `kill`) and quality-assurance targets (`format`, `fix`, `test`).
+* `makefile`: installation targets (`install`, `proj` geoid-grid download)
+  and quality-assurance targets (`format`, `lint`, `security`, `complexity`,
+  `typecheck`, `check`, `test`, `check-secrets`, `protect-secrets`).
 * `Dockerfile`: container image build.
 * `pyproject.toml` / `uv.lock`: package metadata and pinned dependency
   lockfile.
@@ -62,17 +63,10 @@ This creates the local `.venv` from `pyproject.toml` and the pinned
 
 ## Development
 
-Local Dask cluster (port `8786`, `4` workers, unlimited memory limit;
-override with `N=`, `SCHEDULER_HOST=`, `PORT=`):
-
-```bash
-make cluster   # scheduler + worker in one shot
-make kill      # pkill dask scheduler/worker
-```
-
-`make format` runs `ruff format`, import sorting, `ruff check`, `bandit`,
-`xenon`, and `mypy` over the package and tests; `make fix` applies
-`ruff check --fix`; `make test` runs the test suite.
+Quality gates are driven by the `makefile`: `make all` runs `format`
+(`ruff format` and import sorting over the package and tests) followed by
+`check` (`ruff check`, `bandit`, `xenon`, and `mypy`); `make test` runs
+the test suite.
 
 The GitHub Actions pipeline (`.github/workflows/ci.yml`) runs on every push
 to `main` and on every pull request against `main`. It authenticates to
