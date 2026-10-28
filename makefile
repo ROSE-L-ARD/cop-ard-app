@@ -1,41 +1,46 @@
-# --- Directories & Paths ---
-S1_ARD_DIR     ?= .
-SOURCES        ?= $(S1_ARD_DIR)/cop_ard_app
-TESTS          ?= $(S1_ARD_DIR)/tests
-NOTEBOOKS      ?= $(S1_ARD_DIR)/notebooks
+SOURCES := $(CURDIR)/cop_ard_app
+TESTS := $(CURDIR)/tests
 
-# --- Dask Configuration ---
-N              ?= 4
-SCHEDULER_HOST ?= 127.0.0.1
-PORT           ?= 8786
+GRID_FILE ?= us_nga_egm08_25.tif
 
-.PHONY: scheduler worker cluster kill format fix test 
+.PHONY: all install proj format lint security complexity typecheck check restore check-secrets protect-secrets
 
-# --- Dask Targets ---
-scheduler:
-	uv run dask scheduler --port $(PORT)
+all: format check
 
-worker:
-	uv run dask worker tcp://$(SCHEDULER_HOST):$(PORT) --nworkers $(N) --nthreads 1 --memory-limit 0
+install:
+	uv sync
+	$(MAKE) proj
 
-cluster:
-	$(MAKE) scheduler & sleep 2 && $(MAKE) worker
+proj:
+	@echo "Ensuring geoid grid '$(GRID_FILE)' is installed..."
+	@uv run python -c "from cop_ard_app.utils import download_geoid_grid; download_geoid_grid(grid_name='$(GRID_FILE)')"
+	@echo "Grid verification completed."
 
-kill:
-	-@pkill -f "dask scheduler" || true
-	-@pkill -f "dask worker" || true
-
-#--- Quality Assurance Targets ---
 format:
-	uv run --extra formatter --frozen ruff format $(SOURCES) $(TESTS) $(NOTEBOOKS)
+	uv run --extra formatter --frozen ruff format $(SOURCES) $(TESTS)
 	uv run --extra formatter --frozen ruff check --select I --fix $(SOURCES) $(TESTS)
-	uv run --extra linter --frozen ruff check $(SOURCES) $(TESTS)
-	uv run --extra security --frozen python -m bandit -c $(S1_ARD_DIR)/bandit.yml -r $(SOURCES)
-	uv run --extra complexity --frozen python -m xenon --max-average b --max-modules c --max-absolute d $(SOURCES)
-	uv run --extra typing --frozen mypy $(SOURCES) $(TESTS)
 
-fix:
-	uv run --extra linter --frozen ruff check --fix $(SOURCES) $(TESTS)
+lint:
+	uv run --extra linter --frozen ruff check $(SOURCES) $(TESTS)
+
+security:
+	uv run --extra security --frozen python -m bandit -c $(CURDIR)/bandit.yml -r $(SOURCES)
+
+complexity:
+	uv run --extra complexity --frozen python -m xenon --max-average b --max-modules c --max-absolute d $(SOURCES)
+
+typecheck:
+	uv run --extra typing --frozen python -m mypy $(SOURCES) --allow-redefinition
+
+check: lint security complexity typecheck
+
+check-secrets:
+	@echo "==> Scanning entire Git history for leaked secrets..."
+	gitleaks detect --source . --verbose --redact
+
+protect-secrets:
+	@echo "==> Scanning uncommitted changes for secrets..."
+	gitleaks protect --staged --verbose --redact
 
 test:
-	uv run --extra tests --frozen pytest $(TESTS)
+	uv run --extra tests --frozen pytest ${TESTS}
