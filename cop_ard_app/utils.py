@@ -1,5 +1,7 @@
 import itertools
 import os
+import urllib.request
+from pathlib import Path
 
 import dask.distributed
 import numpy as np
@@ -20,6 +22,9 @@ from cop_ard_app.computation import map
 from cop_ard_app.io import write
 from cop_ard_app.model import get_az_rg_times, get_coefficients
 
+DEFAULT_EGM08_GRID = "us_nga_egm08_25.tif"
+PROJ_CDN_BASE_URL = "https://cdn.proj.org"
+
 
 class GeoEnvPlugin(dask.distributed.WorkerPlugin):
     name = "patch_gdal_proj_env"
@@ -27,9 +32,7 @@ class GeoEnvPlugin(dask.distributed.WorkerPlugin):
     def __init__(
         self, in_proj: str = "EPSG:9518", out_proj: str = "EPSG:4979", test_coords: tuple = (12.5, 41.9, 50.0)
     ):
-        """
-        Initializes the plugin.
-        """
+        """Initializes the plugin."""
         self.in_proj = in_proj
         self.out_proj = out_proj
         self.test_coords = test_coords
@@ -37,13 +40,15 @@ class GeoEnvPlugin(dask.distributed.WorkerPlugin):
     def setup(self, worker):
         """Runs on the worker immediately when it starts."""
 
-        # 1. Base Environment Setup (Locking paths)
-        pyproj_dir = datadir.get_data_dir()
-        datadir.set_data_dir(pyproj_dir)
+        # 1. Base Environment Setup
+        # Explicitly ensure the standard user directory is included in PROJ search paths
+        user_dir = pyproj.datadir.get_user_data_dir()
+        pyproj.datadir.append_data_dir(user_dir)
 
-        # STRICTLY OFFLINE: Workers are not allowed to use the internet
+        # STRICTLY OFFLINE: Workers are not allowed to fetch grids over the internet
         pyproj.network.set_network_enabled(False)
 
+        # Ensure GDAL data directory is registered for rasterio
         rasterio_base = os.path.dirname(rasterio.__file__)
         rasterio_gdal_dir = os.path.join(rasterio_base, "gdal_data")
         if os.path.exists(rasterio_gdal_dir):
@@ -54,22 +59,43 @@ class GeoEnvPlugin(dask.distributed.WorkerPlugin):
         out_crs = CRS(self.out_proj).to_3d()
         tg = TransformerGroup(in_crs, out_crs)
 
-        if tg.best_available is False:
+        if not tg.best_available:
+            # Extract missing grid names from unavailable operations
+            missing_grids: list[str] = []
+            downloadable_grid: str | None = None
+
+            for op in tg.unavailable_operations:
+                for grid in op.grids:
+                    if not grid.available:
+                        if grid.short_name not in missing_grids:
+                            missing_grids.append(grid.short_name)
+                        # Prefer grids marked with a direct CDN download URL
+                        if downloadable_grid is None and (grid.direct_download or grid.url):
+                            downloadable_grid = grid.short_name
+
+            target_grid = downloadable_grid or (missing_grids[0] if missing_grids else "required_grid.tif")
+            missing_display = ", ".join(missing_grids) if missing_grids else target_grid
+
             error_msg = (
-                f"Worker {worker.address} is missing required PROJ grids for {self.in_proj} -> {self.out_proj}. "
-                "Ensure the environment was provisioned properly before starting the worker."
+                f"\nWorker {worker.address} is missing required geoid grid(s) [{missing_display}] "
+                f"for transformation {self.in_proj} -> {self.out_proj}.\n"
+                f"To resolve this in your local environment, run:\n"
+                f"    python -c \"from cop_ard_app.utils import download_geoid_grid; download_geoid_grid(grid_name='{target_grid}')\"\n"
+                f"Or manually place '{target_grid}' into:\n"
+                f"    {user_dir}\n"
             )
             logger.critical(error_msg)
             raise RuntimeError(error_msg)
 
+        # 3. Strict Mathematical Validation
         in_vertical_crs = extract_vertical_crs(in_crs)
         out_vertical_crs = extract_vertical_crs(out_crs)
+
         if in_vertical_crs != out_vertical_crs:
-            # 3. Strict Mathematical Validation
             transformer = Transformer.from_crs(in_crs, out_crs, always_xy=True)
             test_x, test_y, test_z = self.test_coords
 
-            # Execute the transformation; errcheck=True catches missing grid errors
+            # Execute transform; errcheck=True raises if grid lookups fail
             _, _, new_z = transformer.transform(test_x, test_y, test_z, errcheck=True)
 
             if np.allclose(test_z, new_z, atol=1e-5):
@@ -79,6 +105,64 @@ class GeoEnvPlugin(dask.distributed.WorkerPlugin):
                 )
                 logger.critical(error_msg)
                 raise RuntimeError(error_msg)
+
+
+def download_geoid_grid(
+    grid_name: str = DEFAULT_EGM08_GRID,
+    base_url: str = PROJ_CDN_BASE_URL,
+    target_dir: str | Path | None = None,
+    force: bool = False,
+) -> Path:
+    """Download a PROJ vertical geoid grid to the user's data directory.
+
+    Parameters
+    ----------
+    grid_name : str, optional
+        Name of the target grid file on the PROJ CDN, by default "us_nga_egm08_25.tif".
+    base_url : str, optional
+        Base URL hosting PROJ resource grids, by default "https://cdn.proj.org".
+    target_dir : str | Path | None, optional
+        Destination folder. If None, defaults to the standard PROJ user data
+        directory (`pyproj.datadir.get_user_data_dir()`), by default None.
+    force : bool, optional
+        If True, re-downloads the grid even if it already exists locally, by default False.
+
+    Returns
+    -------
+    Path
+        Absolute path to the downloaded grid file.
+
+    Raises
+    ------
+    RuntimeError
+        If the download fails or the remote resource cannot be fetched.
+    """
+    if target_dir is None:
+        destination_folder = Path(pyproj.datadir.get_user_data_dir())
+    else:
+        destination_folder = Path(target_dir)
+
+    destination_folder.mkdir(parents=True, exist_ok=True)
+    destination_file = destination_folder / grid_name
+
+    if destination_file.exists() and not force:
+        logger.info("Grid '%s' already exists at: %s", grid_name, destination_file)
+        return destination_file
+
+    url = f"{base_url.rstrip('/')}/{grid_name}"
+    logger.info("Downloading grid from %s to %s...", url, destination_file)
+
+    temp_file = destination_file.with_suffix(".tmp")
+    try:
+        urllib.request.urlretrieve(url, temp_file)
+        temp_file.replace(destination_file)
+        logger.info("Grid '%s' successfully downloaded.", grid_name)
+    except Exception as exc:
+        if temp_file.exists():
+            temp_file.unlink()
+        raise RuntimeError(f"Failed to download PROJ grid '{grid_name}' from {url}: {exc}") from exc
+
+    return destination_file
 
 
 def get_margin(
