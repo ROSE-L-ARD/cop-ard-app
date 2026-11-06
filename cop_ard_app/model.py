@@ -830,21 +830,21 @@ def get_stac_and_history_gslc(burst_id, gslc, slcs, processing_start_time, exter
     stac["assets"] = {
         "measurements": {
             "href": "./measurements",
-            "title": "GSLC Measurements",
+            "title": "GMLP Measurements",
             "description": "Zarr group containing the geocoded SAR image data",
             "type": "application/vnd+zarr",
             "roles": ["data"],
         },
         "conditions": {
             "href": "./conditions",
-            "title": "GSLC Conditions",
+            "title": "GMLP Conditions",
             "description": "Zarr group containing measurement conditions",
             "type": "application/vnd+zarr",
             "roles": ["metadata"],
         },
         "quality": {
             "href": "./quality",
-            "title": "GSLC Quality Metrics",
+            "title": "GMLP Quality Metrics",
             "description": "Zarr group containing quality assessment and accuracy metrics",
             "type": "application/vnd+zarr",
             "roles": ["qa", "metadata"],
@@ -1352,3 +1352,137 @@ def extract_stac_sar_props(sicd):
         pass
 
     return platform, constellation, instruments
+
+
+def _restore_coreg_node(burst: xr.DataTree) -> xr.DataTree:
+    """Rebuild the `/coreg` DataTree node from a CSLC burst dataset."""
+    inv_quality_renames = {
+        "rcs": "RCS",
+        "coregistration_accuracy": "crg_accuracy",
+    }
+
+    coreg = xr.DataTree()
+
+    # 1. Restore measurements dataset and variable naming
+    measurements = burst.measurements.to_dataset()
+    if "cslc" in measurements.variables:
+        measurements = measurements.rename({"cslc": "cstack"})
+    coreg["measurements"] = measurements
+
+    # 2. Restore quality dataset: extract from radar_qlt and revert variable names
+    if hasattr(burst.quality, "radar_qlt"):
+        quality = burst.quality.radar_qlt.to_dataset()
+    else:
+        quality = burst.quality.to_dataset()
+
+    quality = quality.rename({old: new for old, new in inv_quality_renames.items() if old in quality.variables})
+    coreg["quality"] = quality
+
+    # 3. Restore conditions datasets
+    coreg["conditions/orbit"] = burst.conditions.orbit.to_dataset()
+    coreg["conditions/look_vector"] = burst.conditions.look_vector.to_dataset()
+
+    if hasattr(burst.conditions, "phase_demodulation"):
+        coreg["conditions/phase_demod"] = burst.conditions.phase_demodulation.to_dataset()
+    elif hasattr(burst.conditions, "phase_demod"):
+        coreg["conditions/phase_demod"] = burst.conditions.phase_demod.to_dataset()
+
+    # Optional conditions layers
+    if "ETAD" in burst.conditions:
+        coreg["conditions/ETAD"] = burst.conditions.ETAD.to_dataset()
+
+    if "side_band" in burst.conditions:
+        coreg["conditions/side_band"] = burst.conditions.side_band.to_dataset()
+
+    return coreg
+
+
+def _normalize_input_slcs(cslcs: xr.DataTree) -> xr.DataTree:
+    """Convert an external CSLC product DataTree into the internal `slcs` stack format.
+
+    Reverses the restructuring performed by `clean_cslc`:
+    - Multiburst (`multiburst=True`):
+        Reorganizes flat burst root nodes (`/S01SIWCSL_..._SS_BBBBBB`) into nested
+        burst structures (`/bursts/{mode}{subswath}_{burst_id}/coreg`).
+    - Single burst (`multiburst=False`):
+        Restores the coregistered dataset directly at root (`/coreg`).
+    - Renames measurement variable `'cslc'` back to `'cstack'`.
+    - Restores quality parameters (`'rcs'` -> `'RCS'`,
+      `'coregistration_accuracy'` -> `'crg_accuracy'`) directly under `coreg/quality`.
+    - Maps conditions nodes (`'phase_demodulation'` back to `'phase_demod'`).
+    - Extracts processing parameters from product history to root `attrs["params"]`.
+
+    If the input is already in internal format (`attrs["params"]` exists), it is
+    returned directly.
+
+    Parameters
+    ----------
+    cslcs : xr.DataTree
+        Input DataTree, either in external CSLC product format or internal SLC format.
+
+    Returns
+    -------
+    xr.DataTree
+        Restructured DataTree conforming to internal stack processing requirements.
+    """
+    # If root attributes already contain 'params', the tree is in internal format
+    if "params" in cslcs.attrs:
+        return cslcs
+
+    # Extract upstream pipeline execution parameters
+    if "processing_history" in cslcs.attrs:
+        all_params = cslcs.attrs["processing_history"]["COP ARD CSLC Product"]
+    elif len(cslcs.children) > 0 and "processing_history" in next(iter(cslcs.children.values())).attrs:
+        all_params = next(iter(cslcs.children.values())).attrs["processing_history"]["COP ARD CSLC Product"]
+    else:
+        raise KeyError("Missing processing history in CSLC attributes.")
+
+    params = all_params[0]["execution_parameters"]
+    mode = params["mode"].lower()
+    multiburst = params.get("multiburst", True)
+    if isinstance(multiburst, str):
+        multiburst = multiburst.lower() in ("true", "1")
+
+    slcs = xr.DataTree()
+
+    # --- Case 1: Single burst (multiburst=False) ---
+    if not multiburst:
+        # Check whether groups are directly at root or under a single product node
+        if "measurements" in cslcs:
+            burst = cslcs
+            burst_attrs = dict(cslcs.attrs)
+        elif len(cslcs.children) > 0:
+            burst = next(iter(cslcs.children.values()))
+            burst_attrs = dict(burst.attrs)
+        else:
+            raise KeyError("Unable to locate measurements or burst group in single-burst CSLC DataTree.")
+
+        coreg = _restore_coreg_node(burst)
+        coreg.attrs = burst_attrs
+
+        # In single burst mode, coreg is located at the root
+        slcs["coreg"] = coreg
+        slcs.attrs = dict(cslcs.attrs)
+        slcs.attrs.update(burst_attrs)
+        slcs.attrs["params"] = all_params
+        return slcs
+
+    # --- Case 2: Multi-burst (multiburst=True) ---
+    for k, burst in cslcs.children.items():
+        # Parse subswath index and burst ID from product name (e.g., ..._DV_01_019156)
+        parts = k.split("_")
+        subswath = int(parts[-2])
+        burst_id = int(parts[-1])
+        burst_name = f"{mode}{subswath}_{burst_id}"
+
+        coreg = _restore_coreg_node(burst)
+
+        # Attach coregistered burst subtree under /bursts/{burst_name}/coreg
+        slcs[f"bursts/{burst_name}/coreg"] = coreg
+        slcs[f"bursts/{burst_name}"].attrs = dict(burst.attrs)
+
+    # Propagate global metadata and attach internal pipeline parameters
+    slcs.attrs = dict(cslcs.attrs)
+    slcs.attrs["params"] = all_params
+
+    return slcs

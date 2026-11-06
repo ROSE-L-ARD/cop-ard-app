@@ -40,12 +40,33 @@ def stack_cmlp(
     # Transpose the list of tuples for the map function.
     args = list(zip(*args))
 
-    results = cast(
-        list,
-        map(
-            single_cmlp,
-            args,
-            kwargs=dict(
+    if multiburst:
+        results = cast(
+            list,
+            map(
+                single_cmlp,
+                args,
+                kwargs=dict(
+                    reference_database_path=reference_database_path,
+                    posting=posting,
+                    multiburst=multiburst,
+                    working_directory=working_directory,
+                    memory_param=memory_param,
+                    coherence_threshold=coherence_threshold,
+                    stable_interval_days=stable_interval_days,
+                    max_past_stable_history=max_past_stable_history,
+                    save_metrics=save_metrics,
+                    reference_id=reference_id,
+                    **kwargs,
+                ),
+                enable_dask=enable_dask,
+            ),
+        )
+    else:
+        results = [
+            single_cmlp(
+                burst_id=args[0][0],
+                cstack=args[1][0],
                 reference_database_path=reference_database_path,
                 posting=posting,
                 multiburst=multiburst,
@@ -57,10 +78,8 @@ def stack_cmlp(
                 save_metrics=save_metrics,
                 reference_id=reference_id,
                 **kwargs,
-            ),
-            enable_dask=enable_dask,
-        ),
-    )
+            )
+        ]
 
     # --- Assemble Results ---
     cmlp_tree = xr.DataTree()

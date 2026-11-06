@@ -686,3 +686,123 @@ def single_simulation_ml(
         }
     )
     return (burst_id, simulation_ml)
+
+
+def build_dem_tree(
+    slcs: xr.DataTree,
+    multiburst: bool = True,
+    crs: str = "4326",
+) -> xr.DataTree:
+    """Build a synthetic DEM DataTree compatible with stack simulation tools.
+
+    Parameters
+    ----------
+    slcs : xr.DataTree
+        Input SLC stack DataTree.
+    multiburst : bool, default True
+        Whether the stack is multiburst or single-dataset.
+    crs : str, default "4326"
+        Coordinate Reference System EPSG code to assign to the elevation field `z`.
+
+    Returns
+    -------
+    xr.DataTree
+        DEM DataTree structured for either multiburst (`/bursts/{burst_name}`)
+        or single-burst (`dem_tree.z`).
+    """
+    dem_dataset = xr.Dataset(data_vars={"z": xr.DataArray()}).rio.write_crs(crs)
+
+    if multiburst:
+        # Extract burst identifiers under /bursts
+        if hasattr(slcs, "bursts"):
+            burst_node = slcs.bursts
+        elif "bursts" in slcs:
+            burst_node = slcs["bursts"]
+        else:
+            raise KeyError("The input DataTree does not contain a '/bursts' group.")
+
+        burst_keys = (
+            list(burst_node.children.keys())
+            if hasattr(burst_node, "children") and burst_node.children
+            else list(burst_node.keys())
+        )
+
+        return xr.DataTree.from_dict({f"bursts/{k}": dem_dataset for k in burst_keys})
+
+    # For multiburst=False, stack_simulation accesses {"data": dem_tree}.items()
+    # where d.z must exist at the root level of the DataTree.
+    try:
+        dem_tree = xr.DataTree(dataset=dem_dataset)
+    except (TypeError, ValueError):
+        dem_tree = xr.DataTree()
+        dem_tree["z"] = dem_dataset["z"]
+
+    return dem_tree
+
+
+def get_simulation_trees(
+    slcs: xr.DataTree,
+    working_directory: str,
+    reference_id: str,
+    multiburst: bool,
+    enable_dask: bool = True,
+) -> tuple[xr.DataTree, xr.DataTree]:
+    """Generate or retrieve reference geometry simulation and multi-looked simulation trees.
+
+    Parameters
+    ----------
+    slcs : xr.DataTree
+        Coregistered or ingested SLC stack DataTree.
+    working_directory : str or Path
+        Directory where simulated reference geometry and database files are located or stored.
+    reference_id : str, optional
+        Acquisition ID of the reference image. If None, it is extracted from `slcs.attrs["params"]`.
+    multiburst : bool, optional
+        Multiburst flag. If None, it is extracted from `slcs.attrs["params"]` (defaults to True).
+    enable_dask : bool, default True
+        Whether to enable Dask distributed computing.
+    recompute : bool, default False
+        Whether to force recomputation of the simulation layers.
+    crs : str, default "4326"
+        Spatial CRS for the synthetic DEM layer.
+    chunks : dict, optional
+        Custom Dask chunking specification (defaults to `{"x": 1024, "y": 1024, "acquisition_id": 1}`).
+    orbits : Any, optional
+        Optional external orbit vectors passed to `stack_simulation`.
+    master_image : bool, default True
+        Flag specifying whether to run simulation on the master image.
+
+    Returns
+    -------
+    tuple of (xr.DataTree, xr.DataTree)
+        `(simulation_tree, simulation_ml_tree)` containing the full-resolution and
+        multi-looked simulated radar geometry data trees.
+    """
+    crs = "4326"
+    # 1. Create the appropriate DEM DataTree based on multiburst mode
+    dem_tree = build_dem_tree(slcs=slcs, multiburst=multiburst, crs=crs)
+
+    # 2. Compute or load full-resolution geometry simulation tree
+    simulation_tree = stack_simulation(
+        dem_tree=dem_tree,
+        orbits=None,
+        multiburst=multiburst,
+        working_directory=working_directory,
+        chunks=None,
+        master_image=True,
+        recompute=False,
+        enable_dask=enable_dask,
+        reference_id=reference_id,
+    )
+
+    # 3. Compute or load multi-looked geometry simulation tree
+    simulation_ml_tree = stack_simulation_ml(
+        simulation_tree=simulation_tree,
+        reference_id=reference_id,
+        multiburst=multiburst,
+        working_directory=working_directory,
+        recompute=False,
+        enable_dask=enable_dask,
+    )
+
+    return simulation_tree, simulation_ml_tree
