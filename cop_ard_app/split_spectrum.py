@@ -776,7 +776,7 @@ def split_spectrum(
         The recomposed DataTree with the ionospheric phase removed from the
         secondary images and the coregistration polynomials in its attributes.
     """
-    wdir_path = Path(wdir_path)  # type: ignore[assignment]
+    wdir_path_Path = Path(wdir_path)
     reference_slcs, secondary_slcs = split_slc_datatrees(
         slcs=slcs,
         reference_id=reference_id,
@@ -823,7 +823,7 @@ def split_spectrum(
         x_poly=x_poly,
         y_poly=y_poly,
         multilook=multilook,
-        wdir_path=wdir_path,
+        wdir_path=wdir_path_Path,
         reference_id=reference_id,
         multiburst=multiburst,
         enable_dask=enable_dask,
@@ -846,7 +846,7 @@ def split_spectrum(
         poly_corr,
         h_iono,
         h_orb,
-        wdir_path=wdir_path,
+        wdir_path=wdir_path_Path,
         multiburst=multiburst,
         enable_dask=enable_dask,
         reference_id=reference_id,

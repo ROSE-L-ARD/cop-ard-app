@@ -8,6 +8,8 @@ reference database management for the ARD pipeline.
 
 import itertools
 import os
+import shutil
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -22,7 +24,7 @@ from cop_ard_core.dem import extract_vertical_crs
 from cop_ard_core.iono_height import convert_ecef_to_llh, get_iono_height
 from cop_ard_core.logger import logger
 from cop_ard_core.utils import get_phramp_diff
-from pyproj import CRS, Transformer, datadir
+from pyproj import CRS, Transformer
 from pyproj.transformer import TransformerGroup
 from scipy.constants import speed_of_light
 
@@ -168,11 +170,21 @@ def download_geoid_grid(
         return destination_file
 
     url = f"{base_url.rstrip('/')}/{grid_name}"
-    logger.info("Downloading grid from %s to %s...", url, destination_file)
 
+    # Audit URL scheme to mitigate CWE-22 / file:// arbitrary reads
+    parsed_url = urllib.parse.urlsplit(url)
+    if parsed_url.scheme not in ("http", "https"):
+        raise ValueError(f"Disallowed scheme '{parsed_url.scheme}'. Only 'http' and 'https' are permitted.")
+
+    logger.info("Downloading grid from %s to %s...", url, destination_file)
     temp_file = destination_file.with_suffix(".tmp")
+
     try:
-        urllib.request.urlretrieve(url, temp_file)
+        req = urllib.request.Request(url, headers={"User-Agent": "cop-ard-app"})
+        # nosec B310: Scheme is explicitly validated to ('http', 'https') above
+        with urllib.request.urlopen(req, timeout=60) as response, open(temp_file, "wb") as f:  # nosec B310
+            shutil.copyfileobj(response, f)
+
         temp_file.replace(destination_file)
         logger.info("Grid '%s' successfully downloaded.", grid_name)
     except Exception as exc:
