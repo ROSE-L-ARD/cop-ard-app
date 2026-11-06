@@ -1,3 +1,10 @@
+"""
+cop-ard-app DEM module.
+
+Import and preprocess Digital Elevation Models and reproject them onto the
+geographic area of interest of each burst or scene.
+"""
+
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 

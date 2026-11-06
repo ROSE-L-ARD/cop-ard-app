@@ -1,3 +1,10 @@
+"""
+Interferometric phase and coherence computations for ARD products.
+
+Derives multilooked interferometric information from COREG-stacked SLC data,
+including subband extraction and mosaicking over an Area of Interest.
+"""
+
 import json
 from typing import cast
 
@@ -16,6 +23,26 @@ from cop_ard_app.utils import (
 
 # @timeit
 def update_interf_coordinates(interf: xr.Dataset, multilook: dict) -> xr.Dataset:
+    """
+    Re-index the interferometric pixel coordinates on the multilook grid.
+
+    Offsets the `x` and `y` coordinates by half a multilook window and
+    divides them by the `slant_range_time` and `azimuth_time` window sizes,
+    rounding the result to integer indices of consecutive multilook windows.
+
+    Parameters
+    ----------
+    interf : xr.Dataset
+        The interferometric dataset with `x` and `y` pixel coordinates.
+    multilook : dict
+        The multilook configuration with `azimuth_time` and
+        `slant_range_time` window sizes.
+
+    Returns
+    -------
+    xr.Dataset
+        The same dataset with integer multilooked `x` and `y` coordinates.
+    """
 
     # compute pixel coordinates
     y0 = multilook["azimuth_time"] / 2 - 0.5
@@ -56,6 +83,33 @@ def get_interf_single_burst(cslc_ref: xr.DataArray, cslc_sec: xr.DataArray, mult
 
 # @timeit
 def extract_coreg_aoi(coreg: xr.Dataset, a_min: float, r_min: float, multilook: dict) -> xr.Dataset:
+    """
+    Extract the Area of Interest (AoI) from a COREG dataset.
+
+    Converts the acquisition and range times into pixel coordinates with
+    respect to `a_min` and `r_min`, then selects the data bounded by those
+    coordinates. The selection bounds are snapped to multiples of the
+    multilook strides so that whole multilook windows are kept, and the
+    original burst chunking is preserved.
+
+    Parameters
+    ----------
+    coreg : xr.Dataset
+        The COREG dataset to subset.
+    a_min : float
+        Minimum acquisition time of the Area of Interest.
+    r_min : float
+        Minimum range time of the Area of Interest.
+    multilook : dict
+        The multilook configuration providing the `azimuth_time` and
+        `slant_range_time` strides.
+
+    Returns
+    -------
+    xr.Dataset
+        The subset of `coreg` over the Area of Interest, with pixel
+        coordinates and original burst dimensions restored.
+    """
 
     # extract imput chuncking
     chunk_burst = {k: v[0] for k, v in coreg.chunksizes.items() if k in ["azimuth_time", "slant_range_time"]}
@@ -89,6 +143,50 @@ def extract_interf_single(
     f0: float | None = None,
     bw: float | None = None,
 ):
+    """
+    Compute the interferometric phase and coherence for a single burst.
+
+    Extracts the Area of Interest (and, when requested, a spectral subband)
+    from the reference and secondary COREG datasets, computes the multilooked
+    interferometric phase and coherence, re-indexes the coordinates on the
+    multilook grid and attaches the raw image azimuth times. When `y_poly`
+    is provided, the phase is corrected by the multilooked phase-ramp
+    difference and the correction is also stored.
+
+    Parameters
+    ----------
+    burst_id : str
+        Identifier of the burst being processed.
+    annot : str
+        JSON-encoded acquisition annotation information.
+    coreg_ref : xr.Dataset
+        The reference-date COREG dataset.
+    coreg_sec : xr.Dataset
+        The secondary-date COREG dataset.
+    polarization : str
+        The polarization tag to select from the COREG attributes.
+    a_min : float
+        Minimum acquisition time of the Area of Interest.
+    r_min : float
+        Minimum range time of the Area of Interest.
+    multilook : dict
+        The multilook configuration (window sizes along azimuth and range).
+    y_poly : xr.Dataset | None, optional
+        Optional polynomial model used to compute and apply phase-ramp
+        corrections. Defaults to None.
+    f0 : float | None, optional
+        Central frequency of the spectral subband to extract. Defaults to None.
+    bw : float | None, optional
+        Bandwidth of the spectral subband to extract. Defaults to None.
+
+    Returns
+    -------
+    tuple
+        A tuple `(burst_id, interf)` where `burst_id` is the input burst
+        identifier and `interf` is an `xr.Dataset` holding the `phase`,
+        `coherence` and `azimuth_time_raw` fields (plus `phase_ramp` when
+        a phase correction is applied).
+    """
     # decompress attributes
     annot_dict = json.loads(annot)
     TimeCOAPoly = coreg_ref.cstack.attrs[polarization]["Grid"]["TimeCOAPoly"]["Coefs"]
@@ -149,6 +247,38 @@ def extract_interf_multi(
     enable_dask: bool = True,
     **kwargs,
 ):
+    """
+    Compute interferometric datasets for many bursts in parallel.
+
+    Determines the best polarization common to the reference and secondary
+    SLC products, maps `extract_interf_single` over every burst using the
+    Dask-enabled `map` of `cop_ard_app.computation`, and assembles the
+    per-burst interferometric datasets (each tagged with a per-burst integer
+    `id`) into a single tree.
+
+    Parameters
+    ----------
+    reference_slcs : xr.DataTree
+        The reference-date SLC product (a tree of bursts, or a single
+        dataset when `multiburst` is False).
+    secondary_slcs : xr.DataTree
+        The secondary-date SLC product, paired with `reference_slcs`.
+    multiburst : bool
+        Whether the products are multiburst (ESA) products with one node
+        per burst.
+    enable_dask : bool, optional
+        Whether to run the per-burst computations in parallel with Dask.
+        Defaults to True.
+    **kwargs
+        Additional keyword arguments forwarded to `extract_interf_single`
+        (e.g. `a_min`, `r_min`, `multilook`, `y_poly`, `f0`, `bw`).
+
+    Returns
+    -------
+    xr.DataTree
+        A tree with one `bursts/<burst_id>` node per processed burst, each
+        holding its interferometric dataset with an added `id` variable.
+    """
     # Determine the node to inspect for polarization availability
     if multiburst:
         first_burst_key = next(iter(reference_slcs.bursts))
@@ -221,6 +351,27 @@ def extract_interf_multi(
 
 @timeit
 def mosaic_interf(interf: xr.DataTree, chunks: dict) -> xr.Dataset:
+    """
+    Mosaic the per-burst interferometric datasets into a single dataset.
+
+    Crops fixed margins from every burst layer, overlays the layers with
+    `combine_first` (earlier burst layers take precedence where values are
+    missing) and assembles a single dataset indexed back by acquisition and
+    range time, computed and chunked as requested.
+
+    Parameters
+    ----------
+    interf : xr.DataTree
+        The tree of per-burst interferometric datasets.
+    chunks : dict
+        The desired chunking of the final mosaicked dataset.
+
+    Returns
+    -------
+    xr.Dataset
+        The mosaicked interferometric dataset with computed, chunked
+        `phase` and `coherence` fields.
+    """
 
     data = interf.bursts[next(iter(interf.bursts.children))].to_dataset()
     # TODO: margins for mosaic do be adapted to the multilook and the valid points
@@ -251,6 +402,34 @@ def get_mosaic_interf(
     enable_dask: bool = True,
     **kwargs,
 ) -> xr.Dataset:
+    """
+    Compute the mosaicked interferometric phase and coherence fields.
+
+    High-level driver: computes the interferometric datasets for every burst
+    with `extract_interf_multi` and then mosaics them into a single dataset
+    with `mosaic_interf`.
+
+    Parameters
+    ----------
+    reference_slcs : xr.DataTree
+        The reference-date SLC product.
+    secondary_slcs : xr.DataTree
+        The secondary-date SLC product.
+    multiburst : str
+        Whether the products are multiburst (ESA) products.
+    chunks : dict
+        The desired chunking of the final mosaicked dataset.
+    enable_dask : bool, optional
+        Whether to enable Dask for the per-burst computations. Defaults to True.
+    **kwargs
+        Additional keyword arguments forwarded to `extract_interf_multi`
+        (e.g. `a_min`, `r_min`, `multilook`, `y_poly`, `f0`, `bw`).
+
+    Returns
+    -------
+    xr.Dataset
+        The mosaicked interferometric dataset.
+    """
 
     # compute interferograms in correspondence of each burst
     interf = extract_interf_multi(

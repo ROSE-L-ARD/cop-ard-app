@@ -1,3 +1,10 @@
+"""
+Input/output helpers for the cop-ard-app products.
+
+Wraps xarray and Zarr reading and writing, fsspec-based filesystem operations,
+and storage-option handling for both local and remote (S3) data.
+"""
+
 import inspect
 import os
 import pathlib
@@ -33,6 +40,20 @@ class SentinelSarpyObj:
     """
 
     def __init__(self, in_path, storage_options=None):
+        """
+        Initialize the wrapper and import the Sentinel-1 metadata eagerly.
+
+        Accepts either a SAFE file path (local or on S3) or an in-memory
+        xarray DataTree, then reads the product annotations via Sarpy.
+
+        Parameters
+        ----------
+        in_path : str | xr.DataTree
+            Path to the Sentinel-1 SAFE file, or an
+            already-open xarray DataTree.
+        storage_options : dict, optional
+            fsspec storage options used to reach remote paths. Defaults to None.
+        """
         storage_options = storage_options or {}
         # Check if the input is already a DataTree.
         self._is_dt = isinstance(in_path, xr.DataTree)
@@ -317,6 +338,12 @@ def generate_uuid4():
 
     # Helper function to generate a random hexadecimal string of a given length.
     def random_hex(length):
+        """
+        Cryptographically secure random hexadecimal string.
+
+        Since `secrets.token_hex` produces hex pairs from whole bytes, an odd
+        `length` yields one character less.
+        """
         # `secrets.token_hex` generates a string twice the length of the byte input.
         return "".join(secrets.token_hex(length // 2))
 
@@ -427,6 +454,24 @@ def validate_encoding(data: xr.Dataset | xr.DataTree, encoding: dict | None) -> 
 
 
 def is_local(path, storage_options):  # TODO rename
+    """
+    Check whether a path is on the local filesystem.
+
+    Returns None for local paths, otherwise a copy of the storage options with
+    the s3fs listings cache disabled, to keep remote listings up to date.
+
+    Parameters
+    ----------
+    path : str
+        The path to test.
+    storage_options : dict | None
+        fsspec storage options to sanitize.
+
+    Returns
+    -------
+    dict | None
+        None if the path is local, the sanitized storage options otherwise.
+    """
     value = "://" not in path or path.startswith("file://")
     so = storage_options.copy() if isinstance(storage_options, dict) else None
     if value:
@@ -960,6 +1005,13 @@ def decorator(func):
     """
 
     def wrapper(path: list | tuple | str, **kwargs):
+        """
+        Dispatch the decorated filesystem call to the matching fsspec method.
+
+        Resolves the filesystem from the given path, invalidates any S3 cache,
+        applies the pre- and post-processing specific to the wrapped function,
+        and forwards the call and the supported keyword arguments.
+        """
         # 1. TRICK: Call the original function just to trigger coverage.
         # Since it is a 'pass' function, this does nothing but run the line.
         func(path, **kwargs)
@@ -1293,11 +1345,44 @@ def get_storage_options(
     key: str = "storage_options",
     default_values: dict | None = None,
 ):
+    """
+    Extract the fsspec storage options from a keyword-arguments dictionary.
+
+    Parameters
+    ----------
+    kwargs : dict
+        Keyword arguments to inspect.
+    key : str, optional
+        Key holding the storage options. Defaults to "storage_options".
+    default_values : dict, optional
+        Value returned when the key is absent. Defaults to None.
+
+    Returns
+    -------
+    dict | None
+        The storage options found, or the default value.
+    """
     storage_options = kwargs.get(key, default_values)
     return storage_options
 
 
 def get_crc(attrs):
+    """
+    Compute a short checksum for product metadata attributes.
+
+    Hashes the JSON serialization of the attributes with MD5 and returns the
+    first three uppercase hexadecimal characters, used in product identifiers.
+
+    Parameters
+    ----------
+    attrs : dict
+        The attributes to hash.
+
+    Returns
+    -------
+    str
+        The three-character CRC code.
+    """
     crc = md5(dumps(attrs, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[0:3].upper()
     return crc
 
@@ -1331,6 +1416,20 @@ def get_polarization_code(polarizations: list, product_level: bool = True) -> st
 
 
 def get_duration(attrs):
+    """
+    Compute the acquisition duration from STAC start and end datetimes.
+
+    Parameters
+    ----------
+    attrs : dict
+        STAC metadata containing ``properties`` with ``start_datetime`` and
+        ``end_datetime``.
+
+    Returns
+    -------
+    str
+        Duration in whole seconds, zero-padded to four digits.
+    """
 
     start_time = attrs["properties"]["start_datetime"]
     end_time = attrs["properties"]["end_datetime"]
@@ -1341,6 +1440,28 @@ def get_duration(attrs):
 
 
 def get_id_product(stac, burst_id: str | None = None, tile_name: str | None = None):
+    """
+    Build the COP ARD product identifier from a STAC metadata item.
+
+    Concatenates the product type, acquisition time, duration, platform and
+    relative-orbit codes, a CRC of the metadata, the hexadecimal datatake ID,
+    and the polarization code; optionally appends the burst (swath and number)
+    and a tile name suffix. The resulting identifier is uppercase.
+
+    Parameters
+    ----------
+    stac : dict
+        The STAC metadata item describing the product.
+    burst_id : str, optional
+        Burst identifier as "swath_number", appended as swath and burst codes.
+    tile_name : str, optional
+        Optional tile name appended as a suffix. Defaults to None.
+
+    Returns
+    -------
+    str
+        The uppercase product identifier.
+    """
     import copy
 
     attrs = copy.deepcopy(stac)
@@ -1379,7 +1500,8 @@ def read(
     consolidate_metadata: bool = False,
     storage_options: dict | None = None,
     **kwargs: Any,
-) -> xr.DataArray: ...
+) -> xr.DataArray:
+    """Read a Zarr store, holding a single variable, as an xarray.DataArray."""
 
 
 @overload
@@ -1391,7 +1513,8 @@ def read(
     consolidate_metadata: bool = False,
     storage_options: dict | None = None,
     **kwargs: Any,
-) -> xr.Dataset: ...
+) -> xr.Dataset:
+    """Read a Zarr store as an xarray.Dataset."""
 
 
 @overload
@@ -1403,7 +1526,8 @@ def read(
     consolidate_metadata: bool = False,
     storage_options: dict | None = None,
     **kwargs: Any,
-) -> xr.DataTree: ...
+) -> xr.DataTree:
+    """Read a Zarr store as an xarray.DataTree, when `as_type` is left unset."""
 
 
 @overload
@@ -1415,7 +1539,8 @@ def read(
     consolidate_metadata: bool = False,
     storage_options: dict | None = None,
     **kwargs: Any,
-) -> xr.DataArray | xr.Dataset | xr.DataTree: ...
+) -> xr.DataArray | xr.Dataset | xr.DataTree:
+    """Read a Zarr store as any xarray type, depending on `as_type`."""
 
 
 def read(
@@ -1517,6 +1642,43 @@ def write(
     storage_options: dict | None = None,
     encoding: dict | None = None,
 ) -> xr.DataTree | xr.Dataset | xr.DataArray | None:
+    """
+    Write an xarray object to a Zarr V3 store, local or remote (S3).
+
+    Standardizes DataArray inputs to Datasets, drops inherited encodings,
+    validates the user-provided per-variable encoding against the data, and
+    calls `to_zarr` in the requested mode. Region writes force "r+" mode and
+    drop the coordinate variables. Unless `skip_read` is set, the written
+    store is read back and returned with its `store_path` attribute.
+
+    Parameters
+    ----------
+    data : xr.Dataset | xr.DataArray | xr.DataTree
+        The xarray object to write.
+    data_path : str | Path
+        Path of the Zarr store; a `Path` object
+        also supplies its storage options.
+    region : Mapping[str, slice], optional
+        Region coordinates for partial writes. Defaults to None.
+    consolidated : bool, optional
+        Whether to consolidate the metadata. Defaults to True.
+    mode : Literal["w", "w-", "a", "a-", "r+", "r"], optional
+        Writing mode forwarded to `to_zarr`. Defaults to "w".
+    compute : bool, optional
+        Whether to compute Dask arrays before writing. Defaults to True.
+    skip_read : bool, optional
+        If True, do not read the data back. Defaults to False.
+    storage_options : dict, optional
+        fsspec storage options for remote stores. Defaults to None.
+    encoding : dict, optional
+        Per-variable Zarr encoding rules. Defaults to None.
+
+    Returns
+    -------
+    xr.DataTree | xr.Dataset | xr.DataArray | None
+        The object re-read from the store if `skip_read` is False,
+        otherwise None.
+    """
     if isinstance(data_path, Path):
         storage_options = data_path.storage_options
         data_path = str(data_path)

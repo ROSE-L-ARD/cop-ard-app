@@ -1,3 +1,10 @@
+"""
+cop-ard-app SLC module.
+
+Import Single Look Complex SAR imagery into a Zarr-backed DataTree and update
+its conditions (refined orbits, ETAD grids, look vectors).
+"""
+
 import os
 from collections import defaultdict
 from collections.abc import Hashable, Sequence
@@ -1007,6 +1014,33 @@ def updateLookVector(
     simulation: xr.Dataset,
     grid_size: Sequence[int] = (200, 200),
 ) -> xr.Dataset | None:
+    """
+    Resample the unit look vectors onto a coarse radar-time grid.
+
+    The simulation grid is subsampled, unit look vectors are obtained by
+    normalizing the `dem_distance` vectors, and every grid point is mapped to
+    relative radar pixel coordinates derived from its radar times; the vectors
+    are then interpolated onto an equispaced (azimuth_time, slant_range_time)
+    grid with `interpolate` and re-normalized to unit length.
+
+    Parameters
+    ----------
+    measurements : xr.Dataset
+        Dataset providing the reference `azimuth_time` and `slant_range_time`
+        coordinate vectors that define the coarse output grid.
+    simulation : xr.Dataset
+        Simulation dataset holding `dem_distance` (three-component sensor/DEM
+        vectors) and the radar-time coordinates of every grid point.
+    grid_size : Sequence[int], optional
+        Target (azimuth, range) resolution of the coarse output grid.
+        Defaults to (200, 200).
+
+    Returns
+    -------
+    xr.Dataset | None
+        A Dataset with the 'look_vector' variable indexed by (axis, azimuth_time,
+        slant_range_time), or None if no look vector could be computed.
+    """
 
     # Optional subsampling of the simulation dataset for performance
     step_y = max(1, simulation.sizes["y"] // (grid_size[0] * 2))

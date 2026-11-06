@@ -6,6 +6,14 @@
 # permission, please contact the copyright holders and delete this file.
 # This file must not be copied, modified, or distributed without explicit
 # written permission from the copyright holder.
+"""
+Image matching for SAR time-series coregistration.
+
+Computes the maximum Pearson correlation coefficient between stacked SAR
+images and a reference image over patches, and fits polynomial disparity
+correction models (x_poly, y_poly) per acquisition.
+"""
+
 from collections.abc import Sequence
 from typing import cast
 
@@ -127,6 +135,37 @@ def estimate_poly_matching(
 
 
 def get_polynomial_correction(acquisition_ids, results, dim: str, degree: int, norm: int = 1):
+    """
+    Fit polynomial disparity correction models per acquisition.
+
+    For each acquisition id, merges the fixed disparity points contributed by
+    every burst, fits a weighted 2D polynomial to the displacement values of
+    the requested component and stores the result as a ``polygrid2d``-ready
+    coefficient array. The returned DataArrays carry the attributes needed to
+    evaluate them: ``deg``, ``offset``, ``scale_fact`` and ``off_y`` used to center
+    and scale the azimuth-time and slant-range coordinates.
+
+    Parameters
+    ----------
+    acquisition_ids : list[str]
+        Identifiers of the acquisitions for which a correction is built.
+    results : list[tuple]
+        Fixed disparity results, each an tuple of (burst id, acquisition id,
+        disparity dataset) carrying the displacement component, its
+        coordinates (`m1_x`, `m1_y`) and the coherence weights.
+    dim : str
+        Name of the displacement component to fit ("dx" or "dy").
+    degree : int
+        Degree of the fitted 2D polynomial.
+    norm : int, optional
+        Normalization order passed to the polynomial fit. Defaults to 1.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset whose data variables are named after the acquisition ids and
+        hold the polynomial coefficients on the (i, j) grid.
+    """
     poly_corr = {}
     for id in acquisition_ids:
         to_merge = [
@@ -173,6 +212,50 @@ def stack_disparity(
     block_size: int = 10,
     enable_dask: bool = True,
 ) -> xr.DataTree:
+    """
+    Estimate the per-patch disparity of a stack of SAR images.
+
+    Maps :func:`compute_stack_pearson_coefficient` over all bursts (or the
+    single slice) of the SLC DataTree, maximizing the Pearson correlation
+    coefficient of each image against the reference image over the
+    initialization patches, and assembles the per-patch disparity results
+    into a DataTree of disparity maps.
+
+    Parameters
+    ----------
+    slcs : xr.DataTree
+        SLC DataTree containing the stack of coregistered measurements.
+    reference_id : str
+        Acquisition id of the reference image against which the stack is
+        matched.
+    wsize : Sequence[int], optional
+        Patch sizes (y, x) in pixels used to cross-correlate the images.
+        Defaults to [256, 256].
+    wstep : Sequence[int], optional
+        Distance (y, x) in pixels between two consecutive patches.
+        Defaults to [256, 256].
+    wsearch : Sequence[int], optional
+        Size (y, x) in pixels of the search window for the correlation
+        peak. Defaults to [5, 5].
+    dim : Sequence[int], optional
+        Correlation kernel size used for the coefficient computation.
+        Defaults to [1, 1].
+    block_size : int, optional
+        Number of acquisition dates processed per memory block. Defaults to 10.
+    enable_dask : bool, optional
+        Whether to use Dask for the computation. Defaults to True.
+
+    Returns
+    -------
+    xr.DataTree
+        DataTree holding the disparity maps, organized per burst
+        (``bursts/{id}``) or as a single ``data`` node.
+
+    Raises
+    ------
+    ValueError
+        If a duplicate burst id is found among the computed results.
+    """
     multiburst = "bursts" in slcs
     args = []
     for k, v in (slcs.bursts if multiburst else {"data": slcs}).items():

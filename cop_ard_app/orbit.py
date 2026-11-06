@@ -1,3 +1,11 @@
+"""
+cop-ard-app orbit module.
+
+Read and parse Sentinel-1 orbit state-vector files (.EOF) and match them to
+SLC acquisitions, and derive the absolute reference times needed to refit
+orbit polynomials for interferometric ARD processing.
+"""
+
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -16,6 +24,24 @@ from cop_ard_app.slc import overwrite_orbit_coefficients, update_slcs
 
 
 def read_orbit_file(orbit_path: Path) -> ElementTree:
+    """
+    Read one Sentinel-1 orbit state-vector file into an XML element tree.
+
+    The virtual path is first resolved to a local file (downloading it if it
+    lives on a remote store), and the XML document is then parsed with
+    `xml.etree.ElementTree.parse`.
+
+    Parameters
+    ----------
+    orbit_path : Path
+        Path to the orbit state-vector file (.EOF), whose name encodes
+        the validity time interval as `..._V<start>_<end>_...`.
+
+    Returns
+    -------
+    ElementTree
+        The parsed XML element tree of the orbit file.
+    """
     local_orbit_path = orbit_path.ensure_local()
     return ET.parse(local_orbit_path.path)  # type: ignore
 
@@ -115,6 +141,27 @@ def update_orbit(
     border = border or np.timedelta64(100, "s")
 
     def get_reference_time_from_attrs(attrs: dict):
+        """
+        Extract the absolute reference time of an acquisition from SLC metadata.
+
+        The annotation dictionary is keyed by a single product metadata ID;
+        that entry is looked up and the `CollectStart` field of its `Timeline`
+        section is returned, i.e. the absolute UTC start time of the
+        acquisition in real (clock) time units. Callers strip the trailing
+        time-zone marker (`[:-1]`) to obtain a plain timestamp string.
+
+        Parameters
+        ----------
+        attrs : dict
+            The `slc.attrs` mapping of the SLC measurements, keyed by the
+            product metadata ID.
+
+        Returns
+        -------
+        str
+            The absolute `CollectStart` acquisition time string, including
+            its trailing time-zone marker.
+        """
         return attrs[next(iter(attrs))]["Timeline"]["CollectStart"]
 
     slcs_info: dict[str, Any] = {}
