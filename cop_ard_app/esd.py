@@ -64,7 +64,12 @@ def esd_single_burst(
              reference_date_i image as ESD reference
 
     """
-    multilook = multilook or {"azimuth_pixel": 4, "slant_range_time": 16}
+    src = multilook or {}
+
+    multilook = {
+        "azimuth_pixel": src.get("azimuth_pixel", src.get("azimuth_time", 4)),
+        "slant_range_time": src.get("slant_range_time", 16),
+    }
 
     def time_to_pixel_az(stack: xr.Dataset, dtaz: float, reference_time: datetime.datetime | None = None):
         """
@@ -173,6 +178,8 @@ def estimate(
     secondary_slcs: xr.DataTree,
     poly_degree: int = 0,
     enable_dask: bool = True,
+    multilook: dict | None = None,
+    coherence_threshold: float = 0.7,
     **kwargs,
 ):
     """
@@ -234,7 +241,7 @@ def estimate(
         map(
             esd_single_burst,
             args=args,
-            kwargs={"enable_dask": enable_dask},
+            kwargs={"enable_dask": enable_dask, "multilook": multilook, "coherence_threshold": coherence_threshold},
             combine=False,
             enable_dask=enable_dask,
             force_compute=True,
@@ -439,6 +446,8 @@ def stack_esd(
     multiburst: bool,
     reference_id: str,
     esd_poly_degree: int = 2,
+    multilook: dict | None = None,
+    coherence_threshold: float = 0.7,
     enable_dask: bool = True,
     **kwargs,
 ):
@@ -491,6 +500,8 @@ def stack_esd(
             reference_slcs,
             secondary_slcs,
             poly_degree=esd_poly_degree,
+            multilook=multilook,
+            coherence_threshold=coherence_threshold,
             enable_dask=enable_dask,
         )
 
