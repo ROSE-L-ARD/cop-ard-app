@@ -47,7 +47,7 @@ jobs:
         run: uv run --extra formatter --frozen ruff format --check $SOURCES $TESTS
 
       - name: Typing
-        run: uv run --extra typing --frozen mypy $SOURCES $TESTS
+        run: uv run --extra typing --frozen mypy $SOURCES $TESTS --allow-redefinition
 
       - name: Unit tests
         run: uv run --extra tests --frozen pytest -s -vv $TESTS

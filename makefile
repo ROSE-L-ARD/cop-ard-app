@@ -30,7 +30,7 @@ complexity:
 	uv run --extra complexity --frozen python -m xenon --max-average b --max-modules c --max-absolute d $(SOURCES)
 
 typecheck:
-	uv run --extra typing --frozen python -m mypy $(SOURCES) --allow-redefinition
+	uv run --extra typing --frozen python -m mypy $(SOURCES) $(TESTS) --allow-redefinition
 
 check: lint security complexity typecheck
 
@@ -43,4 +43,4 @@ protect-secrets:
 	gitleaks protect --staged --verbose --redact
 
 test:
-	uv run --extra tests --frozen pytest ${TESTS}
+	uv run --extra tests --frozen pytest -s -vv ${TESTS}
