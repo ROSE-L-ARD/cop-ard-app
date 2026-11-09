@@ -8,6 +8,9 @@ on:
   pull_request:
     branches: ["main"]
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
@@ -24,9 +27,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Configure the Git credential helper
-        run: gh auth setup-git
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -64,4 +64,3 @@ jobs:
       - name: Comment coverage
         run: |
           uv run --extra doc-cov --frozen radon raw -s "$SOURCES" | grep '(C + M % L)' | tail -n1 | awk -v "thres=$COMMENT_THRESHOLD" -F': ' -f comment_coverage.awk
-
