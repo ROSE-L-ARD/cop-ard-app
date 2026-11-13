@@ -165,3 +165,129 @@ class TestPolynomialMatching:
             assert corr > CORR_TOL, (
                 f"degree {degree}, axis {axis}: recovered pattern correlation {corr:.3f} is below tolerance {CORR_TOL}"
             )
+
+
+class TestComputePearsonCoefficient:
+    """Direct unit tests for sub-pixel normalized cross-correlation (compute_pearson_coefficient)."""
+
+    @staticmethod
+    def _run_single_patch(ref_patch, sec_patch, pixel_to_time=None, wsearch=6, kernel_size=None):
+        if pixel_to_time is None:
+            pixel_to_time = np.array([[1.0], [1.0]], dtype="float64")
+        if kernel_size is None:
+            kernel_size = [1, 1]
+
+        coords = {"y": np.arange(ref_patch.shape[0]), "x": np.arange(ref_patch.shape[1])}
+        stack = xr.DataArray(
+            np.stack([ref_patch, sec_patch], axis=-1),
+            dims=["y", "x", "z"],
+            coords={**coords, "z": ["ref", "sec"]},
+        )
+        ref_da = xr.DataArray(ref_patch, dims=["y", "x"], coords=coords)
+
+        res = compute_pearson_coefficient(
+            patch=xr.Dataset(coords={"patch": 0}),
+            stack=stack,
+            reference=ref_da,
+            pixel_to_time=pixel_to_time,
+            peak_window_size=[wsearch, wsearch],
+            y_dim="y",
+            x_dim="x",
+            correlation_kernel_size=kernel_size,
+        )
+        dx = float(res.sel(acquisition_id="sec", variable="dx").values[0])
+        dy = float(res.sel(acquisition_id="sec", variable="dy").values[0])
+        return dx, dy
+
+    @pytest.mark.unit
+    def test_zero_shift_identity(self):
+        """Identical reference and secondary patches must yield exact zero disparity."""
+        img = _reference_image(size=96, seed=1)
+        dx, dy = self._run_single_patch(img, img.copy())
+        np.testing.assert_allclose([dx, dy], [0.0, 0.0], atol=1e-6)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "shift_x, shift_y",
+        [
+            (2.0, -3.0),  # Pure multi-pixel integer shifts
+            (-4.0, 1.0),  # Negative integer shift
+            (2.35, -3.72),  # Multi-pixel + fractional sub-pixel shifts
+            (-1.28, 3.64),  # Opposite quadrant multi-pixel + sub-pixel
+        ],
+    )
+    def test_multi_pixel_and_subpixel_shifts(self, shift_x, shift_y):
+        """Matcher must accurately recover combined integer and fractional shifts."""
+        ref = _reference_image(size=128, seed=2)
+        yy, xx = np.mgrid[0:128, 0:128]
+        sec = map_coordinates(ref, [yy - shift_y, xx - shift_x], order=5, mode="nearest")
+
+        # Crop interior 80x80 patch to avoid border interpolation artifacts
+        crop = slice(24, 104)
+        dx, dy = self._run_single_patch(ref[crop, crop], sec[crop, crop], wsearch=8)
+
+        # Disparity is the negative of the applied shift (tolerance accounts for ~0.1 px parabolic peak-locking)
+        np.testing.assert_allclose(dx, -shift_x, atol=0.12)
+        np.testing.assert_allclose(dy, -shift_y, atol=0.12)
+
+    @pytest.mark.unit
+    def test_radiometric_gain_and_offset_invariance(self):
+        """Pearson correlation must be invariant to linear brightness and contrast scaling."""
+        ref = _reference_image(size=128, seed=3)
+        yy, xx = np.mgrid[0:128, 0:128]
+        shift_x, shift_y = 1.4, -0.8
+        sec = map_coordinates(ref, [yy - shift_y, xx - shift_x], order=5, mode="nearest")
+
+        # Apply strong radiometric gain (3.5x) and DC bias (+25.0)
+        sec_scaled = 3.5 * sec + 25.0
+
+        crop = slice(24, 104)
+        dx, dy = self._run_single_patch(ref[crop, crop], sec_scaled[crop, crop], wsearch=6)
+
+        np.testing.assert_allclose(dx, -shift_x, atol=0.12)
+        np.testing.assert_allclose(dy, -shift_y, atol=0.12)
+
+    @pytest.mark.unit
+    def test_pixel_to_time_scaling(self):
+        """Measured disparities must scale linearly by pixel_to_time spacing factors."""
+        ref = _reference_image(size=128, seed=4)
+        yy, xx = np.mgrid[0:128, 0:128]
+        shift_x, shift_y = 1.5, -2.0
+        sec = map_coordinates(ref, [yy - shift_y, xx - shift_x], order=5, mode="nearest")
+
+        dt_y = 0.002  # e.g., azimuth sampling interval [s]
+        dt_x = 1.5e-8  # e.g., slant-range sampling interval [s]
+        p2t = np.array([[dt_y], [dt_x]], dtype="float64")
+
+        crop = slice(24, 104)
+        dx, dy = self._run_single_patch(ref[crop, crop], sec[crop, crop], pixel_to_time=p2t, wsearch=6)
+
+        np.testing.assert_allclose(dx, -shift_x * dt_x, rtol=0.05)
+        np.testing.assert_allclose(dy, -shift_y * dt_y, rtol=0.05)
+
+    @pytest.mark.unit
+    def test_sar_speckle_and_averaging_kernel(self):
+        """Matcher with correlation_kernel_size > 1 must remain accurate under multiplicative SAR speckle."""
+        rng = np.random.default_rng(42)
+        ref_clean = _reference_image(size=128, seed=5) + 0.5  # strictly positive RCS
+        yy, xx = np.mgrid[0:128, 0:128]
+        shift_x, shift_y = 1.25, -1.60
+        sec_clean = map_coordinates(ref_clean, [yy - shift_y, xx - shift_x], order=5, mode="nearest")
+
+        # Coherent target speckle must shift WITH the displaced scene, plus an independent decorrelation term
+        speckle_base = rng.gamma(shape=4.0, scale=0.25, size=ref_clean.shape)
+        speckle_shifted = map_coordinates(speckle_base, [yy - shift_y, xx - shift_x], order=5, mode="nearest")
+        speckle_decorr = rng.gamma(shape=4.0, scale=0.25, size=sec_clean.shape)
+
+        speckle_sec = 0.85 * speckle_shifted + 0.15 * speckle_decorr
+
+        crop = slice(24, 104)
+        dx, dy = self._run_single_patch(
+            ref_clean[crop, crop] * speckle_base[crop, crop],
+            sec_clean[crop, crop] * speckle_sec[crop, crop],
+            wsearch=6,
+            kernel_size=[3, 3],
+        )
+
+        np.testing.assert_allclose(dx, -shift_x, atol=ABS_TOL_PX)
+        np.testing.assert_allclose(dy, -shift_y, atol=ABS_TOL_PX)
