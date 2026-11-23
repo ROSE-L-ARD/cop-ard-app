@@ -229,3 +229,86 @@ class TestEstimate:
         np.testing.assert_allclose(np.abs(shifts), abs(delta), atol=1e-4)
         # With 50% of the overlap decorrelated, effective coherence weight drops by sqrt(0.5)
         np.testing.assert_allclose(esd["coherence"].values, np.sqrt(OVERLAP * 0.5), atol=0.1)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("delta", [-0.00045, -0.00018, 0.00035, 0.00062])
+    def test_esd_pipeline_subpixel_accuracy_app_func_050(self, delta):
+        """APP-FUNC-050 end-to-end: estimate + find_global_shift must recover sub-pixel
+        residual azimuth shifts with accuracy better than 1e-4 px under ideal conditions."""
+        from cop_ard_app.esd import find_global_shift
+
+        rng = np.random.default_rng(42)
+        burst_ids = ("iw1_254", "iw1_255", "iw1_256")
+        doppler_map = {"iw1_254": -0.18, "iw1_255": 0.15, "iw1_256": 0.22}
+        step = N - OVERLAP
+        pad = 32
+        total_az = step * (len(burst_ids) - 1) + N + 2 * pad
+
+        # Smooth baseband scene padded beyond burst borders so FFT sub-pixel shift has no wrap-around
+        scene_re = gaussian_filter(rng.standard_normal((total_az, N)), sigma=1.5)
+        scene_im = gaussian_filter(rng.standard_normal((total_az, N)), sigma=1.5)
+        global_scene = (scene_re + 1j * scene_im).astype(np.complex128)
+
+        freqs = np.fft.fftfreq(total_az)[:, None]
+        # Displace secondary by -delta so the measured ESD disparity (reference.conj() * secondary) equals +delta
+        global_scene_shifted = np.fft.ifft(
+            np.fft.fft(global_scene, axis=0) * np.exp(-2j * np.pi * freqs * (-delta)), axis=0
+        )
+        t_global = np.arange(total_az, dtype=np.float64)
+
+        ref_tree = xr.DataTree()
+        sec_tree = xr.DataTree()
+        sec_date = "2020-01-12"
+
+        for b_idx, burst_id in enumerate(burst_ids):
+            start_idx = pad + b_idx * step
+            f_k = doppler_map[burst_id]
+            t_burst = t_global[start_idx : start_idx + N]
+
+            ref_img = (global_scene[start_idx : start_idx + N] * np.exp(2j * np.pi * f_k * t_burst[:, None])).astype(
+                np.complex64
+            )
+            sec_img = (
+                global_scene_shifted[start_idx : start_idx + N] * np.exp(2j * np.pi * f_k * (t_burst + delta)[:, None])
+            ).astype(np.complex64)
+
+            coords = {
+                "polarization": [POL],
+                "azimuth_time": T0 + np.arange(b_idx * step, b_idx * step + N) * AZ_DT,
+                "slant_range_time": np.arange(N, dtype=np.float64),
+                "azimuth_m": ("azimuth_time", np.arange(b_idx * step, b_idx * step + N, dtype=np.float64)),
+                "slant_range_m": ("slant_range_time", np.arange(N, dtype=np.float64)),
+            }
+
+            ref_tree[f"bursts/{burst_id}/coreg/measurements"] = xr.Dataset(
+                {
+                    "cstack": (
+                        ["polarization", "acquisition_id", "azimuth_time", "slant_range_time"],
+                        ref_img[None, None, :, :],
+                        {POL: _annotations(f_k)},
+                    )
+                },
+                coords={**coords, "acquisition_id": [MASTER], "acquisition_date": ("acquisition_id", [MASTER])},
+            )
+            sec_tree[f"bursts/{burst_id}/coreg/measurements"] = xr.Dataset(
+                {
+                    "cstack": (
+                        ["polarization", "acquisition_id", "azimuth_time", "slant_range_time"],
+                        sec_img[None, None, :, :],
+                        {POL: _annotations(f_k)},
+                    )
+                },
+                coords={**coords, "acquisition_id": [sec_date], "acquisition_date": ("acquisition_id", [sec_date])},
+            )
+
+        esd = estimate(
+            ref_tree,
+            sec_tree,
+            poly_degree=0,
+            enable_dask=False,
+            client_options={"type": "DUMMY"},
+        )
+        y_poly = find_global_shift(esd, poly_degree=0)
+
+        assert np.max(np.abs(esd["mean_shift"].values - delta)) < 1e-4
+        assert abs(float(y_poly[sec_date].values[0, 0]) - delta) < 1e-4

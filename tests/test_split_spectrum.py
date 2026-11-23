@@ -467,3 +467,90 @@ class TestSplitSpectrum:
         poly = out.attrs["coregistration_polynomials"]["split_spectrum"]
         assert poly["description"] == "Split Spectrum"
         assert SECOND in poly["acquisitions"]
+
+    @pytest.mark.unit
+    def test_split_spectrum_2d_ionospheric_screen_1sigma_app_func_051(self, tmp_path):
+        """APP-FUNC-051 end-to-end: split_spectrum must reconstruct a spatially varying 2-D
+        ionospheric phase screen with 1-sigma accuracy better than 1e-2 rad under ideal conditions."""
+        n_az, n_rg = 64, 128
+        f0 = 5.4e9
+        f_off = 0.25
+        bw = 0.20
+        f_l = f0 - f_off
+        f_h = f0 + f_off
+
+        yy, xx = np.meshgrid(
+            np.linspace(-1.0, 1.0, n_az),
+            np.linspace(-1.0, 1.0, n_rg),
+            indexing="ij",
+        )
+        # Smooth 2-D dispersive ionospheric phase screen at carrier frequency f0 [rad]
+        phi_iono_true = 0.25 + 0.12 * yy - 0.08 * (xx**2)
+
+        # Place spectral tones at the centres of the lower and upper sub-bands (+/- f_off)
+        q_hi = 32
+        q_lo = n_rg - 32
+        r = np.arange(n_rg, dtype=np.float64)[None, :]
+
+        ref_img = np.broadcast_to(
+            np.exp(2j * np.pi * q_lo * r / n_rg) + np.exp(2j * np.pi * q_hi * r / n_rg),
+            (n_az, n_rg),
+        )
+        # Secondary image modulated by the dispersive 1/f ionospheric phase in each sub-band
+        sec_img = np.exp(2j * np.pi * q_lo * r / n_rg + 1j * phi_iono_true * (f0 / f_l)) + np.exp(
+            2j * np.pi * q_hi * r / n_rg + 1j * phi_iono_true * (f0 / f_h)
+        )
+
+        annot = _annotations()
+        annot["RadarCollection"]["TxFrequency"] = {"Min": f0, "Max": f0}
+
+        def _make_ds(acq: str, img: np.ndarray) -> xr.Dataset:
+            data = img[None, None, :, :].astype(complex)
+            return xr.Dataset(
+                {
+                    "cstack": (
+                        ["polarization", "acquisition_id", "azimuth_time", "slant_range_time"],
+                        data,
+                        {POL: annot},
+                    )
+                },
+                coords={
+                    "polarization": [POL],
+                    "acquisition_id": [acq],
+                    "acquisition_date": ("acquisition_id", [acq]),
+                    "azimuth_time": T0 + np.arange(n_az) * AZ_DT,
+                    "slant_range_time": np.arange(n_rg, dtype=np.float64),
+                    "azimuth_m": ("azimuth_time", np.arange(n_az, dtype=np.float64)),
+                    "slant_range_m": ("slant_range_time", np.arange(n_rg, dtype=np.float64)),
+                },
+            ).chunk({"azimuth_time": 16, "slant_range_time": 16})
+
+        slcs = xr.DataTree()
+        slcs["coreg/measurements"] = xr.concat(
+            [_make_ds(MASTER, ref_img), _make_ds(SECOND, sec_img)], dim="acquisition_id"
+        )
+        slcs[f"orig/{MASTER}/measurements"] = xr.Dataset(
+            {"slc": (["azimuth_time", "slant_range_time"], np.ones((4, 4), dtype=complex), {POL: annot})}
+        )
+
+        out = split_spectrum(
+            slcs,
+            ML,
+            f_off,
+            bw,
+            COHE_TH,
+            str(tmp_path),
+            False,
+            MASTER,
+            esd_poly_degree=1,
+            split_spectrum_poly_degree=2,
+            h_iono=250000.0,
+            enable_dask=False,
+            dbfile=None,
+        )
+
+        meas = out["coreg/measurements"].ds
+        rec_iono = meas.phase_iono.sel(acquisition_id=SECOND).values
+
+        err = rec_iono - phi_iono_true
+        assert float(np.std(err)) < 1e-2
