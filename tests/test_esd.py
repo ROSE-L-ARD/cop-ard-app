@@ -226,6 +226,6 @@ class TestEstimate:
         )
 
         shifts = esd["mean_shift"].values
-        np.testing.assert_allclose(np.abs(shifts), abs(delta), atol=2e-3)
+        np.testing.assert_allclose(np.abs(shifts), abs(delta), atol=1e-4)
         # With 50% of the overlap decorrelated, effective coherence weight drops by sqrt(0.5)
         np.testing.assert_allclose(esd["coherence"].values, np.sqrt(OVERLAP * 0.5), atol=0.1)

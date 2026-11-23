@@ -227,8 +227,8 @@ class TestComputePearsonCoefficient:
         dx, dy = self._run_single_patch(ref[crop, crop], sec[crop, crop], wsearch=8)
 
         # Disparity is the negative of the applied shift (tolerance accounts for ~0.1 px parabolic peak-locking)
-        np.testing.assert_allclose(dx, -shift_x, atol=0.12)
-        np.testing.assert_allclose(dy, -shift_y, atol=0.12)
+        np.testing.assert_allclose(dx, -shift_x, atol=0.1)
+        np.testing.assert_allclose(dy, -shift_y, atol=0.1)
 
     @pytest.mark.unit
     def test_radiometric_gain_and_offset_invariance(self):
@@ -244,8 +244,8 @@ class TestComputePearsonCoefficient:
         crop = slice(24, 104)
         dx, dy = self._run_single_patch(ref[crop, crop], sec_scaled[crop, crop], wsearch=6)
 
-        np.testing.assert_allclose(dx, -shift_x, atol=0.12)
-        np.testing.assert_allclose(dy, -shift_y, atol=0.12)
+        np.testing.assert_allclose(dx, -shift_x, atol=0.1)
+        np.testing.assert_allclose(dy, -shift_y, atol=0.1)
 
     @pytest.mark.unit
     def test_pixel_to_time_scaling(self):
