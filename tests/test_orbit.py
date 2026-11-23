@@ -220,6 +220,32 @@ class TestImportOrbit:
         with pytest.raises(ValueError, match="error reading orbit file"):
             import_orbit([Path(str(tmp_path / "header_only.EOF"))])
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize("otype", ["POEORB", "MOEORB", "RESORB", "PREORB"])
+    def test_import_orbit_all_esa_pod_types_app_intf_027(self, tmp_path, otype):
+        """APP-INTF-027: import_ORBIT must ingest POE, MOE, RES, and PRE orbit files and refit polynomials."""
+        # Build a standard Sentinel-1 POD filename encoding the validity interval
+        eof_name = f"S1A_OPER_AUX_{otype}_OPOD_20200101T000000_V20200101T000000_20200101T010000.EOF"
+        orbit_file = _write_orbit_file(tmp_path, eof_name, _orbit_times(), otype=otype)
+
+        # Run full external orbit ingestion and polynomial refitting on the SLC tree
+        slcs, paths = import_ORBIT(
+            _slc_tree(),
+            [ACQUISITION],
+            [orbit_file],
+            str(tmp_path),
+            multiburst=True,
+            poly_degree=1,
+            enable_dask=False,
+        )
+
+        # Verify file selection, metadata propagation, and polynomial recovery
+        assert paths == [str(tmp_path / eof_name)]
+        assert ORBIT_NODE in slcs.groups
+        assert slcs[ORBIT_NODE].attrs["orbit_type"] == otype
+        coeffs = np.asarray(slcs[ORBIT_NODE].coeffs.values)
+        assert np.allclose(coeffs[0], _expected_coeffs(1), atol=1e-9)
+
 
 class TestUpdateOrbit:
     """Unit test for cop_ard_app.orbit.update_orbit."""
